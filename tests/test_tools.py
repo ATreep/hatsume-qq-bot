@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import sys
 import types
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -250,6 +251,97 @@ class TestGetAvatarMultiCall:
         result = tools.get_avatar(111)
         assert "111" in result
         assert "错误" not in result
+
+
+# -----------------------------------------------------------------------
+# create_timer: per-task trigger frequency
+# -----------------------------------------------------------------------
+
+
+class TestCreateTimerFrequency:
+    """create_timer enforces the rolling 24-hour trigger limit."""
+
+    @staticmethod
+    def _setup_timer_dependencies(tools):
+        store = types.SimpleNamespace(
+            create_task=MagicMock(return_value=42),
+            get_triggers_for_task=lambda task_id: [],
+            validate_trigger_times=lambda times, now=None: [],
+            validate_prompt=lambda prompt: None,
+        )
+        timer_mod = types.ModuleType("hatsume.plugins.hatsume-plugin.timer")
+        timer_mod.get_store = lambda: store
+        sys.modules["hatsume.plugins.hatsume-plugin.timer"] = timer_mod
+
+        add_jobs = MagicMock()
+        executor_mod = types.ModuleType(
+            "hatsume.plugins.hatsume-plugin.timer.executor"
+        )
+        executor_mod.add_jobs_for_task = add_jobs
+        sys.modules["hatsume.plugins.hatsume-plugin.timer.executor"] = executor_mod
+
+        config_mod = sys.modules["hatsume.plugins.hatsume-plugin.config"]
+        config_mod.TIMER_MAX_TRIGGERS_PER_24_HOURS = 10
+        tools.set_current_group_id(123)
+        return store, add_jobs
+
+    @pytest.mark.asyncio
+    async def test_rejects_more_than_ten_unique_triggers_in_24_hours(self):
+        tools = _load_tools_module()
+        store, add_jobs = self._setup_timer_dependencies(tools)
+        start = 1_800_000_000
+        trigger_times = [
+            datetime.fromtimestamp(
+                start + index * 2 * 3600,
+                tz=timezone.utc,
+            ).isoformat()
+            for index in range(11)
+        ]
+
+        result = await tools.create_timer(456, "频繁提醒", trigger_times)
+
+        assert "24 小时内最多触发 10 次" in result
+        store.create_task.assert_not_called()
+        add_jobs.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_accepts_ten_unique_triggers_in_24_hours(self):
+        tools = _load_tools_module()
+        store, add_jobs = self._setup_timer_dependencies(tools)
+        start = 1_800_000_000
+        trigger_times = [
+            datetime.fromtimestamp(
+                start + index * 2 * 3600,
+                tz=timezone.utc,
+            ).isoformat()
+            for index in range(10)
+        ]
+
+        result = await tools.create_timer(456, "合理频率提醒", trigger_times)
+
+        assert "定时任务已创建（ID: 42）" in result
+        store.create_task.assert_called_once()
+        add_jobs.assert_called_once_with(42, store)
+
+    @pytest.mark.asyncio
+    async def test_duplicate_times_do_not_count_toward_frequency_limit(self):
+        tools = _load_tools_module()
+        store, _ = self._setup_timer_dependencies(tools)
+        start = 1_800_000_000
+        unique_times = [
+            datetime.fromtimestamp(
+                start + index * 2 * 3600,
+                tz=timezone.utc,
+            ).isoformat()
+            for index in range(10)
+        ]
+
+        result = await tools.create_timer(
+            456, "重复时间提醒", [*unique_times, unique_times[0]]
+        )
+
+        assert "定时任务已创建（ID: 42）" in result
+        assert len(store.create_task.call_args.kwargs["trigger_times"]) == 11
 
 
 # -----------------------------------------------------------------------

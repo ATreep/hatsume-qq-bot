@@ -569,6 +569,20 @@ async def shell_executor(shell: str, timeout: int) -> str:
 # ---------------------------------------------------------------------------
 # Timer tools
 # ---------------------------------------------------------------------------
+def _exceeds_timer_trigger_frequency(
+    trigger_times: list[float],
+    *,
+    max_triggers: int,
+    window_seconds: int,
+) -> bool:
+    """Return whether any rolling window contains too many unique triggers."""
+    unique_times = sorted(set(trigger_times))
+    for index in range(max_triggers, len(unique_times)):
+        if unique_times[index] - unique_times[index - max_triggers] < window_seconds:
+            return True
+    return False
+
+
 @tool
 async def create_timer(user_id: int, prompt: str, trigger_times: list[str]) -> str:
     """
@@ -578,8 +592,8 @@ async def create_timer(user_id: int, prompt: str, trigger_times: list[str]) -> s
     - user_id: 要通知的用户 QQ ID。如果目标是全体用户，或者明确不指定用户，则传入 0。
     - prompt: 任务内容描述。写出任务要你做什么，用自然语言。不要包含时间信息。
     - trigger_times: ISO 8601 格式的触发时间列表，带时区偏移，如 "2026-06-08T08:00:00+08:00"。
-      时间必须在当前时间之后、未来 7 天之内。如果用户要求周期触发（如"每天7点"），
-      你需要计算出未来 7 天内的所有具体触发时刻。
+      时间必须在当前时间之后、未来 30 天之内。同一个定时任务在任意连续 24 小时内最多触发 10 次。
+      如果用户要求周期触发（如"每天7点"），你需要计算出未来 30 天内的所有具体触发时刻。
 
     ## Few-shot 示例
 
@@ -590,7 +604,7 @@ async def create_timer(user_id: int, prompt: str, trigger_times: list[str]) -> s
                     trigger_times=["2026-06-08T08:00:00+08:00"])
 
     ### 示例 2：每天重复
-    用户 QQ 123456789："每天早上7点叫我起床"
+    用户 QQ 123456789："未来7天每天早上7点叫我起床"
     当前时间：2026-06-07 20:00:00+08:00
     → create_timer(user_id=123456789, prompt="叫用户起床，用精神抖擞的语气",
                     trigger_times=[
@@ -616,7 +630,7 @@ async def create_timer(user_id: int, prompt: str, trigger_times: list[str]) -> s
                     trigger_times=["2026-06-07T23:00:00+08:00"])
 
     ### 示例 5：工作日
-    用户 QQ 555666777："工作日晚上9点提醒我写日报"
+    用户 QQ 555666777："未来5个工作日晚上9点提醒我写日报"
     当前时间：2026-06-07 周六 20:00:00+08:00
     → create_timer(user_id=555666777, prompt="提醒用户写工作日报",
                     trigger_times=[
@@ -652,6 +666,17 @@ async def create_timer(user_id: int, prompt: str, trigger_times: list[str]) -> s
     errors = store.validate_trigger_times(parsed, now)
     if errors:
         return "\n".join(errors) # type: ignore
+
+    from ..config import TIMER_MAX_TRIGGERS_PER_24_HOURS
+    if _exceeds_timer_trigger_frequency(
+        parsed,
+        max_triggers=TIMER_MAX_TRIGGERS_PER_24_HOURS,
+        window_seconds=24 * 60 * 60,
+    ):
+        return (
+            "错误：同一个定时任务在任意连续 24 小时内最多触发 "
+            f"{TIMER_MAX_TRIGGERS_PER_24_HOURS} 次。"
+        )
 
     prompt_err = store.validate_prompt(prompt)
     if prompt_err:

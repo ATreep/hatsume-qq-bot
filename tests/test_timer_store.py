@@ -325,20 +325,29 @@ class TestValidateTriggerTimes:
         assert len(errors) > 0
         assert any("过期" in e or "past" in e.lower() for e in errors)
 
-    def test_rejects_beyond_7_days(self, store):
-        """validate_trigger_times rejects times beyond 7 days."""
+    def test_rejects_beyond_30_days(self, store):
+        """validate_trigger_times rejects times beyond 30 days."""
         now = time.time()
-        far_future = now + 8 * 24 * 3600
+        far_future = now + 31 * 24 * 3600
         errors = store.validate_trigger_times([far_future], now)
         assert len(errors) > 0
 
-    def test_accepts_valid_times(self, store):
-        """validate_trigger_times accepts times within 7 days."""
+    def test_accepts_times_through_30_day_boundary(self, store):
+        """validate_trigger_times accepts times through exactly 30 days."""
         now = time.time()
         errors = store.validate_trigger_times(
-            [now + 3600, now + 6 * 24 * 3600], now,
+            [now + 3600, now + 30 * 24 * 3600], now,
         )
         assert len(errors) == 0
+
+    def test_does_not_enforce_create_timer_frequency_limit(self, store):
+        """The 10-per-24-hours limit belongs only to create_timer."""
+        now = time.time()
+        trigger_times = [now + (index + 1) * 3600 for index in range(11)]
+
+        errors = store.validate_trigger_times(trigger_times, now)
+
+        assert errors == []
 
 
 class TestValidatePrompt:

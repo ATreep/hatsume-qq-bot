@@ -14,13 +14,14 @@ Creates a timer task with the given prompt and ISO 8601 trigger times.
 
 **Parameters**:
 - `prompt` (str): Task content. Max 500 chars. Do not include time info (it's in trigger_times).
-- `trigger_times` (list[str]): ISO 8601 timestamps with timezone offset. Each must be > now and <= now + 7 days.
+- `trigger_times` (list[str]): ISO 8601 timestamps with timezone offset. Each must be > now and <= now + 30 days. After deduplication, no rolling 24-hour window may contain more than 10 trigger times.
 
 **Returns**: Confirmation message with task ID and trigger times (to relay to user).
 
 **Errors**:
 - If any trigger_at is in the past: "错误：触发时间 [time] 已过期，必须是当前时间之后。"
-- If any trigger_at exceeds 7 days: "错误：触发时间 [time] 超过 7 天限制，最多只能设置未来 7 天的定时任务。"
+- If any trigger_at exceeds 30 days: "错误：触发时间 [time] 超过 30 天限制。"
+- If any rolling 24-hour window contains more than 10 unique trigger times: "错误：同一个定时任务在任意连续 24 小时内最多触发 10 次。"
 - If prompt is empty: "错误：任务内容不能为空。"
 - If prompt > 500 chars: "错误：任务内容过长（最多 500 字符）。"
 

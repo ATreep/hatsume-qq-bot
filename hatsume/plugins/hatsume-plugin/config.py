@@ -33,6 +33,7 @@ SILICONFLOW_API_KEY: str = os.environ.get("SILICONFLOW_API_KEY", "")
 OPENCODE_API_KEY: str = os.environ.get("OPENCODE_API_KEY", "")
 KEGEAI_API_KEY = os.environ.get("KEGEAI_API_KEY", "")
 ZHTH_API_KEY = os.environ.get("ZHTH_API_KEY", "")
+DS_API_KEY = os.environ.get("DS_API_KEY", "")
 
 # ---------------------------------------------------------------------------
 # Base URLs
@@ -43,13 +44,14 @@ SILICONFLOW_BASE_URL: str = "https://api.siliconflow.cn/v1"
 OPENCODE_ZEN_BASE_URL = "https://opencode.ai/zen/v1"
 KEGEAI_BASE_URL = "https://ai.kegeai.top/v1"
 ZHTH_BASE_URL = "https://api.zhehentiaohe.cn/v1"
+DS_BASE_URL = "https://api.deepseek.com"
 
 # ---------------------------------------------------------------------------
 # Model names
 # ---------------------------------------------------------------------------
 DOUBAO_2_LITE: str = "doubao-seed-2-0-lite"
 DOUBAO_2_MINI: str = "doubao-seed-2-0-mini"
-DEEPSEEK_V4_FLASH_FREE = "deepseek-v4-flash-free"
+DEEPSEEK_V4_FLASH = "deepseek-v4-flash"
 SEEDREAM_5_0_LITE: str = "doubao-seedream-5.0-lite"
 SEEDANCE_1_5: str = "doubao-seedance-1-5-pro-251215"
 SEEDANCE_1_0: str = "doubao-seedance-1-0-pro-250528"
@@ -147,7 +149,8 @@ SHELL_TIMEOUT: int = 300
 # ---------------------------------------------------------------------------
 # Timer module
 # ---------------------------------------------------------------------------
-TIMER_MAX_FUTURE_DAYS: int = 7
+TIMER_MAX_FUTURE_DAYS: int = 30
+TIMER_MAX_TRIGGERS_PER_24_HOURS: int = 10
 TIMER_TOLERANCE_MINUTES: int = 5
 
 # ---------------------------------------------------------------------------

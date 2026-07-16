@@ -190,15 +190,29 @@ class TestAdvanceModelSelection:
         self.models = _setup()
 
     def test_runtime_model_name_is_forwarded_to_standard_factory(self):
-        captured_names: list[str] = []
+        captured_calls: list[tuple[str, str | None]] = []
         sentinel = object()
 
-        def _capture(model_name: str):
-            captured_names.append(model_name)
+        def _capture(model_name: str, reasoning_effort: str | None = None):
+            captured_calls.append((model_name, reasoning_effort))
             return sentinel
 
         self.models._config.ADVANCE_MODEL_NAME = "target-model:v2"
         self.models.get_standard_api_model = _capture
 
         assert self.models.get_advance_model() is sentinel
-        assert captured_names == ["target-model:v2"]
+        assert captured_calls == [("target-model:v2", "xhigh")]
+
+    def test_reasoning_effort_is_configurable_and_disabled_with_thinking(self):
+        captured_efforts: list[str | None] = []
+
+        def _capture(model_name: str, reasoning_effort: str | None = None):
+            captured_efforts.append(reasoning_effort)
+            return object()
+
+        self.models.get_standard_api_model = _capture
+
+        self.models.get_advance_model(reasoning_effort="medium")
+        self.models.get_advance_model(thinking=False, reasoning_effort="high")
+
+        assert captured_efforts == ["medium", "none"]

@@ -10,18 +10,18 @@ from typing import Any, Literal, Optional
 
 from . import config as _config
 from .config import (
-    DEEPSEEK_V4_FLASH_FREE,
+    DEEPSEEK_V4_FLASH,
     EMBEDDING_MODEL,
     GROK_IMAGINE_IMAGE,
     GPT_5_6_LUNA,
     KEGEAI_API_KEY,
     KEGEAI_BASE_URL,
-    OPENCODE_API_KEY,
-    OPENCODE_ZEN_BASE_URL,
     SEEDANCE_1_0,
     SEEDANCE_1_5,
     SEEDREAM_5_0_LITE,
     VOLCENGINE_BASE_URL,
+    DS_BASE_URL,
+    DS_API_KEY,
     get_api_key,
     get_base_url,
 )
@@ -77,6 +77,8 @@ def _patched_convert_msg(message, **kwargs):
 _openai_base._convert_dict_to_message = _patched_convert_dict
 _openai_base._convert_message_to_dict = _patched_convert_msg
 
+ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh"]
+
 
 def get_volcengine_api_model(
     model_name: str,
@@ -93,21 +95,32 @@ def get_volcengine_api_model(
         reasoning_effort="high" if thinking and effort_enable else None,
     )
 
-def get_standard_api_model(model_name: str):
+def get_standard_api_model(
+    model_name: str,
+    reasoning_effort: ReasoningEffort | None = None,
+) -> ChatOpenAI:
     return ChatOpenAI(
         base_url=get_base_url(),
         model=model_name,
         api_key=get_api_key(),
         use_responses_api=True,
+        reasoning_effort=reasoning_effort,
         context_management=[  # pyright: ignore[reportCallIssue]
             {"type": "compaction", "compact_threshold": 900_000}
         ],
     )
 
-def get_advance_model(thinking: bool = True) -> ChatOpenAI:
+
+def get_advance_model(
+    thinking: bool = True,
+    reasoning_effort: ReasoningEffort = "xhigh",
+) -> ChatOpenAI:
     model_name = _config.ADVANCE_MODEL_NAME
     print(f"⚡ Using {model_name} for advance model")
-    return get_standard_api_model(model_name)
+    return get_standard_api_model(
+        model_name,
+        reasoning_effort=reasoning_effort if thinking else "none",
+    )
 
 
 def get_lite_model(thinking: bool = True) -> ChatOpenAI:
@@ -120,11 +133,11 @@ def get_mini_model(thinking: bool = True) -> ChatOpenAI:
 
 def get_code_model() -> ChatOpenAI:
     return ChatOpenAI(
-        base_url=OPENCODE_ZEN_BASE_URL,
-        model=DEEPSEEK_V4_FLASH_FREE,
+        base_url=DS_BASE_URL,
+        model=DEEPSEEK_V4_FLASH,
         extra_body={"thinking": {"type": "enabled"}},
         reasoning_effort="high",
-        api_key=lambda: OPENCODE_API_KEY,
+        api_key=lambda: DS_API_KEY,
     )
 
 

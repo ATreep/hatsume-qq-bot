@@ -50,7 +50,7 @@ flowchart LR
 | 编码 Agent | agent_dispatch(coding_agent, ...) | 使用代码模型与 Shell、Skill、搜索、图像工具处理复杂开发任务 | graph/agents.py、prompts.py |
 | Agent 通知 | 后台 Agent 中间输出或完成 | 注入当前对话；无活跃对话时为目标群启动新图 | graph/tools.py、graph/nodes.py、handlers/dialogue.py |
 | Agent stdin | respond_to_shell_prompt | 把用户回复交回等待输入的后台进程 | graph/tools.py、graph/agents.py |
-| 定时任务创建 | create_timer | 保存未来七天内的触发时间并注册 APScheduler 单次作业 | graph/tools.py、timer/store.py、timer/executor.py |
+| 定时任务创建 | create_timer | 保存未来 30 天内的触发时间并注册 APScheduler 单次作业；每个任务任意连续 24 小时内最多触发 10 次 | graph/tools.py、timer/store.py、timer/executor.py |
 | 定时任务管理 | /timer 或聊天工具 | 按群列出、删除、更新任务；更新会替换全部触发器 | handlers/tools.py、graph/tools.py |
 | 定时任务恢复 | Bot 连接完成 | 恢复未来触发器、补偿五分钟内漏触发、过期触发标记完成 | `timer/__init__.py`、timer/executor.py |
 | 自动创作 | auto_create 记录或 /autocreate | 固定群注入创作提示，持久化任务每 4 至 6 小时重新排期 | handlers/tools.py、timer/、prompts.py |
@@ -337,10 +337,11 @@ create_timer 的流程：
 
 1. 模型把自然语言时间换算为带时区的 ISO 8601 列表。
 2. 工具解析为 Unix 时间戳。
-3. validate_trigger_times() 要求时间晚于当前时刻且不超过未来七天。
-4. validate_prompt() 要求内容非空且不超过 500 字符。
-5. create_task() 去重时间，事务写入任务和触发器，并生成 timer_<trigger_id> 作业 ID。
-6. add_jobs_for_task() 为未来且未触发的记录注册 APScheduler DateTrigger。
+3. validate_trigger_times() 要求时间晚于当前时刻且不超过未来 30 天。
+4. create_timer 对去重后的时间执行滚动窗口检查，要求任意连续 24 小时内不超过 10 个触发时刻；该频率限制不应用于 /timer update 或 TimerStore CRUD。
+5. validate_prompt() 要求内容非空且不超过 500 字符。
+6. create_task() 去重时间，事务写入任务和触发器，并生成 timer_<trigger_id> 作业 ID。
+7. add_jobs_for_task() 为未来且未触发的记录注册 APScheduler DateTrigger。
 
 /timer update 会先取消旧作业，再替换数据库中的全部触发器并重新注册；delete 会先取消作业，再删除任务，触发器由外键级联删除。数据库与 APScheduler 的修改顺序必须一起维护。
 

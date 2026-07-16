@@ -59,7 +59,8 @@ You can also manage timers through conversation:
 
 ## Constraints
 
-- Maximum 7 days in the future
+- Maximum 30 days in the future
+- `create_timer` allows at most 10 unique triggers in any rolling 24-hour window; `/timer update` is not subject to this frequency limit
 - Prompt text max 500 characters
 - Timer chat_agent runs independently — won't interrupt ongoing conversations
 

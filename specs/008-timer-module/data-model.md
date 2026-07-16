@@ -56,7 +56,8 @@ Used for startup reload: `SELECT * FROM timer_triggers WHERE fired = 0 AND trigg
 ## Validation Rules
 
 - `trigger_at` must be > current time at creation (FR-015)
-- `trigger_at` must be <= current time + 7 days (FR-004, FR-015)
+- `trigger_at` must be <= current time + 30 days (FR-004, FR-015)
 - `prompt` must not be empty (implied)
 - `prompt` max 500 characters (edge case in spec)
 - Duplicate `trigger_at` values within the same `create_timer` call are deduplicated
+- `create_timer` allows at most 10 unique triggers in any rolling 24-hour window (FR-019); this rule is not enforced by TimerStore or `/timer update`

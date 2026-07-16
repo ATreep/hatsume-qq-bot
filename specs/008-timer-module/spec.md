@@ -13,6 +13,11 @@
 - Q: `/timer update` 的具体命令格式是什么？ → A: 位置参数格式 `/timer update <id> <新prompt> @ <新时间1>, <新时间2>, ...`。格式不对时输出帮助信息。
 - Q: 定时任务是否需要接入 Debug API？ → A: 新增 `GET /debug/api/timers` 端点，返回所有定时任务及其触发状态。同时写入 `docs/debug-api-contract.md`。
 
+### Session 2026-07-16
+
+- 定时任务的最长期限由未来 7 天扩展为未来 30 天。
+- `create_timer` 创建的同一个任务在任意连续 24 小时内最多包含 10 个去重后的触发时刻；该限制不应用于 `/timer update` 或 TimerStore CRUD。
+
 **Input**: User description: "Add a timer module. User can set a timer task with chat_agent (the time range of timers is limited in the future 7 days i.e. 7*24h). You can record every timer task in a sqlite datatable. A timer task can have multiple trigger timings (such as user wants alarm him to get up at seven everyday, but because the range is limited in the future 7d, you actually set the timer at seven everyday during the future 7 days). The timer task content is a prompt. If you will execute a timer task, input the task prompt with role system prompt into the chat_agent (has the same tools as the chat_agent in langgraph). When the nonebot starting, it will load all timer tasks in the sqlite datatable and set the timers. When a timer is triggered, it will execute the timer task prompt with role system prompt into the chat_agent. The user can also query all timer tasks, delete a timer task, or update a timer task."
 
 ## User Scenarios & Testing *(mandatory)*
@@ -28,8 +33,8 @@
 **Acceptance Scenarios**:
 
 1. **Given** 群成员在聊天中发送 "@初芽 明早8点提醒我开会"，**When** 机器人处理该消息，**Then** 机器人创建一条 trigger_at 为明天 08:00 的定时任务，提示词为"提醒用户开会"，并回复用户确认信息（包含任务 ID 和触发时间）。
-2. **Given** 群成员发送 "@初芽 每天早上7点叫我起床"，当前时间为 6/7 20:00，**When** 机器人处理该消息，**Then** 机器人创建包含 7 个触发时刻的定时任务（6/8 至 6/14 每天 07:00），并回复确认。
-3. **Given** 群成员发送触发时间已过期或超过 7 天的请求，**When** 机器人处理该消息，**Then** 机器人回复错误提示，说明时间范围限制。
+2. **Given** 群成员发送 "@初芽 每天早上7点叫我起床"，当前时间为 6/7 20:00，**When** 机器人处理该消息，**Then** 机器人创建未来 30 天内每天 07:00 的具体触发时刻，并回复确认。
+3. **Given** 群成员发送触发时间已过期或超过 30 天的请求，**When** 机器人处理该消息，**Then** 机器人回复错误提示，说明时间范围限制。
 4. **Given** 群成员发送的请求不包含定时意图，**When** 机器人处理该消息，**Then** 机器人正常进入对话流程，不创建定时任务。
 
 ---
@@ -106,6 +111,7 @@ chat_agent 在自然对话中可以通过内置 tools 执行定时任务的查�
 - 用户设置触发时间为此时此刻（0 秒后）怎么处理？→ 拒绝创建，提示时间必须在当前时间之后。
 - 一个任务的所有触发时间都已完成（fired=1）后任务本身怎么处理？→ 保留任务记录，/timer list 中显示"已完成"，用户可主动删除。
 - LLM 通过 tool call 创建的定时任务中，trigger_times 包含重复时间怎么处理？→ 去重后写入。
+- LLM 通过 create_timer 创建的同一任务在任意连续 24 小时内包含超过 10 个去重触发时间怎么处理？→ 拒绝创建；恰好 10 个允许创建。该频率限制不影响 `/timer update`。
 - 同一个到达时间的多个不同触发器同时触发怎么处理？→ 逐一顺序执行（asyncio 单线程保证不会并发冲突）。
 - 定时器触发后 chat_agent 调用失败（如 LLM API 错误）怎么处理？→ 标记 trigger 为 fired（不重试），向群发 "@用户 抱歉，定时任务执行失败"。
 - 如果用户设置任务时用了极长的 prompt（如 5000 字）怎么处理？→ 限制 prompt 最大长度（默认 500 字符），超长返回错误。
@@ -122,8 +128,8 @@ chat_agent 在自然对话中可以通过内置 tools 执行定时任务的查�
   - `/timer update <id> <新prompt> @ <新时间1>, <新时间2>, ...` — 更新指定任务（时间和 prompt 用 `@` 分隔，多个时间用逗号分隔）
   - 格式错误或省略子命令时，系统必须输出完整的使用帮助。
 - **FR-003**: 定时任务必须持久化存储，机器人重启不丢失数据。
-- **FR-004**: 定时任务的时间范围限制在未来 7 天（168 小时）之内。
-- **FR-005**: 一个定时任务可以包含多个触发时刻（如"每天早上7点"在未来 7 天内展开为多个时间点）。
+- **FR-004**: 定时任务的时间范围限制在未来 30 天（720 小时）之内。
+- **FR-005**: 一个定时任务可以包含多个触发时刻（如"每天早上7点"在未来 30 天内展开为多个时间点）。
 - **FR-006**: 定时器触发时，系统必须用独立于当前对话的 chat_agent 实例执行任务 prompt，使用与主对话 agent 相同的角色系统提示词和工具集。
 - **FR-007**: 定时器触发时，执行结果必须以群消息形式发送到对应群聊，并 @ 任务创建者。
 - **FR-008**: chat_agent 执行定时任务时，系统必须向其提供任务创建前最近 5 条群消息作为上下文。
@@ -133,10 +139,11 @@ chat_agent 在自然对话中可以通过内置 tools 执行定时任务的查�
 - **FR-012**: 系统必须提供 LLM tool：`create_timer(prompt, trigger_times)`，用于自然语言创建定时任务。LLM 负责将自然语言时间表达式计算为具体的 ISO 8601 时间（含时区）。
 - **FR-013**: 系统必须提供 LLM tool：`list_timers()`，用于列出当前群的所有定时任务。
 - **FR-014**: 系统必须提供 LLM tool：`delete_timer(task_id)`，用于删除指定的定时任务。
-- **FR-015**: `create_timer` tool 必须验证：trigger_times 中每个时间不得早于当前时间，不得超过未来 7 天。
+- **FR-015**: `create_timer` tool 必须验证：trigger_times 中每个时间不得早于当前时间，不得超过未来 30 天。
 - **FR-016**: 定时任务执行时因 LLM 调用失败等情况导致无法产出结果，系统必须在群中发送 @ 创建者的失败通知。
 - **FR-017**: 删除定时任务时必须级联删除所有关联触发器，同时取消对应的调度 job。
 - **FR-018**: 系统必须提供 `GET /debug/api/timers` 端点，返回所有群的定时任务列表（任务 ID、群 ID、创建者 ID、prompt、触发器详情及触发状态），供调试面板使用。
+- **FR-019**: `create_timer` tool 必须对去重后的 trigger_times 执行滚动窗口检查，拒绝任意连续 24 小时内超过 10 次触发的任务；该限制仅应用于 `create_timer`，不应用于 `/timer update` 或 TimerStore CRUD。
 
 ### Key Entities
 
