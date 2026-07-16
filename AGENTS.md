@@ -1,0 +1,164 @@
+# Hatsume Repository Guide
+
+Hatsume 是 Python 3.12+ 的 QQ 群聊 AI 机器人，以 NoneBot2 插件运行并通过 OneBot V11 接入。LangGraph 负责多轮对话；SQLite 保存长期记忆和定时任务；聊天工具、后台 Agent、Docker 沙盒、运行时 Skill 与媒体生成提供扩展能力。
+
+## Navigate First
+
+1. 项目简介、开源限制与 Agent 开发入口：`README.md`
+2. 完整功能、关键流程、当前架构与全部 Python 模块说明：`docs/arch.md`
+3. 运行时插件局部规则：`hatsume/plugins/hatsume-plugin/AGENTS.md`
+4. 测试规则：`tests/AGENTS.md`
+5. NoneBot 入口：`hatsume/plugins/hatsume-plugin/__init__.py`
+6. 功能规格与历史决策：`specs/`、`docs/superpowers/`
+
+## Complete Capability Map
+
+- 对话：@/关键词触发、空闲旁听、10 秒输入合并、5 分钟等待、结束检测、辅助上下文压缩、Markdown 图片化。
+- 消息：文本、回复、@、图片、多模态输入、OneBot 标准/厂商变体合并转发、嵌套 forward。
+- 记忆：显式 `[memoryrecord]` 写入、`[memorykeyman]` 关联用户、SQLite、JSON 迁移、BM25 + BGE-M3、150 天清理。
+- 工具：搜索、Shell、记忆、图片/视频生成、图片发送、QQ 头像、ACG 相册、Timer、Skill、成员搜索、Agent 派发、stdin 回复。
+- Agent：`coding_agent`、`background_shell`、实例状态、中间通知、完成通知、交互输入。
+- Timer：普通多触发任务、群内管理、重启恢复、漏触发补偿、自动创作、自动回复。
+- 社交：点赞、累计点赞排行榜、戳一戳随机图片。
+- 运维：高级模型热切换、Docker 引用计数、延迟停止、沙盒重置、Agent 监控、对话强制清理、凭证脱敏。
+
+## Source Ownership
+
+```text
+hatsume/plugins/hatsume-plugin/
+├── __init__.py       # matcher、生命周期、记忆/定时器启动
+├── config.py         # 环境变量、模型名、行为常量
+├── state.py          # ConversationState 与会话可变状态
+├── models.py         # LLM/Embedding/图片/视频模型工厂
+├── prompts.py        # 角色、图节点、Agent 与自动任务 Prompt
+├── infra.py          # Docker 与后台进程生命周期
+├── handlers/         # OneBot 边界、消息解析、命令、社交功能
+├── graph/            # LangGraph 节点、聊天工具、后台 Agent
+├── memory/           # SQLite 记忆、分词、混合检索
+├── timer/            # SQLite 定时任务、APScheduler 执行
+├── skills/           # Markdown Skill 扫描、缓存、增删
+└── utils/            # QQ JSON、成员搜索、渲染、密钥脱敏
+```
+
+### Runtime Python Modules
+
+- `hatsume/plugins/hatsume-plugin/__init__.py`：唯一 matcher 注册入口；不要在其他模块重复注册命令。
+- `hatsume/plugins/hatsume-plugin/config.py`：配置与常量所有者；文档只记录变量名，禁止记录真实值。
+- `hatsume/plugins/hatsume-plugin/state.py`：当前进程共享会话的可变状态所有者；新增状态必须定义初始化与清理。
+- `hatsume/plugins/hatsume-plugin/models.py`：模型协议兼容、运行时高级模型选择和供应商 SDK 边界。
+- `hatsume/plugins/hatsume-plugin/prompts.py`：所有长 Prompt 与动态 Prompt 构建器。
+- `hatsume/plugins/hatsume-plugin/infra.py`：Docker、前台/后台进程、stdin、引用计数与停止策略。
+- `hatsume/plugins/hatsume-plugin/handlers/__init__.py`：handlers 包说明。
+- `hatsume/plugins/hatsume-plugin/handlers/dialogue.py`：消息标准化、队列、防抖、图启动和回复发送。
+- `hatsume/plugins/hatsume-plugin/handlers/forward.py`：OneBot forward 兼容层与递归解析。
+- `hatsume/plugins/hatsume-plugin/handlers/social.py`：点赞及本地排行榜。
+- `hatsume/plugins/hatsume-plugin/handlers/tools.py`：命令和戳一戳处理；共享 `ConversationState` 由 dialogue 注入。
+- `hatsume/plugins/hatsume-plugin/graph/__init__.py`：graph 包说明。
+- `hatsume/plugins/hatsume-plugin/graph/builder.py`：图节点和条件边的唯一组装处。
+- `hatsume/plugins/hatsume-plugin/graph/nodes.py`：Human/Detect/AI/Finish、辅助队列、记忆标签和通知注入。
+- `hatsume/plugins/hatsume-plugin/graph/tools.py`：聊天工具定义与 `CHAT_TOOLS` 唯一注册点。
+- `hatsume/plugins/hatsume-plugin/graph/agents.py`：`AGENT_REGISTRY`、实例状态、内置 Agent 与 stdin 队列。
+- `hatsume/plugins/hatsume-plugin/memory/__init__.py`：记忆 API 统一导出。
+- `hatsume/plugins/hatsume-plugin/memory/engine.py`：记忆 SQLite、迁移、索引、写入、检索和每日维护。
+- `hatsume/plugins/hatsume-plugin/memory/tokenizer.py`：Jieba 词性分词规则。
+- `hatsume/plugins/hatsume-plugin/timer/__init__.py`：TimerStore 单例与启动恢复。
+- `hatsume/plugins/hatsume-plugin/timer/store.py`：任务/触发器数据模型、CRUD、特殊任务和验证。
+- `hatsume/plugins/hatsume-plugin/timer/executor.py`：APScheduler 作业、恢复补偿和图注入。
+- `hatsume/plugins/hatsume-plugin/skills/__init__.py`：SkillManager 单例。
+- `hatsume/plugins/hatsume-plugin/skills/manager.py`：frontmatter、扫描、缓存、单轮去重、保存和删除。
+- `hatsume/plugins/hatsume-plugin/utils/__init__.py`：QQ 辅助、统一消息 JSON、成员模糊搜索。
+- `hatsume/plugins/hatsume-plugin/utils/md_to_image.py`：Markdown/公式/代码到图片及链接保留。
+- `hatsume/plugins/hatsume-plugin/utils/security.py`：纯文本凭证脱敏。
+
+完整测试模块目录与逐文件说明见 `docs/arch.md` 的“测试模块索引”。
+
+## Critical Logic Invariants
+
+### Conversation
+
+1. `ConversationState` 必须继续拥有 `idle/pending/human` 消息与来源队列、图任务和限流状态。
+2. `graph/nodes.py` 的辅助队列是跨轮临时上下文；修改其生命周期时必须同步检查 finish、压缩和 `/clear`。
+3. 入口消息先在 `handlers/dialogue.py` 或 `handlers/forward.py` 归一化，领域层不得依赖特定 OneBot 实现的原始结构。
+4. Agent/Timer 标记必须绕过结束判断并进入 `ai_node`。
+5. 对话结束把本轮内容放回辅助上下文，但长期记忆只由显式 `[memoryrecord]` 写入。
+
+### Memory
+
+1. SQLite 是持久化真源；`all_mem_list`、BM25 和向量矩阵是进程内索引。
+2. 新增记忆必须同步更新内存结构和 SQLite；失败路径不得让向量行数与记忆行数静默错位。
+3. 关联用户结构固定为 `{"user_id": int, "user_name": str}`。
+4. 查询保持“两阶段候选 + BM25/Embedding 融合 + 单轮内容去重”。
+5. Schema 迁移必须幂等，并测试已有数据库而非只测空库。
+
+### Timers
+
+1. `timer_tasks` 保存任务，`timer_triggers` 保存具体触发时间；删除任务必须级联删除触发器。
+2. 数据库记录与 APScheduler 作业必须同步：创建/更新后注册，删除/更新前取消。
+3. 启动恢复必须区分未来、容忍窗口内漏触发和过期触发。
+4. 普通 Timer、auto-create、auto-response 最终都通过图注入，不另建独立聊天 Agent。
+5. `auto_response` 启动时自动保证存在；`auto_create` 当前只恢复已有记录，不自动播种首个任务。
+
+## Extension Rules
+
+### Add a Chat Tool
+
+1. 在 `hatsume/plugins/hatsume-plugin/graph/tools.py` 定义 decorated tool。
+2. 只在同文件 `CHAT_TOOLS` 注册一次。
+3. 若工具依赖群号、回复回调或限流，把生命周期接入 `configure_tool_callbacks()`。
+4. 添加工具级和图节点集成测试。
+
+### Add a Background Agent
+
+1. 在 `hatsume/plugins/hatsume-plugin/graph/agents.py` 实现 `async (task: str, user_id: int) -> str`。
+2. 使用 `register_agent()` 注册名称、描述和 handler。
+3. 测试并发实例、状态变更、通知、取消、stdin/进程清理。
+
+### Add a QQ Command or Event
+
+1. 对话入口放 `handlers/dialogue.py`，命令/事件工具放 `handlers/tools.py`，社交功能放 `handlers/social.py`。
+2. 在插件 `__init__.py` 注册 matcher，并明确 priority、block 和权限规则。
+3. 测试 handler 逻辑，不要求真实 QQ 连接。
+
+### Change Persistence
+
+1. 使用参数化 SQL、显式 commit、WAL 和幂等迁移。
+2. 更新 `docs/arch.md` 的关键逻辑说明和模块目录。
+3. 若表结构、恢复策略、队列顺序或图边变化，同时更新同一文档中的数据流说明。
+
+## Runtime Artifacts
+
+不要重写或提交：
+
+- `data/hatsume-plugin/*.db*`
+- `data/hatsume-plugin/timer_db/*.db*`
+- `data/hatsume-plugin/likes.json`
+- `data/hatsume-plugin/skills/`
+- `data/hatsume-plugin/faces/` 与生成图片
+- `hatsume/plugins/hatsume-plugin/virtual/script.sh`
+
+修改前后运行 `git status --short`，保留所有无关工作树改动。
+
+## Setup and Checks
+
+```bash
+python3.12 -m venv .venv
+.venv/bin/pip install -e '.[dev]'
+npm ci
+```
+
+必需验证：
+
+```bash
+.venv/bin/ruff check hatsume/plugins/hatsume-plugin
+npx --no-install pyright
+.venv/bin/python -m pytest tests -q
+```
+
+先运行聚焦测试，再运行完整检查。不得忽略 collection error、resource warning 或类型错误来制造绿色结果。
+
+## Git
+
+- 功能分支命名为 `NNN-feature-name`。
+- 除非用户明确要求，否则不要提交。
+- 提交前检查整个工作树，并严格遵循用户指定的 staging 范围。
+- 不得丢弃、覆盖或顺手格式化无关修改。

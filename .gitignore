@@ -1,0 +1,46 @@
+# Hidden files and directories
+# `.gitignore` is intentionally kept tracked even though this rule matches it.
+.*
+.gitignore
+.DS_Store
+.env.prod
+
+# Python bytecode, tool caches, and build outputs
+__pycache__/
+*.py[cod]
+*$py.class
+*.cache
+**/[Cc]ache/
+**/[Cc]aches/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pyright/
+.hypothesis/
+.tox/
+.nox/
+.coverage*
+coverage.xml
+htmlcov/
+*.egg-info/
+.eggs/
+build/
+dist/
+pip-wheel-metadata/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Node.js dependencies and caches
+node_modules/
+.npm/
+.pnpm-store/
+.yarn/
+
+# Runtime and private data
+/data/
+/hatsume/plugins/hatsume-plugin/virtual/hatsume-space-kali-image.tar.zst
+/hatsume/plugins/hatsume-plugin/virtual/script.sh

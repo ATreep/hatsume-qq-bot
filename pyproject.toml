@@ -1,0 +1,74 @@
+[project]
+name = "hatsume"
+version = "0.1.0"
+description = "基于 NoneBot2、OneBot V11 和 LangGraph 的 QQ 群聊 AI 机器人"
+readme = "README.md"
+requires-python = ">=3.12, <4.0"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{name = "ATreep"}]
+keywords = ["nonebot", "onebot", "qq-bot", "langgraph", "ai-agent"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+    "anyio>=4.14.2,<5",
+    "APScheduler>=3.11.3,<4",
+    "ddgs>=9.14.4,<10",
+    "jieba>=0.42.1,<1",
+    "langchain>=1.3.13,<2",
+    "langchain-community>=0.4.2,<0.5",
+    "langchain-core>=1.4.9,<2",
+    "langchain-openai>=1.3.5,<2",
+    "langgraph>=1.2.9,<2",
+    "markdown>=3.10.2,<4",
+    "nonebot2[fastapi]>=2.5.0,<3",
+    "nonebot-adapter-onebot>=2.4.6,<3",
+    "nonebot-plugin-localstore>=0.7.4,<1",
+    "nonebot-plugin-apscheduler>=0.5.0,<1",
+    "nonebot-plugin-htmlrender>=0.7.2,<1",
+    "numpy>=2.5.1,<3",
+    "openai>=2.45.0,<3",
+    "pillow>=12.3.0,<13",
+    "pymdown-extensions>=11.0.1,<12",
+    "python-dotenv>=1.2.2,<2",
+    "python-markdown-math>=0.9,<1",
+    "pyyaml>=6.0.3,<7",
+    "rank-bm25>=0.2.2,<1",
+    "requests>=2.34.2,<3",
+    "volcengine-python-sdk[ark]>=5.0.40,<6",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=9.1.1,<10",
+    "pytest-asyncio>=1.4.0,<2",
+    "ruff>=0.15.21,<1",
+]
+
+[project.urls]
+Repository = "https://github.com/ATreep/hatsume-qq-bot"
+Issues = "https://github.com/ATreep/hatsume-qq-bot/issues"
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = []
+
+[tool.nonebot]
+plugin_dirs = ["hatsume/plugins"]
+builtin_plugins = ["echo"]
+
+[tool.nonebot.adapters]
+"@local" = []
+nonebot-adapter-onebot = [{name = "OneBot V11", module_name = "nonebot.adapters.onebot.v11"}]
+
+[tool.nonebot.plugins]
+"@local" = []
+nonebot-plugin-localstore = ["nonebot_plugin_localstore"]
+nonebot-plugin-apscheduler = ["nonebot_plugin_apscheduler"]
+nonebot-plugin-htmlrender = ["nonebot_plugin_htmlrender"]

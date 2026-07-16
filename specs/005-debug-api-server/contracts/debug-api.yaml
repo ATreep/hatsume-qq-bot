@@ -1,0 +1,243 @@
+openapi: "3.0.3"
+info:
+  title: Hatsume Debug API
+  description: 初芽机器人调试面板 API — 暴露系统运行时状态变量
+  version: "1.0.0"
+
+servers:
+  - url: http://127.0.0.1:8899
+    description: 默认本地调试服务器
+
+paths:
+  /debug/api/summary:
+    get:
+      summary: 机器人整体状态摘要
+      operationId: getSummary
+      responses:
+        "200":
+          description: 状态摘要
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SummaryResponse"
+
+  /debug/api/state:
+    get:
+      summary: 核心会话状态
+      operationId: getState
+      responses:
+        "200":
+          description: ConversationState 字段
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServerStatus"
+
+  /debug/api/queues:
+    get:
+      summary: 消息队列内容摘要
+      operationId: getQueues
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+      responses:
+        "200":
+          description: 各队列快照数组
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  queues:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/QueueSnapshot"
+
+  /debug/api/memory:
+    get:
+      summary: 记忆系统状态
+      operationId: getMemory
+      responses:
+        "200":
+          description: 记忆索引和存储状态
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MemoryStatus"
+
+  /debug/api/tools:
+    get:
+      summary: 工具调用状态
+      operationId: getTools
+      responses:
+        "200":
+          description: 工具调用计数和速率限制
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ToolStatus"
+
+  /debug/api/config:
+    get:
+      summary: 运行时配置快照
+      operationId: getConfig
+      responses:
+        "200":
+          description: 配置参数和密钥状态（仅 bool 存在性）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConfigSnapshot"
+
+  /debug/api/health:
+    get:
+      summary: 健康指标
+      operationId: getHealth
+      responses:
+        "200":
+          description: 错误计数和运行时长
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthMetrics"
+
+components:
+  schemas:
+    SummaryResponse:
+      type: object
+      properties:
+        bot_status:
+          type: string
+          enum: [idle, chatting, conversing]
+        is_chatting:
+          type: boolean
+        is_graph_running:
+          type: boolean
+        uptime_seconds:
+          type: number
+        queues:
+          type: object
+          properties:
+            idle: { type: integer }
+            idle_source: { type: integer }
+            pending: { type: integer }
+            pending_source: { type: integer }
+            human: { type: integer }
+            human_source: { type: integer }
+            auxiliary: { type: integer }
+            auxiliary_source: { type: integer }
+        total_memories: { type: integer }
+        bm25_dirty: { type: boolean }
+        conversation_count: { type: integer }
+        error_count: { type: integer }
+
+    ServerStatus:
+      type: object
+      properties:
+        bot_status:
+          type: string
+          enum: [idle, chatting, conversing]
+        is_chatting: { type: boolean }
+        is_graph_running: { type: boolean }
+        has_respond_recently: { type: boolean }
+        chat_peers:
+          type: array
+          items: { type: string }
+        current_query_user_id:
+          type: integer
+          nullable: true
+        face_cooling_count: { type: integer }
+        debounce_active: { type: boolean }
+
+    QueueMessage:
+      type: object
+      properties:
+        user_name: { type: string }
+        content_preview: { type: string }
+        time: { type: string }
+        source_id: { type: string }
+
+    QueueSnapshot:
+      type: object
+      properties:
+        name: { type: string }
+        count: { type: integer }
+        messages:
+          type: array
+          items:
+            $ref: "#/components/schemas/QueueMessage"
+
+    MemoryStatus:
+      type: object
+      properties:
+        total_memories: { type: integer }
+        bm25_dirty: { type: boolean }
+        bm25_loaded: { type: boolean }
+        embedding_vectors_loaded: { type: boolean }
+        embedding_vectors_shape:
+          type: array
+          items: { type: integer }
+          nullable: true
+        tokenized_corpus_size: { type: integer }
+        last_index_rebuild_time:
+          type: number
+          nullable: true
+        active_memory_sources_count: { type: integer }
+
+    ToolStatus:
+      type: object
+      properties:
+        tool_call_counts:
+          type: object
+          additionalProperties: { type: integer }
+        capture_html_shot_used: { type: boolean }
+        generate_image_used: { type: boolean }
+        image_rate_limited: { type: boolean }
+        video_rate_limited: { type: boolean }
+        image_rate_remaining: { type: number }
+        video_rate_remaining: { type: number }
+
+    ConfigSnapshot:
+      type: object
+      properties:
+        provider: { type: string }
+        is_omni: { type: boolean }
+        advance_model_name: { type: string }
+        lite_model_name: { type: string }
+        mini_model_name: { type: string }
+        embedding_model: { type: string }
+        context_queue_len: { type: integer }
+        memory_top_k: { type: integer }
+        score_threshold: { type: number }
+        embedding_weight: { type: number }
+        memory_expiry_days: { type: integer }
+        image_rate_limit_seconds: { type: integer }
+        video_rate_limit_seconds: { type: integer }
+        message_max_length: { type: integer }
+        shell_timeout: { type: integer }
+        max_forward_depth: { type: integer }
+        keys:
+          type: object
+          properties:
+            ark: { type: boolean }
+            siliconflow: { type: boolean }
+            mimo: { type: boolean }
+            deepseek: { type: boolean }
+
+    HealthMetrics:
+      type: object
+      properties:
+        uptime_seconds: { type: number }
+        conversation_count: { type: integer }
+        message_count: { type: integer }
+        error_count: { type: integer }
+        json_parse_failures: { type: integer }
+        last_error:
+          type: string
+          nullable: true
+        last_error_at:
+          type: number
+          nullable: true

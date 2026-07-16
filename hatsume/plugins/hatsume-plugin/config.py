@@ -1,0 +1,158 @@
+"""Plugin configuration: environment, model names, behavioral constants."""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+from typing import Callable, Literal
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).resolve().parents[3] / ".env.prod")
+
+
+def _get_int_env(name: str) -> int:
+    value = os.getenv(name, "").strip()
+    return int(value) if value else 0
+
+
+# ---------------------------------------------------------------------------
+# Bot identity
+# ---------------------------------------------------------------------------
+BOT_QQ_ID: int = _get_int_env("BOT_QQ_ID")
+AGENT_QQ_EMAIL = os.getenv("AGENT_QQ_EMAIL", "")
+ADMIN_QQ_ID: str = os.getenv("ADMIN_QQ_ID", "")
+GITHUB_ACCOUNT = os.getenv("GITHUB_ACCOUNT", "")
+GITHUB_REPO = os.getenv("GITHUB_REPO", "ATreep/hatsume-qq-bot")
+
+# ---------------------------------------------------------------------------
+# API keys — read from environment
+# ---------------------------------------------------------------------------
+ARK_PLAN_API_KEY: str = os.environ.get("ARK_PLAN_API_KEY", "")
+ARK_API_KEY: str = os.environ.get("ARK_API_KEY", "")
+SILICONFLOW_API_KEY: str = os.environ.get("SILICONFLOW_API_KEY", "")
+OPENCODE_API_KEY: str = os.environ.get("OPENCODE_API_KEY", "")
+KEGEAI_API_KEY = os.environ.get("KEGEAI_API_KEY", "")
+ZHTH_API_KEY = os.environ.get("ZHTH_API_KEY", "")
+
+# ---------------------------------------------------------------------------
+# Base URLs
+# ---------------------------------------------------------------------------
+VOLCENGINE_BASE_URL: str = "https://ark.cn-beijing.volces.com/api/v3"
+VOLCENGINE_PLAN_BASE_URL: str = "https://ark.cn-beijing.volces.com/api/plan/v3"
+SILICONFLOW_BASE_URL: str = "https://api.siliconflow.cn/v1"
+OPENCODE_ZEN_BASE_URL = "https://opencode.ai/zen/v1"
+KEGEAI_BASE_URL = "https://ai.kegeai.top/v1"
+ZHTH_BASE_URL = "https://api.zhehentiaohe.cn/v1"
+
+# ---------------------------------------------------------------------------
+# Model names
+# ---------------------------------------------------------------------------
+DOUBAO_2_LITE: str = "doubao-seed-2-0-lite"
+DOUBAO_2_MINI: str = "doubao-seed-2-0-mini"
+DEEPSEEK_V4_FLASH_FREE = "deepseek-v4-flash-free"
+SEEDREAM_5_0_LITE: str = "doubao-seedream-5.0-lite"
+SEEDANCE_1_5: str = "doubao-seedance-1-5-pro-251215"
+SEEDANCE_1_0: str = "doubao-seedance-1-0-pro-250528"
+GPT_IMAGE_2 = "gpt-image-2:stable"
+GROK_IMAGINE_IMAGE = "grok-imagine-image:stable"
+GPT_5_6_LUNA_XHIGH = "gpt-5.6-luna-xhigh:stable"
+GPT_5_6_LUNA = "gpt-5.6-luna"
+GPT_5_4_NANO = "gpt-5.4-nano-2026-03-17:stable"
+GPT_5_6_TERRA = "gpt-5.6-terra"
+GPT_5_6_TERRA_K12 = "k12-gpt-5.6-terra"
+ADVANCE_MODEL_NAME: str = GPT_5_6_TERRA
+
+
+# ---------------------------------------------------------------------------
+# Embedding model
+# ---------------------------------------------------------------------------
+EMBEDDING_MODEL: str = "BAAI/bge-m3"
+
+# ---------------------------------------------------------------------------
+# Provider selection
+# ---------------------------------------------------------------------------
+PROVIDER: Literal["volc", "volc_plan", "kege", "zhth"] = "zhth"
+
+def get_base_url(
+    provider: Literal["volc", "volc_plan", "sf", "kege", "zhth"] = PROVIDER,
+) -> str:
+    match provider:
+        case "volc_plan":
+            return VOLCENGINE_PLAN_BASE_URL
+        case "volc":
+            return VOLCENGINE_BASE_URL
+        case "sf":
+            return SILICONFLOW_BASE_URL
+        case "kege":
+            return KEGEAI_BASE_URL
+        case "zhth":
+            return ZHTH_BASE_URL
+
+def get_api_key(
+    provider: Literal["volc", "volc_plan", "sf", "kege", "zhth"] = PROVIDER,
+) -> Callable[[], str]:
+    match provider:
+        case "volc_plan":
+            return lambda: ARK_PLAN_API_KEY
+        case "volc":
+            return lambda: ARK_API_KEY
+        case "sf":
+            return lambda: SILICONFLOW_API_KEY
+        case "kege":
+            return lambda: KEGEAI_API_KEY
+        case "zhth":
+            return lambda: ZHTH_API_KEY
+
+# ---------------------------------------------------------------------------
+# Behavioral constants
+# ---------------------------------------------------------------------------
+USER_INPUT_CONFIRM_DURING_TIME: int = 10
+CONTEXT_QUEUE_LEN: int = 50
+CONTEXT_QUEUE_OVERLAP_LEN: int = 7
+VIDEO_RATE_LIMIT_SECONDS: int = 60
+GENERATE_IMAGE_RATE_LIMIT_SECONDS: int = 60
+IMAGE_MAX_SIZE_BYTES: int = 9 * 1024 * 1024
+IMAGE_MAX_PIXELS: int = 36_000_000
+MESSAGE_MAX_LENGTH: int = 2000
+REPLY_MAX_LENGTH: int = 200
+MAX_FORWARD_DEPTH: int = 3
+FORWARD_API_TIMEOUT_SECONDS: int = 10
+LONG_MSG_THRESHOLD: int = 500
+
+# ---------------------------------------------------------------------------
+# Auto create timer
+# ---------------------------------------------------------------------------
+AUTO_CREATE_GROUP_ID: int = _get_int_env("AUTO_CREATE_GROUP_ID")
+# ---------------------------------------------------------------------------
+# Auto response timer
+# ---------------------------------------------------------------------------
+AUTO_RESPONSE_GROUP_ID: int = _get_int_env("AUTO_RESPONSE_GROUP_ID")
+# ---------------------------------------------------------------------------
+# Memory constants
+# ---------------------------------------------------------------------------
+MAX_MEMORY_LIMIT: int = 50
+SCORE_THRESHOLD: float = 0.1
+EMBEDDING_SIMILARITY_THRESHOLD: float = 0.4
+EMBEDDING_WEIGHT: float = 0.5
+MEMORY_EXPIRY_DAYS: int = 150
+
+# ---------------------------------------------------------------------------
+# Docker / shell
+# ---------------------------------------------------------------------------
+DOCKER_ENV_PATH: Path = Path(
+    os.getenv("DOCKER_ENV_PATH", str(Path(__file__).resolve().parent / "virtual"))
+).expanduser()
+SHELL_TIMEOUT: int = 300
+
+# ---------------------------------------------------------------------------
+# Timer module
+# ---------------------------------------------------------------------------
+TIMER_MAX_FUTURE_DAYS: int = 7
+TIMER_TOLERANCE_MINUTES: int = 5
+
+# ---------------------------------------------------------------------------
+# Skill module
+# ---------------------------------------------------------------------------
+SKILLS_DIR: Path = Path(__file__).resolve().parents[3] / "data" / "hatsume-plugin" / "skills"
+
+CONTAINER_NAME="hatsume-space-kali"

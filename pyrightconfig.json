@@ -1,0 +1,6 @@
+{
+  "exclude": ["**/tests/**", "**/__pycache__/**", "**/.venv/**", "**/node_modules/**"],
+  "reportMissingImports": false,
+  "reportMissingModuleSource": false,
+  "pythonVersion": "3.12"
+}

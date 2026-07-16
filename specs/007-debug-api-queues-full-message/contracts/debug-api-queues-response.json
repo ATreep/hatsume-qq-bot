@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "QueuesResponse",
+  "description": "GET /debug/api/queues response schema (v2 — full message detail)",
+  "type": "object",
+  "required": ["queues"],
+  "properties": {
+    "queues": {
+      "type": "array",
+      "minItems": 8,
+      "maxItems": 8,
+      "items": { "$ref": "#/$defs/QueueSnapshot" }
+    }
+  },
+  "$defs": {
+    "QueueSnapshot": {
+      "type": "object",
+      "required": ["name", "count", "messages"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "enum": [
+            "idle_queue", "idle_source_queue",
+            "pending_queue", "pending_source_queue",
+            "human_queue", "human_source_queue",
+            "auxiliary_queue", "auxiliary_source_queue"
+          ]
+        },
+        "count": { "type": "integer", "minimum": 0 },
+        "messages": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/QueueMessage" }
+        }
+      }
+    },
+    "QueueMessage": {
+      "type": "object",
+      "required": ["source_id", "type", "time", "user"],
+      "properties": {
+        "source_id": { "type": "string" },
+        "type": { "type": "string", "enum": ["message", "forward"] },
+        "time": { "type": "string" },
+        "user": { "$ref": "#/$defs/User" },
+        "content": { "description": "Full message content (type=message)" },
+        "messages": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/QueueMessage" },
+          "description": "Nested sub-messages (type=forward)"
+        },
+        "reply_to": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "required": ["user", "content"],
+              "properties": {
+                "user": { "$ref": "#/$defs/User" },
+                "content": { "type": "string" }
+              }
+            }
+          ]
+        },
+        "depth": {
+          "oneOf": [
+            { "type": "null" },
+            { "type": "integer" }
+          ]
+        }
+      }
+    },
+    "User": {
+      "type": "object",
+      "required": ["id", "name"],
+      "properties": {
+        "id": { "type": "integer" },
+        "name": { "type": "string" }
+      }
+    }
+  }
+}
