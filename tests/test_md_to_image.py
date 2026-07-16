@@ -171,6 +171,22 @@ def test_extract_links_markdown_link_with_special_chars():
     assert result == ["https://example.com/search?q=hello&lang=en#section"]
 
 
+def test_extract_links_excludes_angle_brackets_and_fullwidth_punctuation():
+    """URL delimiters and adjacent fullwidth punctuation are not extracted."""
+    result = _extract_links(
+        "链接：<https://example.com/a%20b?q=hello%20world&lang=zh#section>，下一条"
+    )
+    assert result == [
+        "https://example.com/a%20b?q=hello%20world&lang=zh#section"
+    ]
+
+
+def test_extract_links_stops_before_adjacent_chinese_text():
+    """Raw Chinese text immediately following a URL is not part of the URL."""
+    result = _extract_links("查看 https://example.com/api/v1中文说明。")
+    assert result == ["https://example.com/api/v1"]
+
+
 def test_extract_links_urls_in_code_blocks():
     """URLs inside Markdown code blocks are still extracted."""
     result = _extract_links("```\nhttps://example.com/api\n```")

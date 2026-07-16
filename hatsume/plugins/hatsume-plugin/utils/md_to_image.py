@@ -131,16 +131,20 @@ def _has_md_features(text: str) -> bool:
 
 # ---- link extraction ---------------------------------------------------------
 
-# Regex to match raw URLs (https?:// followed by non-whitespace)
-_LINK_PATTERN = re.compile(r"https?://\S+")
+# RFC 3986 ASCII characters allowed in a URL.  Keeping this explicit prevents
+# adjacent Unicode prose and delimiters such as angle brackets from being captured.
+_LINK_PATTERN = re.compile(
+    r"https?://[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]+"
+)
 
 
 def _extract_links(text: str) -> list[str]:
     """Extract all URLs from *text*.
 
     Matches both raw URLs (``https?://...``) and Markdown link targets
-    (``[label](url)``).  Returns a deduplicated, order-preserving list.
-    Returns an empty list if no links are found.
+    (``[label](url)``). URL characters are limited to the RFC 3986 ASCII set,
+    excluding adjacent angle brackets, Unicode prose, and fullwidth punctuation.
+    Returns a deduplicated, order-preserving list, or an empty list if none exist.
 
     First replaces each ``[label](url)`` with the bare URL, then extracts
     all ``https?://`` URLs in a single pass — preserving original order.
