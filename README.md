@@ -31,14 +31,12 @@ npm ci
 
 ### 让 Agent 读取项目上下文
 
-使用 Codex 时，让 Agent 按以下顺序读取：
+使用 Codex 或 Claude Code 时，让 Agent 按以下顺序读取：
 
 1. `AGENTS.md`
 2. `docs/arch.md`
 3. 修改目录内更具体的 `AGENTS.md`，例如运行时代码下的 `hatsume/plugins/hatsume-plugin/AGENTS.md` 或测试目录下的 `tests/AGENTS.md`
 4. 对应功能在 `specs/` 与 `docs/superpowers/` 中的历史规格和设计记录
-
-使用 Claude Code 时，先读取 `CLAUDE.md`，再按其中的导航读取 `AGENTS.md`、`docs/arch.md` 和目标目录规则。
 
 向 Agent 描述目标、预期行为和允许修改的范围即可。要求它先检查当前工作树与相关源码，保留无关改动，先运行聚焦测试，再执行完整检查。
 

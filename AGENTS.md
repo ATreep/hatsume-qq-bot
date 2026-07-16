@@ -2,6 +2,8 @@
 
 Hatsume 是 Python 3.12+ 的 QQ 群聊 AI 机器人，以 NoneBot2 插件运行并通过 OneBot V11 接入。LangGraph 负责多轮对话；SQLite 保存长期记忆和定时任务；聊天工具、后台 Agent、Docker 沙盒、运行时 Skill 与媒体生成提供扩展能力。
 
+`AGENTS.md` 是本仓库唯一的仓库级 Agent 指令源。Codex 和 Claude Code 都必须读取本文件及目标目录内更具体的 `AGENTS.md`；不得创建或维护 `CLAUDE.md`。
+
 ## Navigate First
 
 1. 项目简介、开源限制与 Agent 开发入口：`README.md`
@@ -127,7 +129,7 @@ hatsume/plugins/hatsume-plugin/
 
 ## Runtime Artifacts
 
-不要重写或提交：
+不要为完成代码任务而重写以下运行时文件，也不得将它们提交到 Hatsume 主仓库：
 
 - `data/hatsume-plugin/*.db*`
 - `data/hatsume-plugin/timer_db/*.db*`
@@ -135,6 +137,8 @@ hatsume/plugins/hatsume-plugin/
 - `data/hatsume-plugin/skills/`
 - `data/hatsume-plugin/faces/` 与生成图片
 - `hatsume/plugins/hatsume-plugin/virtual/script.sh`
+
+`data/hatsume-plugin` 是独立的私有 Git 仓库。只在执行下方同步提交规则时快照其已有变更；不得为了制造快照而修改运行时内容。
 
 修改前后运行 `git status --short`，保留所有无关工作树改动。
 
@@ -161,4 +165,6 @@ npx --no-install pyright
 - 功能分支命名为 `NNN-feature-name`。
 - 除非用户明确要求，否则不要提交。
 - 提交前检查整个工作树，并严格遵循用户指定的 staging 范围。
+- Claude Code 或 Codex 被明确要求为 Hatsume 主仓库创建提交时，必须在同一次操作中检查独立仓库 `data/hatsume-plugin`。如果该工作树有变更，使用 `git -C data/hatsume-plugin add -A` 并提交其当前快照；如果工作树干净，不创建空提交。
+- 主仓库与数据仓库的 staging 和提交必须保持分离；完成后报告两者的提交结果。除非用户明确要求，否则不推送任何一个仓库。
 - 不得丢弃、覆盖或顺手格式化无关修改。
