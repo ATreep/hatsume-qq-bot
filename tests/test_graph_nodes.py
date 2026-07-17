@@ -8,6 +8,7 @@ import random
 import sys
 import types
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 ROOT = Path(__file__).resolve().parents[1]
 NODES_PKG_DIR = ROOT / "hatsume/plugins/hatsume-plugin/graph"
@@ -255,6 +256,7 @@ def _load_nodes_module():
     prompts_pkg.role_sys_prompt = "test prompt"
     prompts_pkg.build_skill_prompt = lambda skills: ""
     prompts_pkg.build_agent_state_prompt = lambda: ""
+    prompts_pkg.build_character_proxy_role_prompt = lambda **kwargs: ""
     prompts_pkg.AUXILIARY_COMPACTION_PROMPT = "Summarize the following conversation."
     prompts_pkg.CHAT_END_DETECT_PROMPT = "Should this conversation end?"
     prompts_pkg.build_memory_context_prompt = lambda summary: f"Relevant memories: {summary}"
@@ -339,6 +341,15 @@ def _load_nodes_module():
         tools_mod.agent_dispatch,
         tools_mod.respond_to_shell_prompt,
     ]
+    tools_mod.get_chat_tools = lambda: list(tools_mod.CHAT_TOOLS)
+
+    character_proxy_mod = types.ModuleType(
+        "hatsume.plugins.hatsume-plugin.character_proxy"
+    )
+    character_proxy_mod.get_character_proxy = lambda: None
+    character_proxy_mod.build_active_character_proxy_role_prompt = lambda proxy: ""
+    character_proxy_mod.message_mentions_character_proxy = lambda content: False
+    sys.modules[character_proxy_mod.__name__] = character_proxy_mod
 
     tools_mod._capture_html_shot_used = False
     tools_mod._generate_image_used = False
@@ -418,6 +429,20 @@ def test_human_node_queue_is_cleared_after_processing():
     assert mock_state.human_source_queue == []
 
 
+def test_human_node_finishes_immediately_when_end_is_requested():
+    nodes = _load_nodes_module()
+    mock_state = types.SimpleNamespace(
+        human_queue=[],
+        human_source_queue=[],
+        end_requested=True,
+    )
+    nodes.bind_state(mock_state)
+
+    result = asyncio.run(nodes.human_node({"messages": []}))
+
+    assert result["messages"][0].content == "__end__"
+
+
 # -----------------------------------------------------------------------
 # Bug 2: chat_end_detect_node parenthesization (str() on result.content)
 # -----------------------------------------------------------------------
@@ -489,6 +514,32 @@ def test_chat_end_detect_node_response_extracts_model_content():
         assert result == {"messages": []}
     finally:
         random.randint = original_randint
+
+
+def test_chat_end_detect_skips_model_when_proxy_name_or_alias_is_present():
+    nodes = _load_nodes_module()
+    character_proxy = sys.modules[
+        "hatsume.plugins.hatsume-plugin.character_proxy"
+    ]
+    character_proxy.message_mentions_character_proxy = (
+        lambda content: "队长" in str(content)
+    )
+
+    class Model:
+        def invoke(self, *args, **kwargs):
+            raise AssertionError("detect model must not be called")
+
+    nodes.get_lite_model = lambda **kwargs: Model()
+    messages = [
+        MockMessage("a", "human"),
+        MockMessage("b", "ai"),
+        MockMessage("c", "human"),
+        MockMessage("队长，继续刚才的话题", "human"),
+    ]
+
+    result = asyncio.run(nodes.chat_end_detect_node({"messages": messages}))
+
+    assert result == {"messages": []}
 
 
 # -----------------------------------------------------------------------
@@ -929,6 +980,50 @@ def test_ai_node_skips_merge_when_auxiliary_queue_empty():
         nodes.create_agent = original_create_agent
 
 
+def test_ai_node_suppresses_reply_after_end_conversation_tool():
+    nodes = _load_nodes_module()
+    nodes.auxiliary_messages_queue.clear()
+    nodes.auxiliary_source_queue.clear()
+    answer = AsyncMock()
+    mock_state = types.SimpleNamespace(
+        human_queue=[],
+        human_source_queue=[],
+        is_graph_running=True,
+        current_query_user_id=None,
+        ai_answer=answer,
+        ai_answer_with_at=answer,
+        end_requested=False,
+    )
+    nodes.bind_state(mock_state)
+
+    class _FakeAgent:
+        def with_retry(self, **kw):
+            return self
+
+        async def ainvoke(self, *a, **kw):
+            mock_state.end_requested = True
+            return {
+                "messages": [
+                    types.SimpleNamespace(content="这段文本不应发送", type="ai")
+                ]
+            }
+
+    original_create_agent = nodes.create_agent
+    nodes.create_agent = lambda *a, **kw: _FakeAgent()
+    try:
+        result = asyncio.run(
+            nodes.ai_node(
+                {"messages": [types.SimpleNamespace(content="别回复", type="human")]}
+            )
+        )
+    finally:
+        nodes.create_agent = original_create_agent
+
+    answer.assert_not_awaited()
+    assert result["messages"][0].content == "这段文本不应发送"
+    assert mock_state.end_requested
+
+
 def test_ai_node_memory_query_uses_only_human_content_not_auxiliary():
     """Memory retrieval must query using only the raw human content, even
     when auxiliary_messages_queue has pending history."""
@@ -1100,22 +1195,31 @@ def test_ai_node_injects_invocation_datetime_into_system_prompt():
 
     original_create_agent = nodes.create_agent
     original_get_date = nodes.get_date
+    invocation_times = iter(
+        ["2026/07/17 09:30:45", "2026/07/17 09:31:12"]
+    )
 
     def _tracking_create_agent(model, tools, system_prompt=None, **kw):
         sys_prompts.append(system_prompt or "")
         return _FakeAgent()
 
     nodes.create_agent = _tracking_create_agent
-    nodes.get_date = lambda: "2026/07/17 09:30:45"
+    nodes.get_date = lambda: next(invocation_times)
 
     try:
-        asyncio.run(
-            nodes.ai_node(
-                {"messages": [types.SimpleNamespace(content="hello", type="human")]}
+        for _ in range(2):
+            asyncio.run(
+                nodes.ai_node(
+                    {
+                        "messages": [
+                            types.SimpleNamespace(content="hello", type="human")
+                        ]
+                    }
+                )
             )
-        )
-        assert len(sys_prompts) == 1
+        assert len(sys_prompts) == 2
         assert "# 当前日期与时间\n2026/07/17 09:30:45" in sys_prompts[0]
+        assert "# 当前日期与时间\n2026/07/17 09:31:12" in sys_prompts[1]
     finally:
         nodes.create_agent = original_create_agent
         nodes.get_date = original_get_date

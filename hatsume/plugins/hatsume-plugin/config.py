@@ -34,6 +34,8 @@ OPENCODE_API_KEY: str = os.environ.get("OPENCODE_API_KEY", "")
 KEGEAI_API_KEY = os.environ.get("KEGEAI_API_KEY", "")
 ZHTH_API_KEY = os.environ.get("ZHTH_API_KEY", "")
 DS_API_KEY = os.environ.get("DS_API_KEY", "")
+AR_API_KET = os.environ.get("AR_API_KEY", "")
+RUOLI_API_KEY = os.environ.get("ROULI_API_KEY", "")
 
 # ---------------------------------------------------------------------------
 # Base URLs
@@ -45,6 +47,9 @@ OPENCODE_ZEN_BASE_URL = "https://opencode.ai/zen/v1"
 KEGEAI_BASE_URL = "https://ai.kegeai.top/v1"
 ZHTH_BASE_URL = "https://api.zhehentiaohe.cn/v1"
 DS_BASE_URL = "https://api.deepseek.com"
+AR_BASE_URL = "https://agentrouter.org/v1"
+RUOLI_BASE_URL = "https://ruoli.dev/v1"
+
 
 # ---------------------------------------------------------------------------
 # Model names
@@ -61,8 +66,10 @@ GPT_5_6_LUNA_XHIGH = "gpt-5.6-luna-xhigh:stable"
 GPT_5_6_LUNA = "gpt-5.6-luna"
 GPT_5_4_NANO = "gpt-5.4-nano-2026-03-17:stable"
 GPT_5_6_TERRA = "gpt-5.6-terra"
-GPT_5_6_TERRA_K12 = "k12-gpt-5.6-terra"
+GPT_5_5 = "gpt-5.5"
+
 ADVANCE_MODEL_NAME: str = GPT_5_6_TERRA
+LITE_MODEL_NAME =  GPT_5_6_LUNA
 
 
 # ---------------------------------------------------------------------------
@@ -73,10 +80,10 @@ EMBEDDING_MODEL: str = "BAAI/bge-m3"
 # ---------------------------------------------------------------------------
 # Provider selection
 # ---------------------------------------------------------------------------
-PROVIDER: Literal["volc", "volc_plan", "kege", "zhth"] = "zhth"
+PROVIDER: Literal["volc", "volc_plan", "kege", "zhth", "ar", "ruoli"] = "ruoli"
 
 def get_base_url(
-    provider: Literal["volc", "volc_plan", "sf", "kege", "zhth"] = PROVIDER,
+    provider: Literal["volc", "volc_plan", "sf", "kege", "zhth", "ar", "ruoli"] = PROVIDER,
 ) -> str:
     match provider:
         case "volc_plan":
@@ -89,9 +96,13 @@ def get_base_url(
             return KEGEAI_BASE_URL
         case "zhth":
             return ZHTH_BASE_URL
+        case "ar":
+            return AR_BASE_URL
+        case "ruoli":
+            return RUOLI_BASE_URL
 
 def get_api_key(
-    provider: Literal["volc", "volc_plan", "sf", "kege", "zhth"] = PROVIDER,
+    provider: Literal["volc", "volc_plan", "sf", "kege", "zhth", "ar", "ruoli"] = PROVIDER,
 ) -> Callable[[], str]:
     match provider:
         case "volc_plan":
@@ -104,6 +115,10 @@ def get_api_key(
             return lambda: KEGEAI_API_KEY
         case "zhth":
             return lambda: ZHTH_API_KEY
+        case "ar":
+            return lambda: AR_API_KET
+        case "ruoli":
+            return lambda: RUOLI_API_KEY
 
 # ---------------------------------------------------------------------------
 # Behavioral constants

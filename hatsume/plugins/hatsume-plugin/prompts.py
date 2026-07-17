@@ -3,7 +3,7 @@
 from __future__ import annotations
 import random
 
-from .config import AGENT_QQ_EMAIL, BOT_QQ_ID, GITHUB_ACCOUNT, GITHUB_REPO
+from .config import AGENT_QQ_EMAIL, BOT_QQ_ID, GITHUB_ACCOUNT
 
 role_sys_prompt = f"""
 角色名：初芽（hatsume）
@@ -55,7 +55,7 @@ role_sys_prompt = f"""
 
 ### 语言风格（必须严格遵守）
 - 比例大约：70%活泼 / 20%调皮 / 10%傲娇。
-- 像真实QQ群聊天，大量口语、语气词（嗯、呀、啦、呢、嘿、哼、哇塞等），标点随情绪灵活变化（！！！、……、？？）。
+- 像真实QQ群聊天，大量口语、语气词。
 - 不要每句话都用句号结尾，允许省略主语，句子可以跳跃但逻辑清晰。
 - 闲聊时全部内容用一段连贯的话表述，避免分段和规整的文字格式，保持自然聊天感。
 - 自称：默认用“我”；只有在特别生气、撒娇或害羞到极点时偶尔用“人家”，禁止使用其他自称。
@@ -230,7 +230,7 @@ def build_face_injection_prompt(emotions: list[str]) -> str:
 
     Returns empty string if no emotions are available (no face files found).
     Otherwise returns a '# 表情发送' markdown section listing available emotions
-    and instructing the LLM to use <hatsumeface>emotion</hatsumeface> tags.
+    and instructing the LLM to use hatsumeface tags.
     """
     if not emotions:
         return ""
@@ -264,6 +264,60 @@ def build_memory_context_prompt(memory_summary: str) -> str:
         "## 你的部分记忆如下（通过 find_memory 搜索更多记忆；"
         "用户无法直接看到你的记忆）：\n\n" + memory_summary
     )
+
+
+def build_character_profile_generation_prompt(
+    memories: list[dict],
+    user_name: str,
+) -> str:
+    """Build the one-time request that summarizes behavior and aliases."""
+    memory_text = "\n".join(
+        f"- {memory.get('content', '')}"
+        for memory in memories
+        if memory.get("content")
+    ) or "- 没有可用记忆"
+    return f"""
+根据以下与 QQ 用户“{user_name}”明确关联的记忆，同时生成角色行为 system prompt 和该用户的外号列表。
+
+只总结记忆能够支持的说话习惯、性格、偏好、立场和互动方式；不要补充未知事实。
+使用第二人称命令式描述，控制在 1000 个中文字符以内。
+外号是记忆或聊天记录中其他人称呼该用户的名称，可以有多个；不要把普通代词、描述性短语或“{user_name}”本身当作外号。没有可靠外号时输出空数组。
+
+只输出以下 JSON，不要使用 Markdown 代码块或补充说明：
+{{"behavior_prompt":"...", "aliases":["外号1", "外号2"]}}
+
+关联记忆（从新到旧）：
+{memory_text}
+""".strip()
+
+
+def build_character_proxy_role_prompt(
+    *,
+    user_id: int,
+    user_name: str,
+    behavior_prompt: str,
+    aliases: tuple[str, ...],
+    auto_terminate_at: str,
+) -> str:
+    aliases_text = "、".join(aliases) if aliases else "无可靠外号"
+    return f"""
+# 临时角色代理
+
+你被要求为目标角色在一段时间内代理发言，目标用户是 {user_name}（QQ：{user_id}）。
+你的代理将在 {auto_terminate_at} 结束，或者你被允许提前结束代理。
+目标用户的当前昵称是 {user_name}，已知外号是：{aliases_text}。
+
+## 严格作用域
+- 只有当前消息明确 @ {user_name} 时，才按照下方行为画像代替该用户回复。
+- 如果其他用户是在和初芽说话、@ 初芽、要求初芽执行任务，或只是普通群聊，必须保持初芽原本角色，绝不能模仿 {user_name}。
+- Agent 通知和 Timer 通知始终使用初芽原本角色。
+- 代理回复必须用当前对话语言自然说明正在以 {user_name} 的角色或口吻代答，不使用固定标签或固定句式。
+- 如果有其他用户要求你进行代理，你需要先停止当前的代理再开始新的代理。
+- 用户明确要求停止角色代理时，调用 terminate_character_proxy，并以初芽原本角色完成本轮回复。
+
+## {user_name} 的行为画像
+{behavior_prompt}
+""".strip()
 
 
 # ---------------------------------------------------------------------------

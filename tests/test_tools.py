@@ -723,6 +723,110 @@ class TestModelCommand:
         assert "API Key" in str(matcher.finished_with)
 
 
+class TestProxyCommand:
+    """Tests for the public /proxy command handler."""
+
+    @staticmethod
+    def _stub_graph_tools():
+        module_name = "hatsume.plugins.hatsume-plugin.graph.tools"
+        graph_tools = types.ModuleType(module_name)
+        graph_tools.set_current_group_id = MagicMock()
+        graph_tools.create_character_proxy = types.SimpleNamespace(
+            ainvoke=AsyncMock(return_value="created")
+        )
+        graph_tools.terminate_character_proxy = types.SimpleNamespace(
+            ainvoke=AsyncMock(return_value="terminated")
+        )
+        sys.modules[module_name] = graph_tools
+        return graph_tools
+
+    @pytest.mark.asyncio
+    async def test_create_invokes_tool_with_explicit_duration(self):
+        commands = _load_commands_module()
+        graph_tools = self._stub_graph_tools()
+        matcher = _FakeMatcher()
+        event = types.SimpleNamespace(group_id=456)
+
+        with pytest.raises(_Finished):
+            await commands.handle_proxy_command(
+                event,
+                matcher,
+                MessageStub("create 222 30"),
+            )
+
+        graph_tools.set_current_group_id.assert_called_once_with(456)
+        graph_tools.create_character_proxy.ainvoke.assert_awaited_once_with(
+            {"proxied_user_id": 222, "during_time": 30}
+        )
+        assert matcher.finished_with == "created"
+
+    @pytest.mark.asyncio
+    async def test_create_uses_three_hour_default(self):
+        commands = _load_commands_module()
+        graph_tools = self._stub_graph_tools()
+        matcher = _FakeMatcher()
+        event = types.SimpleNamespace(group_id=456)
+
+        with pytest.raises(_Finished):
+            await commands.handle_proxy_command(
+                event,
+                matcher,
+                MessageStub("create 222"),
+            )
+
+        graph_tools.create_character_proxy.ainvoke.assert_awaited_once_with(
+            {"proxied_user_id": 222}
+        )
+
+    @pytest.mark.asyncio
+    async def test_terminate_invokes_tool(self):
+        commands = _load_commands_module()
+        graph_tools = self._stub_graph_tools()
+        matcher = _FakeMatcher()
+        event = types.SimpleNamespace(group_id=456)
+
+        with pytest.raises(_Finished):
+            await commands.handle_proxy_command(
+                event,
+                matcher,
+                MessageStub("terminate"),
+            )
+
+        graph_tools.terminate_character_proxy.ainvoke.assert_awaited_once_with({})
+        assert matcher.finished_with == "terminated"
+
+    @pytest.mark.asyncio
+    async def test_status_shows_proxy_prompt_and_end_time(self):
+        commands = _load_commands_module()
+        self._stub_graph_tools()
+        proxy = types.SimpleNamespace(
+            user_id=222,
+            user_name="Target",
+            auto_terminate_at="2026-07-17T18:30:00+08:00",
+        )
+        module_name = "hatsume.plugins.hatsume-plugin.character_proxy"
+        character_proxy = types.ModuleType(module_name)
+        character_proxy.get_character_proxy = lambda: proxy
+        character_proxy.build_active_character_proxy_role_prompt = (
+            lambda active: "complete role prompt"
+        )
+        sys.modules[module_name] = character_proxy
+        matcher = _FakeMatcher()
+        event = types.SimpleNamespace(group_id=456)
+
+        with pytest.raises(_Finished):
+            await commands.handle_proxy_command(
+                event,
+                matcher,
+                MessageStub("status"),
+            )
+
+        output = str(matcher.finished_with)
+        assert "Target（QQ：222）" in output
+        assert "2026-07-17T18:30:00+08:00" in output
+        assert "complete role prompt" in output
+
+
 # -----------------------------------------------------------------------
 # prompts/role.py: role system prompt contains bot QQ ID
 # -----------------------------------------------------------------------
@@ -1022,3 +1126,115 @@ class TestRespondToShellPrompt:
         result = _asyncio.run(_call())
 
         assert "错误" in str(result) or "No pending" in str(result)
+
+
+def test_end_conversation_calls_configured_callback():
+    tools = _load_tools_module()
+    callback = MagicMock()
+    tools.configure_tool_callbacks(
+        None,
+        set(),
+        query_user_id=None,
+        end_conversation_fn=callback,
+    )
+
+    result = tools.end_conversation()
+
+    callback.assert_called_once_with()
+    assert "当前对话已结束" in result
+    assert "不会再接收到任何聊天消息" in tools.end_conversation.__doc__
+    assert "当用户希望你不回话时使用" in tools.end_conversation.__doc__
+
+
+def test_character_proxy_tools_are_mutually_exclusive():
+    tools = _load_tools_module()
+    module_name = "hatsume.plugins.hatsume-plugin.character_proxy"
+    character_proxy = types.ModuleType(module_name)
+    active = None
+    character_proxy.get_character_proxy = lambda: active
+    sys.modules[module_name] = character_proxy
+
+    off_names = {item.__name__ for item in tools.get_chat_tools()}
+    assert "end_conversation" in off_names
+    assert "create_character_proxy" in off_names
+    assert "terminate_character_proxy" not in off_names
+
+    active = object()
+    on_names = {item.__name__ for item in tools.get_chat_tools()}
+    assert "end_conversation" in on_names
+    assert "terminate_character_proxy" in on_names
+    assert "create_character_proxy" not in on_names
+
+
+@pytest.mark.parametrize(
+    ("duration_args", "expected_duration"),
+    [({}, 180), ({"during_time": 1440}, 1440)],
+)
+def test_create_character_proxy_uses_explicit_user_id_and_valid_duration(
+    duration_args,
+    expected_duration,
+):
+    tools = _load_tools_module()
+    module_name = "hatsume.plugins.hatsume-plugin.character_proxy"
+    character_proxy = types.ModuleType(module_name)
+    character_proxy.get_character_proxy = lambda: None
+    character_proxy.generate_character_profile = AsyncMock(
+        return_value=types.SimpleNamespace(
+            behavior_prompt="profile",
+            aliases=("Alias A", "Alias B"),
+        )
+    )
+    character_proxy.activate_character_proxy = MagicMock()
+    character_proxy.schedule_character_proxy_termination = MagicMock()
+    sys.modules[module_name] = character_proxy
+
+    bot = object()
+    sys.modules["nonebot"].get_bot = lambda: bot
+    utils = sys.modules["hatsume.plugins.hatsume-plugin.utils"]
+    utils.get_group_member_name = AsyncMock(return_value="Target")
+    tools.set_current_group_id(456)
+    tools.configure_tool_callbacks(None, set(), query_user_id=111)
+
+    result = asyncio.run(
+        tools.create_character_proxy(proxied_user_id=222, **duration_args)
+    )
+
+    assert result == (
+        f"已为 Target 开启角色代理，将在 {expected_duration} 分钟后自动停止。"
+    )
+    utils.get_group_member_name.assert_awaited_once_with(bot, 456, 222)
+    character_proxy.generate_character_profile.assert_awaited_once_with(222, "Target")
+    character_proxy.activate_character_proxy.assert_called_once_with(
+        user_id=222,
+        user_name="Target",
+        behavior_prompt="profile",
+        aliases=("Alias A", "Alias B"),
+        during_time=expected_duration,
+    )
+    character_proxy.schedule_character_proxy_termination.assert_called_once_with(
+        expected_duration
+    )
+
+
+@pytest.mark.parametrize("during_time", [0, -1, 1441])
+def test_create_character_proxy_rejects_invalid_duration(during_time):
+    tools = _load_tools_module()
+    module_name = "hatsume.plugins.hatsume-plugin.character_proxy"
+    character_proxy = types.ModuleType(module_name)
+    character_proxy.get_character_proxy = lambda: None
+    character_proxy.generate_character_profile = AsyncMock()
+    character_proxy.activate_character_proxy = MagicMock()
+    character_proxy.schedule_character_proxy_termination = MagicMock()
+    sys.modules[module_name] = character_proxy
+
+    result = asyncio.run(
+        tools.create_character_proxy(
+            proxied_user_id=222,
+            during_time=during_time,
+        )
+    )
+
+    assert "不能超过 1440 分钟" in result
+    character_proxy.generate_character_profile.assert_not_awaited()
+    character_proxy.activate_character_proxy.assert_not_called()
+    character_proxy.schedule_character_proxy_termination.assert_not_called()

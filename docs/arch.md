@@ -1,10 +1,10 @@
 # Hatsume 架构与运行逻辑
 
-本文档以 2026-07-16 的源码为准，是完整功能、运行流程、模块职责与测试索引的当前真源。specs/ 与 docs/superpowers/ 保存功能规格和历史设计决策，不代表所有内容仍与当前实现一致。
+本文档以 2026-07-17 的源码为准，是完整功能、运行流程、模块职责与测试索引的当前真源。specs/ 与 docs/superpowers/ 保存功能规格和历史设计决策，不代表所有内容仍与当前实现一致。
 
 ## 1. 功能总览
 
-Hatsume 是一个 Python 3.12+ 的 NoneBot2 插件，通过 OneBot V11 接入 QQ 群聊。插件在单个 Bot 进程内运行，LangGraph 管理多轮对话，SQLite 保存长期记忆与定时任务，外部边界包括 OneBot、模型和媒体供应商、网络搜索、macOS Photos 与 Docker。
+Hatsume 是一个 Python 3.12+ 的 NoneBot2 插件，通过 OneBot V11 接入 QQ 群聊。插件在单个 Bot 进程内运行，LangGraph 管理多轮对话，SQLite 保存长期记忆元数据与定时任务，Milvus Lite 保存记忆向量；外部边界包括 OneBot、模型和媒体供应商、网络搜索、macOS Photos 与 Docker。
 
 ~~~mermaid
 flowchart LR
@@ -16,7 +16,7 @@ flowchart LR
     Handlers --> Graph[LangGraph 对话图]
     Graph --> Models[LLM 与媒体模型]
     Graph --> Tools[聊天工具]
-    Tools --> Memory[(记忆 SQLite 与内存索引)]
+    Tools --> Memory[(记忆 SQLite 与 Milvus Lite)]
     Tools --> Timers[(Timer SQLite 与 APScheduler)]
     Tools --> Skills[Markdown Skills]
     Tools --> Agents[后台 Agents]
@@ -36,8 +36,9 @@ flowchart LR
 | 图片理解输入 | 消息或回复中的图片 | 下载、校验大小和像素，再转为 base64 多模态输入 | handlers/dialogue.py |
 | 长文本与 Markdown 图片化 | AI 回复超过阈值或含富 Markdown | 渲染标题、代码、表格和公式，并额外保留可点击链接 | utils/md_to_image.py |
 | 长期记忆写入 | 模型输出 [memoryrecord: ...] | 提取显式记忆标签，可关联 QQ 用户后写入 SQLite | graph/nodes.py、memory/engine.py |
-| 长期记忆检索 | 每轮自动检索或 find_memory | 两阶段候选，融合 BM25 和 BGE-M3 向量分数 | graph/tools.py、memory/engine.py、memory/tokenizer.py |
-| 记忆迁移与清理 | 插件启动、每日 04:30 | 旧 JSON 迁移到 SQLite；清理 150 天前记录并重建索引 | memory/engine.py |
+| 长期记忆检索 | 每轮自动检索或 find_memory | SQLite LIKE 精确命中优先，临时 BM25 与 Milvus Lite/BGE-M3 向量结果补足 | graph/tools.py、memory/engine.py、memory/vector_store.py、memory/tokenizer.py |
+| 单一角色代理 | create_character_proxy、/proxy；群成员 @ 被代理用户或在对话中提到其昵称/外号 | 进程内只保存一个代理；一次生成行为画像与外号，@ 时激活 peer，昵称/外号命中时跳过结束检测 | character_proxy.py、handlers/dialogue.py、graph/nodes.py |
+| 记忆迁移与清理 | 显式迁移命令、每日 04:30 | SQLite legacy 向量只读复制到 Milvus；同步清理 150 天前的 SQLite/Milvus 记录 | memory/engine.py、memory/vector_store.py、scripts/migrate_memory_vectors.py |
 | 联网搜索 | search_web | 通过 DuckDuckGo 获取简要网络结果 | graph/tools.py |
 | QQ 头像 | get_avatar | 返回指定 QQ 号的头像 URL | graph/tools.py、`utils/__init__.py` |
 | 随机 ACG 图片 | 戳一戳或 random_acg_photo | 从 macOS Photos 的 ACG 相册导出，可直接发送或复制到沙盒 | handlers/tools.py、graph/tools.py |
@@ -93,6 +94,7 @@ flowchart LR
 | /resetsandbox | 管理员 | 删除并重置 Docker 沙盒 | handlers/tools.py |
 | /clear | 管理员 | 强制结束当前共享对话并清理状态队列 | handlers/tools.py |
 | /autocreate [提示词\|prod] | 管理员 | 一次性调试自动创作，不写数据库 | handlers/tools.py |
+| /proxy create <QQ号> [分钟]、/proxy terminate、/proxy status | 所有人 | 创建、终止或查看单一 RAM 角色代理、完整角色 Prompt 与自动结束时间 | handlers/tools.py、graph/tools.py |
 | /autoresponse [提示词\|prod] | 管理员 | 一次性调试自动回复，不写数据库 | handlers/tools.py |
 | 赞我、互赞、点赞 | 所有人 | 尝试点赞至当日接口上限 | handlers/social.py |
 | 戳一戳机器人 | 所有人 | 从 macOS Photos 的 ACG 相册发送随机图片 | handlers/tools.py |
@@ -221,6 +223,7 @@ stateDiagram-v2
 - 图历史超过 60 条 LangGraph 消息时，删除最早的一对 Human/AI 消息。
 - ai_node 自动检索记忆，注入 Skill 列表、运行中 Agent 状态、可选表情提示和调用时的本地日期时间，再用 CHAT_TOOLS 创建 LangChain Agent。主调用最多重试五次，递归上限为 60。
 - ai_node 临时把辅助上下文放在当前 Human 内容之前。发送前移除 memory 与 face 标签，但返回图历史的是原始 AI 文本。
+- chat_agent 调用 end_conversation 后，ConversationState 立即关闭聊天并清空 chat_peers；ai_node 抑制该轮文本和表情发送，human_node 随即路由到 finish。下一次主动提及通过 activate_chat() 解除结束标记。
 - finish_conversation_node 清理图运行标记和 Human 队列，重置 Skill 单轮去重，把 Human/AI/Tool 历史规范化后放回辅助队列，最后发送 [CONVERSATION END]。
 
 ### 3.6 回复发送
@@ -244,9 +247,9 @@ stateDiagram-v2
 
 ## 4. 记忆保存与检索
 
-### 4.1 持久化与内存索引
+### 4.1 持久化边界
 
-SQLite 是持久化真源，默认数据库为 data/hatsume-plugin/memory.db，并启用 WAL。进程内同时维护 all_mem_list、分词语料、BM25 索引和向量矩阵。
+SQLite 是记忆 ID 与元数据真源，默认数据库为 data/hatsume-plugin/memory.db，并启用 WAL。Milvus Lite 的 data/hatsume-plugin/memory_vectors.db 目录保存运行时向量，主键 `memory_id` 与 SQLite `memories.id` 完全相同，使用 1024 维 BGE-M3 向量和 cosine 距离。进程内不保留全量记忆、分词语料、BM25 索引或向量矩阵。每次向量操作串行打开 Milvus，完成后关闭 PyMilvus 客户端并停止 embedded gRPC server，避免后续 Shell/Docker fork 继承 gRPC 文件描述符。
 
 ~~~text
 memories
@@ -255,7 +258,7 @@ memories
   time        INTEGER
   people      JSON text
   tokens      JSON text
-  embedding   float32 BLOB or NULL
+  embedding   legacy float32 BLOB or NULL
   created_at  INTEGER
 ~~~
 
@@ -265,6 +268,8 @@ memories
 {"user_id": 123, "user_name": "群友"}
 ~~~
 
+SQLite 的 `embedding` 列在过渡阶段保留为迁移与回滚来源。新记忆不会写该列，运行时检索也不会读取该列。
+
 ### 4.2 显式写入
 
 Hatsume 不会把每轮聊天自动保存为长期记忆。
@@ -272,45 +277,43 @@ Hatsume 不会把每轮聊天自动保存为长期记忆。
 1. 模型在需要保存时输出 [memoryrecord: 记忆内容]。
 2. 可选的 [memorykeyman: QQ号1, QQ号2] 指定关联用户。
 3. graph/nodes.py 从发送文本中移除标签，并把 QQ 号解析为群昵称。
-4. memory/engine.py 的 add_mem() 规范化用户、记录时间、Jieba 词性分词、生成 BGE-M3 向量，并更新内存结构。
-5. 同一条记忆通过参数化 SQL 插入 memories 表并显式 commit。
+4. memory/engine.py 的 add_mem() 规范化用户、记录时间并使用参数化 SQL 写入 SQLite，显式 commit 后取得记忆 ID。
+5. 随后生成 BGE-M3 向量，并以相同 ID upsert 到 Milvus Lite。
+6. 若向量生成或 Milvus 写入失败，SQLite 元数据继续保留，精确检索和 BM25 仍可命中；显式迁移命令可再次补齐缺失向量。
 
-当前 add_mem() 先更新内存列表和索引，再尝试写 SQLite。若 Embedding 或数据库持久化失败，代码只记录异常，可能让进程内状态与 SQLite 暂时不一致；修改这条路径时必须补充失败回滚或重建测试。
-
-### 4.3 两阶段检索
+### 4.3 精确优先的混合检索
 
 自动检索发生在 ai_node，主动查询入口是 find_memory。
 
-1. 从当前 Human 内容递归提取非零 QQ 用户 ID。
-2. 多段文本分别查询，总结果上限为 50。
-3. 第一阶段查询涉及这些用户、且位于最近 **24 小时** 的记忆。memory/engine.py 的 time_window 默认值是 24 * 3600。
-4. 结果不足时，第二阶段从未排除的最新全局记录中补充候选。
-5. 候选同时计算 BM25 归一化分数与 Embedding 余弦相似度。
-6. BM25 分数高于 0.1 时加入关键词分量；归一化向量相似度达到 0.4 时加入向量分量。两部分各按 EMBEDDING_WEIGHT=0.5 融合，任一有效分量都可使候选入选。
-7. 按总分排序并截断到上限。
-8. graph/tools.py 使用当前对话的 retrieved_mem_keys 做内容级单轮去重。
-9. 结果以时间和内容格式注入专用记忆 Prompt。
+1. query 按空白拆分并按 casefold 去重。汉字计 2、ASCII 字母计 1，权重至少 5 的词启用精确子串检索；纯数字词不受长度限制。
+2. 参数化 SQLite LIKE 直接匹配 `content` 与 `people` 原始 JSON 文本，不使用 SQLite JSON 函数。纯数字只匹配带数值边界的关联 `user_id`。
+3. 每条记忆按命中的不同关键词数量降序排列，再按时间和 ID 降序排列；所有精确命中均保留，即使超过默认上限 50。
+4. 精确结果不足上限时，从相关用户最近 24 小时记录及最新全局记录中各读取至多“剩余名额的三倍”候选，临时分词并构建 BM25。
+5. 同时把完整 query 向量发送给 Milvus，读取“剩余名额的三倍”个 cosine 近邻，再按 ID 批量读取 SQLite 正文。
+6. BM25 分数高于 0.1 时加入关键词分量；归一化向量相似度达到配置阈值时加入向量分量，并按 EMBEDDING_WEIGHT 融合。
+7. 排除精确命中 ID，按融合分数、时间和 ID 排序，只补足到上限。graph/tools.py 再使用当前对话的 retrieved_mem_keys 做内容级单轮去重。
+8. 结果以时间和内容格式注入专用记忆 Prompt。
 
 ~~~mermaid
 flowchart LR
-    Query[当前文本与用户] --> Phase1[相关用户最近 24 小时候选]
-    Query --> Phase2[最新全局补充候选]
-    Phase1 --> BM25[BM25]
-    Phase1 --> Vec[Embedding]
-    Phase2 --> BM25
-    Phase2 --> Vec
-    BM25 --> Fusion[加权融合]
-    Vec --> Fusion
-    Fusion --> Dedup[内容去重]
+    Query[空格关键词与当前用户] --> Exact[SQLite LIKE 全部精确命中]
+    Query --> Bounded[SQLite 有限候选]
+    Query --> Milvus[Milvus cosine 搜索]
+    Bounded --> BM25[临时 BM25]
+    BM25 --> Fusion[按 SQLite ID 融合]
+    Milvus --> Fusion
+    Exact --> Merge[精确优先合并]
+    Fusion --> Merge
+    Merge --> Dedup[单轮内容去重]
     Dedup --> Context[记忆上下文]
 ~~~
 
 ### 4.4 启动迁移与每日维护
 
-- 插件导入时执行 init_memory_system()。
-- 若存在旧 memory.json 且 SQLite 为空，则迁移有效记录、补充分词和向量，并把旧文件改名为 memory.json.bak。
-- 每天亚洲/上海时区 04:30 删除 150 天前的记录，重新加载 SQLite，并重建 BM25 与向量矩阵。
-- Schema 初始化与 JSON 迁移必须保持幂等，并使用已有数据库测试。
+- 插件导入时执行 init_memory_system()，只初始化 SQLite、Milvus 与必要的旧 JSON 迁移，不加载全表。
+- `scripts/migrate_memory_vectors.py` 以 SQLite `mode=ro` 连接分批读取旧向量；合法 BLOB 原样 upsert，空或损坏 BLOB 从正文重建。迁移可重复执行，且不修改 memory.db 的记录或 schema。Milvus Lite 对目录加进程独占锁，因此执行显式迁移前必须停止 Bot。
+- 每天亚洲/上海时区 04:30 删除 150 天前的 SQLite 记录，并 best-effort 删除相同 ID 的 Milvus 向量，不重建进程索引。
+- Schema 与跨库迁移必须保持幂等，并使用已有数据库、部分失败和源文件哈希测试。
 
 ## 5. 定时任务
 
@@ -411,10 +414,22 @@ flowchart LR
 | membersearch | 模糊搜索当前群成员 |
 | agent_dispatch | 派发后台 Agent |
 | respond_to_shell_prompt | 回复后台进程 stdin 请求 |
+| end_conversation | 用户要求不再回复时立即结束当前对话，直到再次被主动提及 |
+| create_character_proxy(proxied_user_id, during_time=180) / terminate_character_proxy | 根据 RAM 代理开关互斥提供；持续时间以分钟计，默认 180，范围 1 至 1440，超时自动终止 |
 
-configure_tool_callbacks() 在每次新图启动时注入发送回调、当前用户、检索集合和媒体限流回调。当前群号、Agent 通知回调和部分工具计数仍是 graph/tools.py 的模块级状态；Shell 次数使用 ContextVar 区分普通聊天与 coding_agent。
+configure_tool_callbacks() 在每次新图启动时注入发送回调、当前用户、检索集合和媒体限流回调。当前群号、Agent 通知回调和部分工具计数仍是 graph/tools.py 的模块级状态；Shell 次数使用 ContextVar 区分普通聊天与 coding_agent。get_chat_tools() 根据 character_proxy.py 的单一 RAM 状态过滤生命周期工具：关闭时只有 create_character_proxy，开启时只有 terminate_character_proxy。
 
-### 6.2 Agent 注册与通知
+### 6.2 角色代理
+
+character_proxy.py 只维护一个进程级 CharacterProxy 和一个自动终止 TimerHandle，包含被代理用户 ID、昵称、外号、一次生成的行为 Prompt 和带时区的自动结束时间，不写入 SQLite，进程重启即丢失。创建时通过 memory.get_recent_user_memories() 从 SQLite 按需读取该用户最新最多 100 条关联记忆，再用一次轻量模型调用以 JSON 同时生成行为 Prompt 和外号列表，并把包含外号的完整角色 Prompt 打印到控制台；持续时间默认 180 分钟且不得超过 1440 分钟，到期或手动终止时清空对象并取消定时句柄。
+
+handlers/dialogue.py 在普通消息入口检查原始 at 消息段。其他群成员明确 @ 被代理用户时，只调用 ConversationState.activate_chat(session_id) 把该发送者加入 chat_peers；后续防抖、队列、LangGraph 和回复发送完全复用现有对话流程。
+
+chat_end_detect_node 在调用结束检测模型前解析最新规范化消息的正文；正文包含当前被代理用户昵称或任一外号时直接继续对话。匹配不扫描发送者等元数据，避免同名发送者造成误判。
+
+ai_node 在代理开启时把行为画像和带时区的自动结束时间附加到 role system prompt。该 Prompt 规定只有当前消息明确 @ 被代理用户时才模仿；与初芽的普通对话、Agent 通知和 Timer 通知继续使用初芽身份。终止工具执行后，下一次 ai_node 不再注入该 Prompt。
+
+### 6.3 Agent 注册与通知
 
 graph/agents.py 维护 AGENT_REGISTRY 和 _AGENT_STATES。
 
@@ -443,7 +458,7 @@ sequenceDiagram
 - stdin 请求使用 request_id -> asyncio.Queue 保存。聊天模型调用 respond_to_shell_prompt() 后，后台 Agent 再用代码模型把原始回复转换为最终进程输入。
 - Agent 状态与当前群号只保存在内存中，进程重启后不会恢复。
 
-### 6.3 Skill
+### 6.4 Skill
 
 - skills/manager.py 扫描配置目录中的 Markdown 文件并解析 YAML frontmatter。
 - 有效 Skill 至少需要名称、描述和正文。
@@ -451,7 +466,7 @@ sequenceDiagram
 - 同一对话内记录已加载名称，避免重复加载；finish 会重置该集合。
 - skill_create、skill_download 与 skill_remove 修改运行时 Skill 文件并清理缓存，新 Skill 无需重启即可使用。
 
-### 6.4 高级模型运行时切换
+### 6.5 高级模型运行时切换
 
 - config.py 的 ADVANCE_MODEL_NAME 保存当前进程使用的高级模型名，初始值由源码配置决定。
 - 管理员发送 /model 可查看当前值；/model <模型名> 会原样保留模型标识的大小写和标点，只去除首尾空白。
@@ -545,7 +560,8 @@ graph/tools.py、graph/agents.py、graph/nodes.py 与 handlers/dialogue.py 之�
 | hatsume/plugins/hatsume-plugin/config.py | 加载 .env.prod；定义机器人身份、模型和供应商配置读取器，以及队列、限流、图片、记忆、Timer、Docker 与 Skill 常量。文档只记录变量名，不记录真实值。 |
 | hatsume/plugins/hatsume-plugin/state.py | 定义 ConversationState。当前由 dialogue 创建一份进程级共享实例，拥有 chat_peers、idle/pending/human 队列、图任务、限流时间、工具检索集合、回调和重置方法。 |
 | hatsume/plugins/hatsume-plugin/models.py | 修补 LangChain OpenAI 消息转换以保留 reasoning_content 与 thought_signature；按运行时 ADVANCE_MODEL_NAME 创建高级模型，并创建轻量、迷你、代码模型和 Embedding；封装图片与视频供应商。 |
-| hatsume/plugins/hatsume-plugin/prompts.py | 保存角色、Skill、Agent 状态、辅助上下文压缩、表情、结束检测、记忆、编码 Agent、自动任务和后台 Shell Prompt。 |
+| hatsume/plugins/hatsume-plugin/prompts.py | 保存角色、Skill、Agent 状态、辅助上下文压缩、表情、结束检测、记忆、角色代理、编码 Agent、自动任务和后台 Shell Prompt。 |
+| hatsume/plugins/hatsume-plugin/character_proxy.py | 保存全局唯一的 RAM 角色代理，一次生成行为画像与外号，匹配正文称呼，识别 @ 目标并通过 ConversationState 激活 chat peer。 |
 | hatsume/plugins/hatsume-plugin/infra.py | 管理 Docker 容器启动、停止和删除；前台命令、后台进程、日志读取、stdin、超时、引用计数与延迟停止。 |
 | `hatsume/plugins/hatsume-plugin/handlers/__init__.py` | handlers 包说明。 |
 | hatsume/plugins/hatsume-plugin/handlers/dialogue.py | 标准化 OneBot 消息为 LLM JSON 和多模态内容；维护共享 ConversationState；路由 idle/pending/human/auxiliary；启动图并发送、重试 AI 回复；注册 Agent 与 Timer 新对话回调。 |
@@ -557,9 +573,10 @@ graph/tools.py、graph/agents.py、graph/nodes.py 与 handlers/dialogue.py 之�
 | hatsume/plugins/hatsume-plugin/graph/nodes.py | 实现 Human、Detect、AI、Finish；拥有模块级辅助队列与表情状态；处理记忆标签、Skill/Agent 注入、Agent/Timer 标记、@ 回复和对话结束。 |
 | hatsume/plugins/hatsume-plugin/graph/tools.py | 定义并唯一注册 CHAT_TOOLS；维护工具回调、当前群号、媒体与发送次数、Shell 上限；负责 Agent 派发和 stdin 回复。 |
 | hatsume/plugins/hatsume-plugin/graph/agents.py | 维护 AGENT_REGISTRY、并发实例状态和 stdin 队列；实现 coding_agent 与 background_shell。 |
-| `hatsume/plugins/hatsume-plugin/memory/__init__.py` | 统一导出记忆数据库、规范化、检索、索引和分词 API。 |
-| hatsume/plugins/hatsume-plugin/memory/engine.py | 管理 memories SQLite、JSON 迁移、内存索引、显式写入、每日过期清理、两阶段候选和 BM25/Embedding 混合评分。 |
-| hatsume/plugins/hatsume-plugin/memory/tokenizer.py | 使用 Jieba 词性标注过滤并保留有意义的中文词，供 BM25 索引和查询使用。 |
+| `hatsume/plugins/hatsume-plugin/memory/__init__.py` | 统一导出记忆数据库、规范化、检索和分词 API。 |
+| hatsume/plugins/hatsume-plugin/memory/engine.py | 管理 memories SQLite、原文 LIKE、有限候选 BM25、显式写入、JSON 迁移、Milvus 结果融合和每日过期清理。 |
+| hatsume/plugins/hatsume-plugin/memory/vector_store.py | 封装 Milvus Lite collection、ID 向量 CRUD、cosine 搜索和 SQLite 只读向量迁移。 |
+| hatsume/plugins/hatsume-plugin/memory/tokenizer.py | 使用 Jieba 词性标注过滤并保留有意义的中文词，供临时 BM25 查询使用。 |
 | `hatsume/plugins/hatsume-plugin/skills/__init__.py` | 暴露 SkillManager 并提供进程级单例。 |
 | hatsume/plugins/hatsume-plugin/skills/manager.py | 扫描 Markdown Skill、解析 frontmatter、缓存内容、单轮加载去重、保存覆盖、删除和目录创建。 |
 | `hatsume/plugins/hatsume-plugin/timer/__init__.py` | 提供 TimerStore 单例；Bot 连接后恢复触发器并确保 auto_response 存在。 |
@@ -588,14 +605,16 @@ virtual/ 下是 Shell 和 Docker 构建、启动、停止、删除脚本，不�
 | tests/test_background_shell_stdin.py | stdin 写入、换行补齐、退出进程处理与队列清理。 |
 | tests/test_background_shell_stdin_integration.py | stdin 请求、用户回复、模型转换与进程输入集成链路。 |
 | tests/test_chat_send.py | AI 文本、图片、视频发送、@、重试、分段与边界行为。 |
+| tests/test_character_proxy.py | 单一 RAM 状态、终止销毁、@ 目标 peer 激活、行为画像与身份作用域。 |
 | tests/test_container_lifecycle.py | Docker 引用计数、延迟停止、取消停止与清理。 |
 | tests/test_conversation.py | ConversationState、对话激活与结束、队列刷新和启动流程。 |
 | tests/test_forward.py | OneBot 标准与厂商变体、嵌套 forward、异常占位和用户收集。 |
 | tests/test_graph_nodes.py | Human、AI、Detect、Finish、辅助上下文、记忆标签、通知与清理。 |
 | tests/test_md_to_image.py | Markdown 特征检测、链接保留、渲染与纯文本回退。 |
 | tests/test_membersearch.py | 成员缓存、子串匹配、字符重叠排序、命令与工具结果。 |
-| tests/test_memory_db.py | 记忆 SQLite 建表、插入、查询、删除、迁移与向量读取。 |
-| tests/test_memory_utils.py | 记忆规范化、分词、添加、索引和混合检索辅助逻辑。 |
+| tests/test_memory_db.py | 记忆 SQLite 建表、原文 LIKE、精确排序、按需混合检索、写入与生命周期。 |
+| tests/test_memory_utils.py | 每日过期清理及旧检索兼容测试。 |
+| tests/test_memory_vector_store.py | 临时 Milvus Lite CRUD、cosine 搜索、只读迁移、幂等性与源 SQLite 哈希。 |
 | tests/test_models_mimo.py | 模型工厂与特定兼容模型配置。 |
 | tests/test_omni_model.py | 多模态或 Omni 模型选择判断。 |
 | tests/test_pipeline_json.py | 普通消息与合并转发统一 JSON 格式。 |
@@ -639,6 +658,7 @@ config.py 会在本地加载 .env.prod，但公开仓库不提供该文件或任
 data/ 是运行时目录，常见内容包括：
 
 - data/hatsume-plugin/memory.db*：长期记忆数据库及 WAL/SHM。
+- data/hatsume-plugin/memory_vectors.db/：Milvus Lite 记忆向量数据库目录。
 - data/hatsume-plugin/timer_db/timer.db*：定时任务数据库及 WAL/SHM。
 - data/hatsume-plugin/likes.json：累计点赞数据。
 - data/hatsume-plugin/skills/：运行时安装或创建的 Skill。

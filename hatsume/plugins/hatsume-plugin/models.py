@@ -12,10 +12,12 @@ from . import config as _config
 from .config import (
     DEEPSEEK_V4_FLASH,
     EMBEDDING_MODEL,
+    GPT_5_5,
     GROK_IMAGINE_IMAGE,
     GPT_5_6_LUNA,
     KEGEAI_API_KEY,
     KEGEAI_BASE_URL,
+    LITE_MODEL_NAME,
     SEEDANCE_1_0,
     SEEDANCE_1_5,
     SEEDREAM_5_0_LITE,
@@ -97,17 +99,17 @@ def get_volcengine_api_model(
 
 def get_standard_api_model(
     model_name: str,
-    reasoning_effort: ReasoningEffort | None = None,
+    reasoning_effort: ReasoningEffort = "medium",
 ) -> ChatOpenAI:
     return ChatOpenAI(
         base_url=get_base_url(),
         model=model_name,
         api_key=get_api_key(),
-        use_responses_api=True,
+        # use_responses_api=True,
         reasoning_effort=reasoning_effort,
-        context_management=[  # pyright: ignore[reportCallIssue]
-            {"type": "compaction", "compact_threshold": 900_000}
-        ],
+        # context_management=[  # pyright: ignore[reportCallIssue]
+        #     {"type": "compaction", "compact_threshold": 900_000}
+        # ],
     )
 
 
@@ -123,12 +125,12 @@ def get_advance_model(
     )
 
 
-def get_lite_model(thinking: bool = True) -> ChatOpenAI:
-    return get_standard_api_model(GPT_5_6_LUNA)
+def get_lite_model() -> ChatOpenAI:
+    return get_standard_api_model(LITE_MODEL_NAME)
 
 
-def get_mini_model(thinking: bool = True) -> ChatOpenAI:
-    return get_standard_api_model(GPT_5_6_LUNA)
+def get_mini_model() -> ChatOpenAI:
+    return get_standard_api_model(LITE_MODEL_NAME)
 
 
 def get_code_model() -> ChatOpenAI:

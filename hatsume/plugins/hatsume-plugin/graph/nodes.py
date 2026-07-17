@@ -38,7 +38,7 @@ from ..prompts import (
 )
 from ..skills import get_skill_manager
 from .tools import (
-    CHAT_TOOLS,
+    get_chat_tools,
     _current_group_id,
     query_memory,
     reset_capture_flag,
@@ -362,10 +362,10 @@ def append_auxiliary_message(
 
     if len(auxiliary_messages_queue) > CONTEXT_QUEUE_LEN:
         try:
-            model_chosen = get_mini_model(thinking=True)
+            model_chosen = get_mini_model()
 
             if random.randint(0, 2) == 0:
-                model_chosen = get_lite_model(thinking=True)
+                model_chosen = get_lite_model()
                 print("Using lite model for compaction...")
             else:
                 print("Using mini model for compaction...")
@@ -487,6 +487,17 @@ async def ai_node(state: MessagesState) -> dict:
     model_chosen = get_advance_model(thinking=True)
     sys_prompt = get_role_sys_prompt()
 
+    from ..character_proxy import (
+        build_active_character_proxy_role_prompt,
+        get_character_proxy,
+    )
+
+    character_proxy = get_character_proxy()
+    if character_proxy is not None:
+        sys_prompt += "\n\n" + build_active_character_proxy_role_prompt(
+            character_proxy
+        )
+
     # Inject available skills into system prompt
     skill_mgr = get_skill_manager()
     skill_list = skill_mgr.list_skills()
@@ -530,7 +541,7 @@ async def ai_node(state: MessagesState) -> dict:
 
     chat_agent = create_agent(
         model_chosen,
-        CHAT_TOOLS,
+        get_chat_tools(),
         system_prompt=sys_prompt,
     )
 
@@ -602,8 +613,13 @@ async def ai_node(state: MessagesState) -> dict:
         print("[memory] Extracted memory record from AI response")
 
     ai_text_clean = ai_text_clean.strip()
-    ai_segments = await auto_convert_text(ai_text_clean)
-    if notified_uid is not None and notified_uid != 0:
+    end_requested = bool(
+        _state is not None and getattr(_state, "end_requested", False)
+    )
+    ai_segments = [] if end_requested else await auto_convert_text(ai_text_clean)
+    if end_requested:
+        print("[end_conversation] Suppressed the final AI reply.")
+    elif notified_uid is not None and notified_uid != 0:
         at_callback = _state.ai_answer_with_at if _state else None
         if at_callback:
             for seg in ai_segments:
@@ -644,7 +660,12 @@ async def ai_node(state: MessagesState) -> dict:
 
     # ── Send face image if tag matched a valid emotion ──
     _ai_answer_cb = _get_ai_answer()
-    if face_emotion and _face_dict.get(face_emotion) and _ai_answer_cb:
+    if (
+        not end_requested
+        and face_emotion
+        and _face_dict.get(face_emotion)
+        and _ai_answer_cb
+    ):
         face_filename = random.choice(_face_dict[face_emotion])
         print(f"[face] Send face: {face_filename}")
         face_path = str(store.get_plugin_data_file("faces").absolute()) + "/" + face_filename
@@ -663,6 +684,10 @@ async def ai_node(state: MessagesState) -> dict:
 async def human_node(state: MessagesState) -> dict:
     global _last_was_auxiliary_only
     print("Enter human_node")
+
+    if _state is not None and getattr(_state, "end_requested", False):
+        _last_was_auxiliary_only = False
+        return {"messages": [SystemMessage("__end__")]}
 
     t_start = time.time()
     while not _get_human_queue():
@@ -693,6 +718,12 @@ async def chat_end_detect_node(state: MessagesState) -> dict:
     if detect_timer_notification(state) is not None:
         return {"messages": []}
 
+    from ..character_proxy import message_mentions_character_proxy
+
+    if message_mentions_character_proxy(state["messages"][-1].content):
+        print("[character_proxy] Nickname or alias detected; continuing chat.")
+        return {"messages": []}
+
     from openai import APITimeoutError
 
     response = "yes"
@@ -709,14 +740,14 @@ async def chat_end_detect_node(state: MessagesState) -> dict:
         response = "no"
     else:
         try:
-            detect_model = get_lite_model(thinking=True)
+            detect_model = get_lite_model()
 
             match random.randint(0, 3):
                 case 0:
-                    detect_model = get_lite_model(thinking=True)
+                    detect_model = get_lite_model()
                     print("Using lite model in chat_end_detect_node...")
                 case 1 | 2:
-                    detect_model = get_mini_model(thinking=True)
+                    detect_model = get_mini_model()
                     print("Using mini model in chat_end_detect_node...")
                 case 3:
                     response = "no"
@@ -765,6 +796,8 @@ async def finish_conversation_node(state: MessagesState) -> dict:
     _set_graph_running(False)
     _clear_human_queue()
     _retrieved_mem_keys.clear()
+    if _state is not None:
+        _state.end_requested = False
 
     # Container auto-stop is handled by infra's reference counting; finish does
     # not forcefully tear it down here.

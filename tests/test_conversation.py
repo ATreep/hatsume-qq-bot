@@ -91,6 +91,22 @@ def _make_state(**overrides) -> ConversationState:
     return state
 
 
+def test_request_end_conversation_blocks_until_reactivated():
+    state = _make_state()
+    state.activate_chat("group_1_2")
+
+    state.request_end_conversation()
+
+    assert not state.is_chatting
+    assert state.chat_peers == set()
+    assert state.end_requested
+
+    state.activate_chat("group_1_3")
+    assert state.is_chatting
+    assert state.chat_peers == {"group_1_3"}
+    assert not state.end_requested
+
+
 # ---------------------------------------------------------------------------
 # Import the module under test (handlers/dialogue.py)
 # ---------------------------------------------------------------------------

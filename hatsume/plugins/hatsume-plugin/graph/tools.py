@@ -19,7 +19,6 @@ from nonebot.adapters.onebot.v11 import MessageSegment
 
 from ..infra import run_cmd, ensure_container_running
 
-from ..memory import get_mem_list
 from ..memory import query_mems
 from .agents import get_agent_list, get_agent_handler
 
@@ -74,6 +73,7 @@ _ai_answer_with_at: Any = None
 _ai_answer: Any = None
 _retrieved_mem_keys: set[str] = set()
 _current_memory_query_user_id: int | None = None
+_end_conversation_callback: Callable[[], None] | None = None
 _generate_video_used: bool = False
 def _not_rate_limited() -> bool:
     return False
@@ -130,14 +130,17 @@ def configure_tool_callbacks(
     update_video_time: Callable[[], None] | None = None,
     is_generate_image_rate_limited: Callable[[], bool] | None = None,
     update_generate_image_time: Callable[[], None] | None = None,
+    end_conversation_fn: Callable[[], None] | None = None,
 ) -> None:
     global _ai_answer_with_at, _ai_answer, _retrieved_mem_keys, _current_memory_query_user_id
     global _is_video_rate_limited, _update_video_time
     global _is_generate_image_rate_limited, _update_generate_image_time
+    global _end_conversation_callback
     _ai_answer_with_at = answer_with_at
     _ai_answer = answer_fn
     _retrieved_mem_keys = retrieved_keys
     _current_memory_query_user_id = query_user_id
+    _end_conversation_callback = end_conversation_fn
     if is_video_rate_limited is not None:
         _is_video_rate_limited = is_video_rate_limited
     if update_video_time is not None:
@@ -170,22 +173,19 @@ def query_memory(query: str, user_ids: list[int] | None = None, max_results: int
     """Shared memory query logic."""
     from datetime import datetime
 
-    all_mem_keys = get_mem_list()
     memory_summary = ""
+    results = query_mems(
+        str(query), user_ids=user_ids, max_limit=max_results
+    )
+    results = [(c, t) for c, t in results if c not in _retrieved_mem_keys]
+    _retrieved_mem_keys.update(c for c, _ in results)
 
-    if len(all_mem_keys) > 0:
-        results = query_mems(
-            str(query), user_ids=user_ids, max_limit=max_results
-        )
-        results = [(c, t) for c, t in results if c not in _retrieved_mem_keys]
-        _retrieved_mem_keys.update(c for c, _ in results)
-
-        if len(results) > 0:
-            formatted = []
-            for content, ts in results:
-                dt = datetime.fromtimestamp(ts).strftime("%Y/%m/%d %H:%M:%S")
-                formatted.append(f"- ({dt}) {content}")
-            memory_summary = "\n".join(formatted)
+    if len(results) > 0:
+        formatted = []
+        for content, ts in results:
+            dt = datetime.fromtimestamp(ts).strftime("%Y/%m/%d %H:%M:%S")
+            formatted.append(f"- ({dt}) {content}")
+        memory_summary = "\n".join(formatted)
 
     if memory_summary != "":
         print("Memory search results: \n" + memory_summary)
@@ -1108,6 +1108,80 @@ async def respond_to_shell_prompt(
     return f"✅ 已成功向后台进程发送 stdin 输入 (request_id={request_id})。"
 
 
+@tool
+async def create_character_proxy(
+    proxied_user_id: int,
+    during_time: int = 180,
+) -> str:
+    """
+    开始为指定用户代理发言。
+    开启后，其他用户 @ 该用户时，你也会收到通知。
+    仅当用户明确要求你代替自己回复其他群成员时调用。
+
+    Args:
+        proxied_user_id: 被代理群成员的 QQ 用户 ID。
+        during_time: 代理持续时间，单位为分钟，默认 180 分钟，最长 1440 分钟。
+    """
+    if during_time <= 0 or during_time > 24 * 60:
+        return "代理持续时间必须大于 0 分钟且不能超过 1440 分钟。"
+
+    from nonebot import get_bot
+
+    from ..character_proxy import (
+        activate_character_proxy,
+        generate_character_profile,
+        get_character_proxy,
+        schedule_character_proxy_termination,
+    )
+    from ..utils import get_group_member_name
+
+    if get_character_proxy() is not None:
+        return "角色代理已经开启；当前状态下只能先终止它。"
+    if _current_group_id is None:
+        return "无法确定当前群，未开启角色代理。"
+
+    user_name = await get_group_member_name(
+        get_bot(), _current_group_id, proxied_user_id
+    )
+    profile = await generate_character_profile(proxied_user_id, user_name)
+    activate_character_proxy(
+        user_id=proxied_user_id,
+        user_name=user_name,
+        behavior_prompt=profile.behavior_prompt,
+        aliases=profile.aliases,
+        during_time=during_time,
+    )
+    schedule_character_proxy_termination(during_time)
+    return f"已为 {user_name} 开启角色代理，将在 {during_time} 分钟后自动停止。"
+
+
+@tool
+def terminate_character_proxy() -> str:
+    """终止对当前用户的代理发言。
+    结束后，其他用户 @ 该用户时你将不会收到通知。
+    仅当用户明确要求停止角色代理时调用。
+    """
+    from ..character_proxy import terminate_character_proxy_state
+
+    previous = terminate_character_proxy_state()
+    if previous is None:
+        return "当前没有开启角色代理。"
+    return f"已停止 {previous.user_name} 的角色代理。"
+
+
+@tool
+def end_conversation() -> str:
+    """结束当前对话。
+
+    执行此工具后，你不会再接收到任何聊天消息，直到有人主动提及你。
+    当用户希望你不回话时使用。
+    """
+    if _end_conversation_callback is None:
+        return "当前对话无法结束：对话状态尚未初始化。"
+    _end_conversation_callback()
+    return "当前对话已结束；不要继续回复，等待有人主动提及你。"
+
+
 # Single registration point consumed by graph.nodes. Add new chat-facing tools here.
 CHAT_TOOLS = [
     search_web,
@@ -1128,4 +1202,19 @@ CHAT_TOOLS = [
     membersearch,
     agent_dispatch,
     respond_to_shell_prompt,
+    create_character_proxy,
+    terminate_character_proxy,
+    end_conversation,
 ]
+
+
+def get_chat_tools() -> list[Any]:
+    """Expose exactly one character-proxy lifecycle tool for current state."""
+    from ..character_proxy import get_character_proxy
+
+    unavailable = (
+        terminate_character_proxy
+        if get_character_proxy() is None
+        else create_character_proxy
+    )
+    return [tool_item for tool_item in CHAT_TOOLS if tool_item is not unavailable]

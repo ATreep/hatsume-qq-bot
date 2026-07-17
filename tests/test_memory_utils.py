@@ -366,12 +366,9 @@ def test_add_mem_persists_deduplicated_people(tmp_path: Path):
 
 
 def test_init_tokenized_corpus_expires_old_memories_from_db(tmp_path: Path):
-    """Daily maintenance deletes expired memories and reloads in-memory state."""
+    """Daily maintenance deletes expired SQLite rows and matching Milvus IDs."""
     embedding_model = EmbeddingModelStub({"old-memory": [0.2, 0.8], "recent-memory": [0.5, 0.5]})
     _tok, store, retrieval, _cfg, _memory_file = load_memory_modules(tmp_path, embedding_model)
-
-    retrieval.embedding_model = embedding_model
-    retrieval.set_embedding_vectors(None)
 
     conn = store._get_db()
     old_time = int(time.time()) - 10_000_000  # Well beyond 30-day retention
@@ -386,11 +383,17 @@ def test_init_tokenized_corpus_expires_old_memories_from_db(tmp_path: Path):
         ("recent-memory", recent_time, '[]', '[]')
     )
     conn.commit()
+    deleted_vector_ids: list[int] = []
+    store._get_vector_store = lambda: types.SimpleNamespace(
+        delete=lambda memory_ids: deleted_vector_ids.extend(memory_ids),
+        close=lambda: None,
+    )
 
     store.init_tokenized_corpus()
 
-    assert len(store.all_mem_list) == 1
-    assert store.all_mem_list[0]["content"] == "recent-memory"
+    rows = conn.execute("SELECT id, content FROM memories ORDER BY id").fetchall()
+    assert rows == [(2, "recent-memory")]
+    assert deleted_vector_ids == [1]
 
 
 @pytest.mark.skip(reason="Pre-existing test infrastructure gap — ensure_embedding_model requires real credentials in engine.py")

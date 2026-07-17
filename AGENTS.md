@@ -1,6 +1,6 @@
 # Hatsume Repository Guide
 
-Hatsume 是 Python 3.12+ 的 QQ 群聊 AI 机器人，以 NoneBot2 插件运行并通过 OneBot V11 接入。LangGraph 负责多轮对话；SQLite 保存长期记忆和定时任务；聊天工具、后台 Agent、Docker 沙盒、运行时 Skill 与媒体生成提供扩展能力。
+Hatsume 是 Python 3.12+ 的 QQ 群聊 AI 机器人，以 NoneBot2 插件运行并通过 OneBot V11 接入。LangGraph 负责多轮对话；SQLite 保存长期记忆元数据和定时任务，Milvus Lite 保存记忆向量；聊天工具、后台 Agent、Docker 沙盒、运行时 Skill 与媒体生成提供扩展能力。
 
 `AGENTS.md` 是本仓库唯一的仓库级 Agent 指令源。Codex 和 Claude Code 都必须读取本文件及目标目录内更具体的 `AGENTS.md`；不得创建或维护 `CLAUDE.md`。
 
@@ -17,7 +17,7 @@ Hatsume 是 Python 3.12+ 的 QQ 群聊 AI 机器人，以 NoneBot2 插件运行�
 
 - 对话：@/关键词触发、空闲旁听、10 秒输入合并、5 分钟等待、结束检测、辅助上下文压缩、Markdown 图片化。
 - 消息：文本、回复、@、图片、多模态输入、OneBot 标准/厂商变体合并转发、嵌套 forward。
-- 记忆：显式 `[memoryrecord]` 写入、`[memorykeyman]` 关联用户、SQLite、JSON 迁移、BM25 + BGE-M3、150 天清理。
+- 记忆：显式 `[memoryrecord]` 写入、`[memorykeyman]` 关联用户、SQLite LIKE、临时 BM25、Milvus Lite + BGE-M3、150 天清理。
 - 工具：搜索、Shell、记忆、图片/视频生成、图片发送、QQ 头像、ACG 相册、Timer、Skill、成员搜索、Agent 派发、stdin 回复。
 - Agent：`coding_agent`、`background_shell`、实例状态、中间通知、完成通知、交互输入。
 - Timer：普通多触发任务、群内管理、重启恢复、漏触发补偿、自动创作、自动回复。
@@ -36,7 +36,8 @@ hatsume/plugins/hatsume-plugin/
 ├── infra.py          # Docker 与后台进程生命周期
 ├── handlers/         # OneBot 边界、消息解析、命令、社交功能
 ├── graph/            # LangGraph 节点、聊天工具、后台 Agent
-├── memory/           # SQLite 记忆、分词、混合检索
+├── memory/           # SQLite 元数据、Milvus 向量、分词与混合检索
+├── character_proxy.py # 单一 RAM 角色代理、行为画像与 peer 激活
 ├── timer/            # SQLite 定时任务、APScheduler 执行
 ├── skills/           # Markdown Skill 扫描、缓存、增删
 └── utils/            # QQ JSON、成员搜索、渲染、密钥脱敏
@@ -61,8 +62,10 @@ hatsume/plugins/hatsume-plugin/
 - `hatsume/plugins/hatsume-plugin/graph/tools.py`：聊天工具定义与 `CHAT_TOOLS` 唯一注册点。
 - `hatsume/plugins/hatsume-plugin/graph/agents.py`：`AGENT_REGISTRY`、实例状态、内置 Agent 与 stdin 队列。
 - `hatsume/plugins/hatsume-plugin/memory/__init__.py`：记忆 API 统一导出。
-- `hatsume/plugins/hatsume-plugin/memory/engine.py`：记忆 SQLite、迁移、索引、写入、检索和每日维护。
+- `hatsume/plugins/hatsume-plugin/memory/engine.py`：记忆 SQLite、按需 BM25、写入、检索和每日维护。
+- `hatsume/plugins/hatsume-plugin/memory/vector_store.py`：Milvus Lite 向量 CRUD、搜索和只读 SQLite 向量迁移。
 - `hatsume/plugins/hatsume-plugin/memory/tokenizer.py`：Jieba 词性分词规则。
+- `hatsume/plugins/hatsume-plugin/character_proxy.py`：全局唯一 RAM 角色代理、自动终止、记忆画像生成和 @ 目标 peer 激活。
 - `hatsume/plugins/hatsume-plugin/timer/__init__.py`：TimerStore 单例与启动恢复。
 - `hatsume/plugins/hatsume-plugin/timer/store.py`：任务/触发器数据模型、CRUD、特殊任务和验证。
 - `hatsume/plugins/hatsume-plugin/timer/executor.py`：APScheduler 作业、恢复补偿和图注入。
@@ -83,14 +86,19 @@ hatsume/plugins/hatsume-plugin/
 3. 入口消息先在 `handlers/dialogue.py` 或 `handlers/forward.py` 归一化，领域层不得依赖特定 OneBot 实现的原始结构。
 4. Agent/Timer 标记必须绕过结束判断并进入 `ai_node`。
 5. 对话结束把本轮内容放回辅助上下文，但长期记忆只由显式 `[memoryrecord]` 写入。
+6. 角色代理只允许一个进程级 RAM 对象，不得持久化、不得新增任务管理器；@ 被代理用户时只通过 `ConversationState.activate_chat()` 加入 peer 并复用现有图流程。
+7. 角色代理关闭时 chat_agent 只暴露 `create_character_proxy`，开启时只暴露 `terminate_character_proxy`；行为 Prompt 与外号仅在 RAM 中保存并仅在开启期间注入 role system prompt；最新消息正文命中代理昵称或外号时跳过结束检测。
+8. `end_conversation` 必须通过 `ConversationState` 停止消息投递并让当前图尽快进入 finish；调用后的当前轮不得继续发送文本或表情，直到新的主动提及重新激活对话。
 
 ### Memory
 
-1. SQLite 是持久化真源；`all_mem_list`、BM25 和向量矩阵是进程内索引。
-2. 新增记忆必须同步更新内存结构和 SQLite；失败路径不得让向量行数与记忆行数静默错位。
+1. SQLite 是记忆 ID、正文、时间与关联用户的持久化真源；Milvus Lite 以同一 SQLite ID 保存运行时检索向量。
+2. 不得把全部记忆、分词语料、BM25 或向量矩阵常驻内存；关键词从 SQLite 按需查询，BM25 只为有限候选临时构建。
 3. 关联用户结构固定为 `{"user_id": int, "user_name": str}`。
-4. 查询保持“两阶段候选 + BM25/Embedding 融合 + 单轮内容去重”。
-5. Schema 迁移必须幂等，并测试已有数据库而非只测空库。
+4. 查询必须先保留全部合格的 SQLite LIKE 精确命中，再用临时 BM25 与 Milvus cosine 结果补足，并保持单轮内容去重。
+5. 现阶段 SQLite 的 legacy `embedding` 列仅作迁移回滚来源；新写入和运行时查询不得读写该列。
+6. 跨库迁移必须使用 SQLite 只读连接、以 ID 幂等 upsert，并测试已有数据库、失败恢复和源文件不变。
+7. Milvus Lite 客户端只允许在单次向量操作期间存在，结束后必须关闭客户端并停止 embedded server；不得让 gRPC 线程跨越 Shell/Docker 等 fork 路径。
 
 ### Timers
 

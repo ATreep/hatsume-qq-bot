@@ -131,6 +131,7 @@ def _load_ai_module():
             "build_memory_context_prompt": lambda m: "",
             "build_skill_prompt": lambda s: "",
             "build_agent_state_prompt": lambda s: "",
+            "build_character_proxy_role_prompt": lambda **kw: "",
             "AUXILIARY_COMPACTION_PROMPT": "",
             "CHAT_END_DETECT_PROMPT": "detect_end",
         },
@@ -157,9 +158,15 @@ def _load_ai_module():
             "skill_download": None, "skill_create": None, "membersearch": None,
             "agent_dispatch": None, "respond_to_shell_prompt": None,
             "CHAT_TOOLS": [None] * 18,
+            "get_chat_tools": lambda: [None] * 18,
             "set_shell_executor_limit": None,
             "_current_group_id": 0, "_capture_html_shot_used": False,
             "_generate_image_used": False, "_last_capture_html_demand": "",
+        },
+        "hatsume.plugins.hatsume-plugin.character_proxy": {
+            "get_character_proxy": lambda: None,
+            "build_active_character_proxy_role_prompt": lambda proxy: "",
+            "message_mentions_character_proxy": lambda content: False,
         },
     }
     for name, attrs in stub_defs.items():

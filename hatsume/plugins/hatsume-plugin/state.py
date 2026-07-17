@@ -25,6 +25,7 @@ class ConversationState:
 
     is_chatting: bool = False
     chat_peers: set[str] = field(default_factory=set)
+    end_requested: bool = False
 
     # Message queues
     idle_queue: list[dict] = field(default_factory=list)
@@ -60,12 +61,19 @@ class ConversationState:
         registers the peer. Does NOT start LangGraph execution; callers that
         need to actually run the AI must use start_new_conversation() instead."""
         self.is_chatting = True
+        self.end_requested = False
         if session_id:
             self.chat_peers.add(session_id)
 
     def end_conversation(self) -> None:
         self.is_chatting = False
         self.chat_peers.clear()
+        self.end_requested = False
+
+    def request_end_conversation(self) -> None:
+        """Stop message delivery and ask the running graph to finish."""
+        self.end_conversation()
+        self.end_requested = True
 
     def is_video_rate_limited(self) -> bool:
         return time.time() - self.last_video_time < VIDEO_RATE_LIMIT_SECONDS

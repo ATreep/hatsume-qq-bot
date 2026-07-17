@@ -78,6 +78,74 @@ async def handle_model(matcher, args: Message) -> None:
     )
 
 
+async def handle_proxy_command(event, matcher, args: Message) -> None:
+    """Create, inspect, or terminate the single RAM character proxy."""
+    from ..graph.tools import (
+        create_character_proxy,
+        set_current_group_id,
+        terminate_character_proxy,
+    )
+
+    help_text = (
+        "用法：\n"
+        "/proxy create <QQ号> [持续分钟数]\n"
+        "/proxy terminate\n"
+        "/proxy status"
+    )
+    parts = args.extract_plain_text().strip().split()
+    if not parts:
+        await matcher.finish(help_text)
+        return
+
+    action = parts[0].lower()
+    if action == "create":
+        if len(parts) not in (2, 3):
+            await matcher.finish(help_text)
+            return
+        try:
+            proxied_user_id = int(parts[1])
+            during_time = int(parts[2]) if len(parts) == 3 else None
+        except ValueError:
+            await matcher.finish("QQ号和持续分钟数必须是整数。")
+            return
+        if proxied_user_id <= 0:
+            await matcher.finish("QQ号必须是正整数。")
+            return
+
+        set_current_group_id(event.group_id)
+        tool_input = {"proxied_user_id": proxied_user_id}
+        if during_time is not None:
+            tool_input["during_time"] = during_time
+        result = await create_character_proxy.ainvoke(tool_input)
+        await matcher.finish(result)
+        return
+
+    if action == "terminate" and len(parts) == 1:
+        result = await terminate_character_proxy.ainvoke({})
+        await matcher.finish(result)
+        return
+
+    if action == "status" and len(parts) == 1:
+        from ..character_proxy import (
+            build_active_character_proxy_role_prompt,
+            get_character_proxy,
+        )
+
+        proxy = get_character_proxy()
+        if proxy is None:
+            await matcher.finish("当前没有开启角色代理。")
+            return
+        role_prompt = build_active_character_proxy_role_prompt(proxy)
+        await matcher.finish(
+            f"当前被代理角色：{proxy.user_name}（QQ：{proxy.user_id}）\n"
+            f"自动结束时间：{proxy.auto_terminate_at}\n\n"
+            f"角色提示词：\n{role_prompt}"
+        )
+        return
+
+    await matcher.finish(help_text)
+
+
 async def handle_generate_video(matcher, args: Message) -> None:
     prompt = args.extract_plain_text()
 

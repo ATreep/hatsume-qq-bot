@@ -354,6 +354,7 @@ async def start_new_conversation(
     from langchain.messages import SystemMessage
 
     bind_state(conv_state)
+    conv_state.end_requested = False
 
     configure_tools_fn(
         ai_callback,
@@ -364,6 +365,7 @@ async def start_new_conversation(
         update_video_time=lambda: setattr(conv_state, "last_video_time", time.time()),
         is_generate_image_rate_limited=conv_state.is_generate_image_rate_limited,
         update_generate_image_time=lambda: setattr(conv_state, "last_generate_image_time", time.time()),
+        end_conversation_fn=conv_state.request_end_conversation,
     )
 
     if flush_idle:
@@ -463,6 +465,15 @@ async def user_chat_handle(bot: Bot, event: GroupMessageEvent, user_chat_matcher
     print("call user_chat")
     from ..graph.tools import set_current_group_id
     set_current_group_id(event.group_id)
+
+    from ..character_proxy import activate_character_proxy_peer
+
+    activate_character_proxy_peer(
+        conv_state,
+        message=event.original_message,
+        sender_id=event.user_id,
+        session_id=event.get_session_id(),
+    )
 
     if not conv_state.is_chatting:
         try:

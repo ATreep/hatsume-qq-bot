@@ -54,17 +54,22 @@ and explicit failure placeholders. Never silently drop unknown media segments.
 
 ## State and Lifecycle
 
-- `state.py`: idle, pending, and human queues plus graph/rate-limit state.
+- `state.py`: idle, pending, and human queues plus graph/rate-limit and explicit end-request state.
+- `character_proxy.py`: one process-local proxy (including generated aliases) and one auto-termination handle only; no database or task manager.
 - `graph/nodes.py`: transient auxiliary queues and graph-bound state.
 - `graph/tools.py`: callbacks and context-local shell limits.
 - `graph/agents.py`: background agent instances and stdin queues.
 - `infra.py`: Docker subprocess reference count and delayed stop task.
 
 Every new state field needs initialization, reset/cleanup, and concurrency tests.
+Character-proxy activation must reuse `ConversationState.activate_chat()` and the
+existing graph; do not add a separate reply pipeline or direct send path.
 
 ## Persistence
 
-- Memory: `memory/engine.py`, SQLite `memory.db`, in-memory BM25/vector indexes.
+- Memory metadata: `memory/engine.py` and SQLite `memory.db`; no full resident index.
+- Memory vectors: `memory/vector_store.py` and local Milvus `memory_vectors.db`, keyed by SQLite memory ID.
+- Milvus Lite sessions must stop their embedded gRPC server after each operation; this process also forks Shell/Docker subprocesses.
 - Timers: `timer/store.py`, SQLite `timer.db`, APScheduler jobs in `executor.py`.
 - Skills: Markdown files under the configured skills directory.
 

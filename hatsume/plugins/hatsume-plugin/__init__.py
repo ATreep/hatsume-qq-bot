@@ -22,6 +22,7 @@ from .handlers.tools import (
     handle_membersearch,
     handle_model,
     handle_poke,
+    handle_proxy_command,
     handle_resetsandbox,
     handle_shell,
     handle_timer,
@@ -127,6 +128,7 @@ agents_cmd = on_command("agents", priority=10, block=True)
 clear_cmd = on_command("clear", rule=lambda event: str(event.get_user_id()) == ADMIN_QQ_ID, priority=10, block=True)
 autocreate_cmd = on_command("autocreate", rule=lambda event: str(event.get_user_id()) == ADMIN_QQ_ID, priority=10, block=True)
 autoresponse_cmd = on_command("autoresponse", rule=lambda event: str(event.get_user_id()) == ADMIN_QQ_ID, priority=10, block=True)
+proxy_cmd = on_command("proxy", priority=10, block=True)
 
 # ---------------------------------------------------------------------------
 # Chat matchers
@@ -223,6 +225,11 @@ async def _(bot: Bot, event: GroupMessageEvent, args: Message = CommandArg()):
 @autoresponse_cmd.handle()
 async def _(bot: Bot, event: GroupMessageEvent, args: Message = CommandArg()):
     await handle_autoresponse(bot, event, autoresponse_cmd, args)
+
+
+@proxy_cmd.handle()
+async def _(event: GroupMessageEvent, args: Message = CommandArg()):
+    await handle_proxy_command(event, proxy_cmd, args)
 
 
 # ---------------------------------------------------------------------------
