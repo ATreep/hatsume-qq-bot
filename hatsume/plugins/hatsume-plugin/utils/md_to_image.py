@@ -115,12 +115,15 @@ body{background-color:#1a1418}
 # Patterns that indicate rich Markdown formatting — when any of these are found
 # in a message, it should be rendered as an image even if the text is short.
 _MD_FEATURE_PATTERN = re.compile(
-    r"```"              # fenced code blocks (triple backtick)
-    r"|^#{1,6}\s"       # ATX headers (#, ##, ###, …)
-    r"|\$\$"            # display LaTeX $$…$$
-    r"|\$[^$]+\$"       # inline LaTeX $…$
-    r"|\*\*[^*]+\*\*"   # bold **text**
-    , re.MULTILINE,
+    r"```"  # fenced code blocks (triple backtick)
+    r"|^#{1,6}\s"  # ATX headers (#, ##, ###, …)
+    r"|\$\$"  # display LaTeX $$…$$
+    r"|\$[^$]+\$"  # inline LaTeX $…$
+    r"|\*\*[^*]+\*\*"  # bold **text**
+    r"|^[^\n]*\|[^\n]*\n"  # table header row
+    r"[ \t]*\|?[ \t]*:?-{3,}:?[ \t]*"  # first separator cell
+    r"(?:\|[ \t]*:?-{3,}:?[ \t]*)+\|?[ \t]*$",  # remaining cells
+    re.MULTILINE,
 )
 
 
@@ -330,7 +333,8 @@ async def auto_convert_text(text: str) -> list[MessageSegment]:
 
     - Length exceeds ``LONG_MSG_THRESHOLD``.
     - Contains rich Markdown: fenced code blocks (`` ``` ``), ATX headers
-      (``# …``), LaTeX math (``$…$`` / ``$$…$$``), or bold (``**…**``).
+      (``# …``), LaTeX math (``$…$`` / ``$$…$$``), bold (``**…**``), or a
+      Markdown table.
 
     When rendering as an image, any URLs found in the original text are
     extracted and appended as a separate text segment so they remain

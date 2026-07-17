@@ -1085,6 +1085,42 @@ def test_ai_node_single_text_part_gets_full_limit():
 # -----------------------------------------------------------------------
 
 
+def test_ai_node_injects_invocation_datetime_into_system_prompt():
+    """chat_agent should receive a fresh local date and time on every invocation."""
+    nodes = _load_nodes_module()
+
+    sys_prompts: list[str] = []
+
+    class _FakeAgent:
+        def with_retry(self, **kw):
+            return self
+
+        async def ainvoke(self, *a, **kw):
+            return {"messages": [types.SimpleNamespace(content="hello", type="ai")]}
+
+    original_create_agent = nodes.create_agent
+    original_get_date = nodes.get_date
+
+    def _tracking_create_agent(model, tools, system_prompt=None, **kw):
+        sys_prompts.append(system_prompt or "")
+        return _FakeAgent()
+
+    nodes.create_agent = _tracking_create_agent
+    nodes.get_date = lambda: "2026/07/17 09:30:45"
+
+    try:
+        asyncio.run(
+            nodes.ai_node(
+                {"messages": [types.SimpleNamespace(content="hello", type="human")]}
+            )
+        )
+        assert len(sys_prompts) == 1
+        assert "# 当前日期与时间\n2026/07/17 09:30:45" in sys_prompts[0]
+    finally:
+        nodes.create_agent = original_create_agent
+        nodes.get_date = original_get_date
+
+
 def test_generate_image_used_skips_face_injection():
     """When _generate_image_used is True, face injection prompt should NOT be
     added to chat_agent's system_prompt."""

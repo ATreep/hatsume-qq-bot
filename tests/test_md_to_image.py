@@ -267,6 +267,24 @@ async def test_auto_convert_text_short_with_md_features_and_links():
 
 
 @pytest.mark.asyncio
+async def test_auto_convert_text_short_markdown_table():
+    """A short Markdown table renders as an image regardless of length."""
+    msg = "| Name | Score |\n| :--- | ---: |\n| Hatsume | 100 |"
+    result = await auto_convert_text(msg)
+    assert len(result) == 1
+    assert result[0].type == "image"
+
+
+@pytest.mark.asyncio
+async def test_auto_convert_text_short_pipe_text_stays_text():
+    """A pipe without a Markdown table separator does not force rendering."""
+    msg = "Choose tea | coffee"
+    result = await auto_convert_text(msg)
+    assert len(result) == 1
+    assert result[0].type == "text"
+
+
+@pytest.mark.asyncio
 async def test_auto_convert_text_latex_with_link():
     """LaTeX math triggers image rendering; link is extracted."""
     msg = "$$x^2$$ Check https://example.com"

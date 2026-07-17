@@ -219,7 +219,7 @@ stateDiagram-v2
 - human_node 每 0.3 秒检查 human_queue，五分钟无输入时写入 __end__。
 - chat_end_detect_node 对 Agent 和 Timer 标记强制继续。早期轮次或最后消息包含“初芽”时直接继续；其他情况随机选择轻量或迷你模型判断，也保留随机直接继续分支。
 - 图历史超过 60 条 LangGraph 消息时，删除最早的一对 Human/AI 消息。
-- ai_node 自动检索记忆，注入 Skill 列表、运行中 Agent 状态和可选表情提示，再用 CHAT_TOOLS 创建 LangChain Agent。主调用最多重试五次，递归上限为 60。
+- ai_node 自动检索记忆，注入 Skill 列表、运行中 Agent 状态、可选表情提示和调用时的本地日期时间，再用 CHAT_TOOLS 创建 LangChain Agent。主调用最多重试五次，递归上限为 60。
 - ai_node 临时把辅助上下文放在当前 Human 内容之前。发送前移除 memory 与 face 标签，但返回图历史的是原始 AI 文本。
 - finish_conversation_node 清理图运行标记和 Human 队列，重置 Skill 单轮去重，把 Human/AI/Tool 历史规范化后放回辅助队列，最后发送 [CONVERSATION END]。
 

@@ -526,6 +526,8 @@ async def ai_node(state: MessagesState) -> dict:
                 print(f"[face] Injected face prompt with {len(emotions)} emotions")
         _face_cooling_count = 0
 
+    sys_prompt += f"\n\n# 当前日期与时间\n{get_date()}"
+
     chat_agent = create_agent(
         model_chosen,
         CHAT_TOOLS,
