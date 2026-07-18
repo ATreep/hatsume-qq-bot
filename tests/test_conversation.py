@@ -182,6 +182,19 @@ def _load_conversation_module():
     sys.modules[prompts_name].get_auto_create_prompt = MagicMock(return_value="")
     sys.modules[prompts_name].get_auto_response_prompt = MagicMock(return_value="")
 
+    # Stub utils with the complete interface dialogue.py imports. Other tests may
+    # leave a partial utils stub in sys.modules, so fill missing attrs here.
+    utils_name = "hatsume.plugins.hatsume-plugin.utils"
+    if utils_name not in sys.modules:
+        utils_mod = types.ModuleType(utils_name)
+        sys.modules[utils_name] = utils_mod
+    utils_mod = sys.modules[utils_name]
+    utils_mod.build_forward_json = MagicMock(return_value={})
+    utils_mod.get_date = MagicMock(return_value="2026/01/01 00:00:00")
+    utils_mod.get_group_member_name = AsyncMock(return_value="user")
+    utils_mod.mask_secret_keys = MagicMock(side_effect=lambda text: text)
+    utils_mod.message_to_json = MagicMock(return_value={})
+
     # Stub memory.engine (imported by tools.py)
     mem_engine_name = "hatsume.plugins.hatsume-plugin.memory.engine"
     if mem_engine_name not in sys.modules:
@@ -239,3 +252,15 @@ def _load_conversation_module():
     sys.modules[conv_name] = mod
     spec.loader.exec_module(mod)
     return mod
+
+
+def test_handle_ai_message_temporarily_sends_text_without_at_prefix():
+    dialogue = _load_conversation_module()
+    dialogue.auto_convert_text = AsyncMock(return_value=["plain-text-segment"])
+    dialogue.MessageSegment.at = MagicMock(return_value="at-segment")
+    matcher = types.SimpleNamespace(send=AsyncMock())
+
+    asyncio.run(dialogue.handle_ai_message("hello", matcher, at_id=123456))
+
+    dialogue.MessageSegment.at.assert_not_called()
+    matcher.send.assert_awaited_once_with("plain-text-segment")

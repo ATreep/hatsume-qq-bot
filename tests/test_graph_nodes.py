@@ -317,6 +317,7 @@ def _load_nodes_module():
     tools_mod.agent_dispatch = None
     tools_mod.respond_to_shell_prompt = None
     tools_mod.send_image = None
+    tools_mod.send_video = None
     tools_mod.random_acg_photo = None
     tools_mod.set_shell_executor_limit = lambda *a, **kw: None
     tools_mod._current_group_id = None
@@ -328,6 +329,7 @@ def _load_nodes_module():
         tools_mod.generate_image,
         tools_mod.generate_video,
         tools_mod.send_image,
+        tools_mod.send_video,
         tools_mod.get_avatar,
         tools_mod.random_acg_photo,
         tools_mod.create_timer,

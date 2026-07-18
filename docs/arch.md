@@ -44,7 +44,8 @@ flowchart LR
 | 随机 ACG 图片 | 戳一戳或 random_acg_photo | 从 macOS Photos 的 ACG 相册导出，可直接发送或复制到沙盒 | handlers/tools.py、graph/tools.py |
 | 图片发送 | send_image | 支持 HTTP、base64 和沙盒 file:// 文件，每轮最多三张 | graph/tools.py |
 | 图片生成 | generate_image | 在 Seedream 与兼容图像接口之间选择，支持参考图和限流 | graph/tools.py、models.py、state.py |
-| 视频生成 | /video 或 generate_video | Seedance 1.0/1.5 文生视频或图生视频，并轮询任务结果 | handlers/tools.py、graph/tools.py、models.py |
+| 视频发送 | send_video | 支持 HTTP URL、沙盒绝对路径和沙盒 file:// 文件，每轮最多一个 | graph/tools.py |
+| 视频生成 | /video 或 generate_video | Seedance 1.0/1.5 文生视频或图生视频，并轮询任务结果；聊天工具返回 URL，由 send_video 发送 | handlers/tools.py、graph/tools.py、models.py |
 | 高级模型切换 | 管理员 /model [模型名] | 查看或切换当前进程的高级模型名，不改变供应商、Base URL 或 API Key | handlers/tools.py、models.py、config.py |
 | Docker Shell | 管理员 /ccsh、/cc 或 shell_executor | 在持久化 Kali 容器执行命令，包含超时、ANSI 清理、引用计数和延迟停止 | handlers/tools.py、graph/tools.py、infra.py |
 | 后台长任务 | agent_dispatch(background_shell, ...) | 后台运行长时间或交互式命令，周期判断继续、通知、输入、结束或终止 | graph/agents.py、infra.py |
@@ -400,8 +401,9 @@ flowchart LR
 | shell_executor | Docker 沙盒同步命令；普通聊天每轮最多三次 |
 | find_memory | 主动检索长期记忆 |
 | generate_image | 图片生成，支持参考图与 60 秒限流 |
-| generate_video | 生成并直接发送视频；每轮最多一次 |
+| generate_video | 生成视频并返回临时 URL；每轮最多一次 |
 | send_image | 发送 HTTP、base64 或沙盒文件；每轮最多三张 |
+| send_video | 发送 HTTP URL、沙盒绝对路径或沙盒文件；每轮最多一个 |
 | get_avatar | 获取 QQ 头像 URL |
 | random_acg_photo | 从 macOS Photos 导出 ACG 图片到沙盒 |
 | create_timer | 创建持久化定时任务 |

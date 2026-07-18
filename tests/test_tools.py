@@ -97,6 +97,7 @@ def _load_tools_module():
     v11_mod.MessageSegment = types.SimpleNamespace(
         text=lambda s: s,
         image=lambda *a, **kw: None,
+        video=lambda *a, **kw: None,
     )
     v11_mod.GroupMessageEvent = type("GroupMessageEvent", (), {})
     v11_mod.PokeNotifyEvent = type("PokeNotifyEvent", (), {})
@@ -183,7 +184,7 @@ def _load_tools_module():
     )
     models_mod.generate_image_for = lambda *a, **kw: "http://example.com/img.png"
     models_mod.choose_image_model = lambda: "4"
-    models_mod.generate_video_for = lambda *a, **kw: None
+    models_mod.generate_video_for = AsyncMock(return_value="http://example.com/video.mp4")
     models_mod.choose_video_model = lambda: "1.5"
     models_mod.generate_image_for_volc = AsyncMock(return_value="http://example.com/img.png")
     models_mod.generate_image_for_kege = MagicMock(return_value="http://example.com/img.png")
@@ -496,7 +497,10 @@ def _load_commands_module():
         v11_mod.MessageSegment = types.SimpleNamespace(
             text=lambda s: s,
             image=lambda *a, **kw: None,
+            video=lambda *a, **kw: None,
         )
+    elif not hasattr(v11_mod.MessageSegment, "video"):
+        v11_mod.MessageSegment.video = lambda *a, **kw: None
     if not hasattr(v11_mod, "GroupMessageEvent"):
         v11_mod.GroupMessageEvent = type("GroupMessageEvent", (), {})
     if not hasattr(v11_mod, "PokeNotifyEvent"):
@@ -923,6 +927,14 @@ def test_reset_capture_flag_resets_send_image_count():
     assert tools._send_image_count == 0
 
 
+def test_reset_capture_flag_resets_send_video_count():
+    """reset_capture_flag should reset _send_video_count to 0."""
+    tools = _load_tools_module()
+    tools._send_video_count = 1
+    tools.reset_capture_flag()
+    assert tools._send_video_count == 0
+
+
 # -----------------------------------------------------------------------
 # send_image: max 3 calls per AI node round
 # -----------------------------------------------------------------------
@@ -963,6 +975,102 @@ async def test_send_image_rate_limit_resets_on_new_round():
     # Should be able to send again
     result = await tools.send_image("https://example.com/test.jpg")
     assert "图片已成功发送" in result
+
+
+# -----------------------------------------------------------------------
+# send_video: max 1 call per AI node round
+# -----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_send_video_allows_one_call_per_round():
+    """send_video should allow one call, then return error on the second."""
+    tools = _load_tools_module()
+    sent = []
+    tools._send_video_count = 0
+    tools.MessageSegment.video = lambda **kw: ("video", kw)
+    tools._ai_answer = AsyncMock(side_effect=lambda msg: sent.append(msg))
+
+    result = await tools.send_video("https://example.com/test.mp4")
+    assert "视频已成功发送" in result
+    assert sent == [("video", {"file": "https://example.com/test.mp4"})]
+
+    result = await tools.send_video("https://example.com/test2.mp4")
+    assert "一轮发言中你最多只能发送1个视频" in result
+
+
+@pytest.mark.asyncio
+async def test_send_video_accepts_sandbox_absolute_path():
+    """send_video should resolve a sandbox absolute path to base64 before sending."""
+    tools = _load_tools_module()
+    sent = []
+    tools._send_video_count = 0
+    tools.ensure_container_running = AsyncMock(return_value=None)
+    tools.run_cmd = AsyncMock(return_value="ZmFrZV92aWRlbw==::EXIT::0\n")
+    tools.MessageSegment.video = lambda **kw: ("video", kw)
+    tools._ai_answer = AsyncMock(side_effect=lambda msg: sent.append(msg))
+
+    result = await tools.send_video("/work/out.mp4")
+
+    assert "视频已成功发送" in result
+    tools.ensure_container_running.assert_awaited_once_with()
+    assert "base64 -w 0 /work/out.mp4" in tools.run_cmd.await_args.args[0]
+    assert sent == [("video", {"file": "base64://ZmFrZV92aWRlbw=="})]
+
+
+@pytest.mark.asyncio
+async def test_send_video_rate_limit_resets_on_new_round():
+    """After reset_capture_flag, send_video should allow another call."""
+    tools = _load_tools_module()
+    tools.MessageSegment.video = lambda **kw: ("video", kw)
+    tools._ai_answer = AsyncMock(return_value=None)
+
+    tools._send_video_count = 1
+    result = await tools.send_video("https://example.com/test.mp4")
+    assert "最多只能发送1个视频" in result
+
+    tools.reset_capture_flag()
+
+    result = await tools.send_video("https://example.com/test.mp4")
+    assert "视频已成功发送" in result
+
+
+# -----------------------------------------------------------------------
+# generate_video: returns URL instead of sending directly
+# -----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_generate_video_returns_url_without_sending():
+    """generate_video should return the model URL and leave sending to send_video."""
+    tools = _load_tools_module()
+    models_mod = sys.modules["hatsume.plugins.hatsume-plugin.models"]
+    models_mod.choose_video_model = lambda: "1.5"
+    models_mod.generate_video_for = AsyncMock(return_value="https://example.com/out.mp4")
+    update_called = []
+    tools.configure_tool_callbacks(
+        None,
+        set(),
+        None,
+        answer_fn=AsyncMock(),
+        is_video_rate_limited=lambda: False,
+        update_video_time=lambda: update_called.append(True),
+    )
+
+    result = await tools.generate_video(
+        "make a short clip",
+        image_url="https://example.com/ref.jpg",
+    )
+
+    assert "临时 URL：https://example.com/out.mp4" in result
+    assert "调用 send_video" in tools.generate_video.__doc__
+    tools._ai_answer.assert_not_awaited()
+    models_mod.generate_video_for.assert_awaited_once_with(
+        "make a short clip",
+        image_url="https://example.com/ref.jpg",
+        model="1.5",
+    )
+    assert update_called == [True]
 
 
 # -----------------------------------------------------------------------
@@ -1155,12 +1263,14 @@ def test_character_proxy_tools_are_mutually_exclusive():
     sys.modules[module_name] = character_proxy
 
     off_names = {item.__name__ for item in tools.get_chat_tools()}
+    assert "send_video" in off_names
     assert "end_conversation" in off_names
     assert "create_character_proxy" in off_names
     assert "terminate_character_proxy" not in off_names
 
     active = object()
     on_names = {item.__name__ for item in tools.get_chat_tools()}
+    assert "send_video" in on_names
     assert "end_conversation" in on_names
     assert "terminate_character_proxy" in on_names
     assert "create_character_proxy" not in on_names

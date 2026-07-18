@@ -150,15 +150,16 @@ def _load_ai_module():
         "hatsume.plugins.hatsume-plugin.graph.tools": {
             "search_web": None, "shell_executor": None, "find_memory": None,
             "query_memory": lambda *a, **kw: "", "capture_html_shot": None,
-            "generate_image": None, "generate_video": None, "send_image": None,
+            "generate_image": None, "generate_video": None,
+            "send_image": None, "send_video": None,
             "reset_capture_flag": lambda: None,
             "get_avatar": None, "random_acg_photo": None,
             "create_timer": None, "list_timers": None,
             "delete_timer": None, "skill_loader": None, "skill_remove": None,
             "skill_download": None, "skill_create": None, "membersearch": None,
             "agent_dispatch": None, "respond_to_shell_prompt": None,
-            "CHAT_TOOLS": [None] * 18,
-            "get_chat_tools": lambda: [None] * 18,
+            "CHAT_TOOLS": [None] * 19,
+            "get_chat_tools": lambda: [None] * 19,
             "set_shell_executor_limit": None,
             "_current_group_id": 0, "_capture_html_shot_used": False,
             "_generate_image_used": False, "_last_capture_html_demand": "",
@@ -242,6 +243,22 @@ class TestInjectTimer:
         assert "coroutine" not in msg["text"]
         assert "group_0_123" in mock_state.chat_peers
 
+    def test_includes_notified_user_identity_in_prompt(self):
+        ai_mod = _load_ai_module()
+        mock_state = MockState()
+        mock_state.is_chatting = True
+        ai_mod._state = mock_state
+        ai_mod.inject_timer(
+            user_id=123,
+            group_id=0,
+            timer_prompt="提醒开会",
+            notified_user_name="小明",
+        )
+        msg = mock_state.human_queue[0]["text"]
+        assert "用户名：小明" in msg
+        assert "QQ号：123" in msg
+        assert "[CQ:at,qq=123]" in msg
+
     def test_calls_start_conversation_cb_when_not_chatting(self):
         ai_mod = _load_ai_module()
         mock_state = MockState()
@@ -286,3 +303,27 @@ class TestTimerInjectionRoundTrip:
         assert "__timer__:111" in msg["text"]
         assert "定时提醒：喝水" in msg["text"]
         assert "group_0_111" in mock_state.chat_peers
+
+
+class TestInjectAgentNotification:
+    """Agent notification injection carries notified user identity."""
+
+    def test_includes_notified_user_identity_in_prompt(self):
+        ai_mod = _load_ai_module()
+        mock_state = MockState()
+        mock_state.is_chatting = True
+        ai_mod._state = mock_state
+        ai_mod.inject_agent_notification(
+            user_id=234,
+            group_id=9,
+            agent_name="coding_agent",
+            result="执行完成",
+            task="修一下测试",
+            context="用户要求修测试",
+            notified_user_name="Treep",
+        )
+        msg = mock_state.human_queue[0]["text"]
+        assert "用户名：Treep" in msg
+        assert "QQ号：234" in msg
+        assert "[CQ:at,qq=234]" in msg
+        assert "group_9_234" in mock_state.chat_peers

@@ -6,6 +6,7 @@ import asyncio
 import contextvars
 import os as _os
 import random
+import shlex
 import ssl
 import subprocess
 import traceback
@@ -93,6 +94,19 @@ _current_group_id: int | None = None
 _agent_notification_callback: Callable[[int, int, str], None] | None = None
 
 
+async def _resolve_notified_user_name(user_id: int, group_id: int | None) -> str | None:
+    if user_id == 0:
+        return None
+    try:
+        from nonebot import get_bot
+        from ..utils import get_group_member_name
+
+        return await get_group_member_name(get_bot(), group_id, user_id)
+    except Exception as e:
+        print(f"❌ failed to resolve notified user name: user={user_id} err={e}")
+        return None
+
+
 # ---------------------------------------------------------------------------
 # shell_executor per-context call limit (contextvars isolate chat vs coding agent)
 # ---------------------------------------------------------------------------
@@ -159,12 +173,14 @@ def configure_agent_notification_callback(cb: Callable[[int, int, str], None]) -
 
 
 _send_image_count: int = 0
+_send_video_count: int = 0
 
 
 def reset_capture_flag() -> None:
-    global _generate_video_used, _send_image_count
+    global _generate_video_used, _send_image_count, _send_video_count
     _generate_video_used = False
     _send_image_count = 0
+    _send_video_count = 0
 
 
 
@@ -452,6 +468,75 @@ async def send_image(image_url: str) -> str:
 
 
 @tool
+async def send_video(video_url: str) -> str:
+    """
+    发送一个视频给用户。当你需要直接向用户展示某个视频时使用此工具。
+
+    ## 参数：
+    - video_url: 视频地址，支持
+        1) HTTP/HTTPS URL
+        2) 沙盒文件绝对路径（如 "/work/path/to/video.mp4"）
+        3) 沙盒 file:// 绝对路径（如 "file:///work/path/to/video.mp4"）
+
+    ## 注意：
+    - 每轮 ai_node 最多调用一次
+    - 每次调用只能发送一个视频
+    - 视频会直接发送给用户，你不需要再额外描述视频内容
+    """
+    global _send_video_count
+
+    if not video_url or not video_url.strip():
+        return "❌ 错误：video_url 不能为空。"
+
+    if _send_video_count >= 1:
+        return "视频发送失败：一轮发言中你最多只能发送1个视频。"
+
+    _send_video_count += 1
+
+    url = video_url.strip()
+    print(f"Send video: {url[:100]}...")
+
+    if url.startswith("file://"):
+        url = url[7:]
+
+    if url.startswith("/"):
+        sandbox_path = url
+        print(f"  → reading sandbox video file: {sandbox_path}")
+        await ensure_container_running()
+        b64_output = await run_cmd(
+            f'base64 -w 0 {shlex.quote(sandbox_path)} 2>&1; echo "::EXIT::$?"',
+            timeout=120,
+        )
+
+        if "::EXIT::" in b64_output:
+            b64_data, exit_part = b64_output.rsplit("::EXIT::", 1)
+            exit_code = exit_part.strip()
+        else:
+            b64_data = b64_output
+            exit_code = "1"
+
+        if exit_code != "0" or not b64_data.strip():
+            err_msg = b64_data.strip() or "(no output)"
+            print(f"❌ sandbox video read failed (exit={exit_code}): {err_msg[:200]}")
+            return f"❌ 无法读取沙盒视频文件：{err_msg[:300]}"
+
+        url = "base64://" + b64_data.strip()
+        print(f"  → resolved video to base64 data URI ({len(b64_data)} chars)")
+
+    try:
+        if _ai_answer:
+            await _ai_answer(MessageSegment.video(file=url))
+        else:
+            return "❌ 错误：无法发送视频（发送通道未就绪）。"
+    except Exception as e:
+        print(f"❌ send_video failed: {e}")
+        traceback.print_exc()
+        return f"❌ 视频发送失败: {e}"
+
+    return "视频已成功发送给用户。"
+
+
+@tool
 async def generate_image(prompt: str, image_urls: list[str]) -> str:
     """
     AI 图片生成工具。
@@ -471,6 +556,7 @@ async def generate_image(prompt: str, image_urls: list[str]) -> str:
         return "❌ 图片生成请求过于频繁，请 3 分钟后再试。"
 
     print(f"Generate image: {prompt}")
+    _update_generate_image_time()
     try:
         if random.random() <= 0.5 or len(image_urls) > 0:
             print("Using Seedream 5.0 Lite...")
@@ -480,7 +566,6 @@ async def generate_image(prompt: str, image_urls: list[str]) -> str:
             print("Using grok-imagine-image...")
             url = generate_image_for_kege(prompt)
             result_msg = f"图片生成成功（此次请求不支持参考图）\n临时 URL：{url}"
-        _update_generate_image_time()
     except Exception as e:
         print(f"❌ generate_image failed: {e}")
         traceback.print_exc()
@@ -491,7 +576,7 @@ async def generate_image(prompt: str, image_urls: list[str]) -> str:
 @tool
 async def generate_video(prompt: str, image_url: str = "") -> str:
     """
-    AI 视频生成工具。根据文字描述生成短视频（Seedance），并直接发送给用户。
+    AI 视频生成工具。根据文字描述生成短视频（Seedance），并返回视频 URL。
 
     ## 参数：
     - prompt: 视频描述，支持中文或英文。描述越详细，生成效果越好。
@@ -499,14 +584,13 @@ async def generate_video(prompt: str, image_url: str = "") -> str:
 
     ## 注意：
     - 视频生成耗时较长（通常 2-10 分钟），请提醒用户耐心等待
-    - 生成的视频会直接发送给用户，你不需要再额外描述视频内容
+    - 生成后你必须调用 send_video 工具把返回的 URL 发送给用户，禁止将视频 URL 直接返回给用户
 
     ## 返回值：
-    返回视频生成状态信息。
+    返回视频生成状态与临时 URL。
     """
     global _generate_video_used
     from ..models import generate_video_for, choose_video_model
-    from nonebot.adapters.onebot.v11 import MessageSegment
 
     if _generate_video_used:
         return "❌ 视频生成工具在本轮对话中已被调用过，禁止重复调用。"
@@ -531,11 +615,9 @@ async def generate_video(prompt: str, image_url: str = "") -> str:
     if url is None:
         return f"❌ 视频生成失败（模型 Seedance {model} Pro）。"
 
-    if _ai_answer:
-        await _ai_answer(MessageSegment.video(file=url))
-
     _audio_note = "该模型不支持生成声音。" if model == "1.0" else ""
-    return f"✅ 视频已生成成功（模型 Seedance {model} Pro）。"
+    note = f"\n{_audio_note}" if _audio_note else ""
+    return f"✅ 视频已生成成功（模型 Seedance {model} Pro）。\n临时 URL：{url}{note}"
 
 
 @tool
@@ -1043,12 +1125,17 @@ async def agent_dispatch(
         from .agents import add_agent_instance, set_agent_state
         import time as _time
 
+        notified_user_name = await _resolve_notified_user_name(
+            notified_user_id, _current_group_id
+        )
+
         instance_id = add_agent_instance(
             agent_name,
             status="running",
             task=task,
             context=context,
             user_id=notified_user_id,
+            user_name=notified_user_name,
             started_at=_time.time(),
         )
         try:
@@ -1068,6 +1155,7 @@ async def agent_dispatch(
                 result=result,
                 task=task,
                 context=context,
+                notified_user_name=notified_user_name,
                 start_conversation_cb=_agent_notification_callback,
             )
         else:
@@ -1190,6 +1278,7 @@ CHAT_TOOLS = [
     generate_image,
     generate_video,
     send_image,
+    send_video,
     get_avatar,
     random_acg_photo,
     create_timer,

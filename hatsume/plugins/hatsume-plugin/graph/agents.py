@@ -301,6 +301,18 @@ Rules:
     total_timeout = int(parsed.get("total_timeout", 300))
 
     print(f"BG Shell Agent: \n{cmd=}\n{description=}\n{total_timeout=}")
+
+    notified_user_name = None
+    if user_id != 0:
+        try:
+            from nonebot import get_bot
+            from ..utils import get_group_member_name
+
+            notified_user_name = await get_group_member_name(
+                get_bot(), _current_group_id, user_id
+            )
+        except Exception as e:
+            print(f"❌ background_shell user lookup failed: user={user_id} err={e}")
     
     if not cmd.strip():
         return "background_shell: no command found in task."
@@ -418,6 +430,7 @@ Rules:
                     agent_name="background_shell",
                     result=notify_msg,
                     task=task,
+                    notified_user_name=notified_user_name,
                     start_conversation_cb=_agent_notification_callback,
                 )
             elif decision.startswith("INPUT_NEEDED:"):
@@ -459,6 +472,7 @@ Rules:
                     agent_name="background_shell",
                     result=notify_msg,
                     task=task,
+                    notified_user_name=notified_user_name,
                     start_conversation_cb=_agent_notification_callback,
                 )
 
@@ -531,6 +545,7 @@ Rules:
                         agent_name="background_shell",
                         result=reissue_msg,
                         task=task,
+                        notified_user_name=notified_user_name,
                         start_conversation_cb=_agent_notification_callback,
                     )
 

@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import time as _time
+import re
 from datetime import datetime
 
 from nonebot.adapters import Bot
 
 from .security import mask_secret_keys as mask_secret_keys
+
+
+CQ_AT_PATTERN = re.compile(r"\[CQ:at,qq=(\d+)\]")
 
 
 async def get_group_member_name(bot: Bot, group_id: int | None, user_id: int) -> str:
@@ -21,6 +25,52 @@ async def get_group_member_name(bot: Bot, group_id: int | None, user_id: int) ->
         return member_info["card"] if member_info["card"].strip() else member_info["nickname"]
     except Exception:
         return str(user_id)
+
+
+def extract_cq_at_user_ids(text: str) -> list[int]:
+    """Extract unique QQ IDs from CQ at placeholders, preserving order."""
+    user_ids: list[int] = []
+    seen: set[int] = set()
+    for match in CQ_AT_PATTERN.finditer(text):
+        uid = int(match.group(1))
+        if uid not in seen:
+            seen.add(uid)
+            user_ids.append(uid)
+    return user_ids
+
+
+async def render_cq_at_placeholders(
+    text: str,
+    group_id: int | None,
+) -> tuple[str, list[int]]:
+    """Replace CQ at placeholders with @display names and return IDs to notify."""
+    user_ids = extract_cq_at_user_ids(text)
+    if not user_ids:
+        return text, []
+
+    bot = None
+    try:
+        from nonebot import get_bot
+
+        bot = get_bot()
+    except Exception:
+        bot = None
+
+    display_names: dict[int, str] = {}
+    for uid in user_ids:
+        if bot is None:
+            display_names[uid] = str(uid)
+            continue
+        try:
+            display_names[uid] = await get_group_member_name(bot, group_id, uid)
+        except Exception:
+            display_names[uid] = str(uid)
+
+    def _replace(match: re.Match[str]) -> str:
+        uid = int(match.group(1))
+        return f"@{display_names.get(uid, str(uid))}"
+
+    return CQ_AT_PATTERN.sub(_replace, text), user_ids
 
 
 def get_date() -> str:

@@ -331,10 +331,19 @@ async def _execute_timer(trigger: dict, store: TimerStore) -> None:
     group_id = task["group_id"]
     user_id = task["user_id"]
     prompt = task["prompt"]
+    user_name: str | None = None
 
     # 1. Look up username — continue even if not found (send without @mention)
     try:
-        print(f"⏰ [timer] User lookup OK: {user_id} in group {group_id}")
+        from nonebot import get_bot
+        from ..utils import get_group_member_name
+
+        if user_id != 0:
+            user_name = await get_group_member_name(get_bot(), group_id, user_id)
+        print(
+            f"⏰ [timer] User lookup OK: {user_id} "
+            f"({user_name or 'no specific user'}) in group {group_id}"
+        )
     except Exception:
         print(f"⏰ [timer] Cannot get user info for {user_id} in group {group_id}, will send without @mention")
 
@@ -342,7 +351,7 @@ async def _execute_timer(trigger: dict, store: TimerStore) -> None:
     t_start = time.time()
     try:
         await _inject_timer_to_graph(
-            user_id, group_id, prompt
+            user_id, group_id, prompt, user_name=user_name
         )
         elapsed = time.time() - t_start
         print(
@@ -374,6 +383,7 @@ async def _inject_timer_to_graph(
     group_id: int,
     task_prompt: str,
     is_auto_create: bool = False,
+    user_name: str | None = None,
 ) -> None:
     """Inject a timer prompt into the conversation graph.
 
@@ -391,4 +401,5 @@ async def _inject_timer_to_graph(
         timer_prompt=task_prompt,
         start_conversation_cb=_timer_start_conv_cb,
         is_auto_create=is_auto_create,
+        notified_user_name=user_name,
     )

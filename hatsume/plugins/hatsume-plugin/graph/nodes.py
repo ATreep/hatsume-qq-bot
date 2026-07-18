@@ -207,6 +207,19 @@ def extract_user_ids_from_content(content: Any) -> list[int]:
 # ---------------------------------------------------------------------------
 # Notification injection (agent & timer)
 # ---------------------------------------------------------------------------
+def _build_notified_user_prompt(user_id: int, user_name: str | None = None) -> str:
+    if user_id == 0:
+        return ""
+
+    display_name = (user_name or "").strip() or str(user_id)
+    return (
+        "## 被通知用户\n"
+        f"- 用户名：{display_name}\n"
+        f"- QQ号：{user_id}\n"
+        f"- 如需提醒该用户，可在输出中插入 [CQ:at,qq={user_id}]；不要频繁 at。\n\n"
+    )
+
+
 def inject_agent_notification(
     user_id: int,
     group_id: int,
@@ -214,6 +227,7 @@ def inject_agent_notification(
     result: str,
     task: str,
     context: str = "",
+    notified_user_name: str | None = None,
     start_conversation_cb: Any = None,
 ) -> None:
     """Inject agent result into the conversation flow with a special mark prefix.
@@ -228,9 +242,11 @@ def inject_agent_notification(
     a new graph conversation targeting the specified group.
     """
     context_line = f"📋 派发背景：{context}\n" if context else ""
+    notified_user_prompt = _build_notified_user_prompt(user_id, notified_user_name)
     notify_msg = (
         f"{NOTIFY_MARK}:{user_id}:{agent_name}\n"
         f"(SYSTEM) Agent '{agent_name}' 执行完毕。\n"
+        f"{notified_user_prompt}"
         f"{context_line}"
         f"请你简单复述一下任务原文内容，然后告诉用户执行结果。\n\n"
         f"## 该 Agent 执行的任务原文\n\n"
@@ -263,6 +279,7 @@ def inject_timer(
     timer_prompt: str,
     start_conversation_cb: Any = None,
     is_auto_create: bool = False,
+    notified_user_name: str | None = None,
 ) -> None:
     """Inject a timer prompt into the conversation flow with a __timer__ mark.
 
@@ -285,10 +302,11 @@ def inject_timer(
         tag = "auto_create" if is_auto_create else "timer (no user)"
         print(f"⏰ [inject_timer] {tag}: {timer_prompt[:80]}...")
     else:
+        notified_user_prompt = _build_notified_user_prompt(user_id, notified_user_name)
         timer_msg = (
             f"{TIMER_MARK}:{user_id}\n"
             f"(SYSTEM) 定时任务已触发。\n"
-            f"通知 QQ 用户（QQ号：{user_id}）：\n\n"
+            f"{notified_user_prompt}"
             f"{timer_prompt}"
         )
         print(f"⏰ [inject_timer] Timer message for user {user_id}: {timer_prompt[:80]}...")

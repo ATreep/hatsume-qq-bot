@@ -423,6 +423,27 @@ async def handle_ai_message(
         print("Current conversation ends")
         return
 
+    if at_id is not None:
+        if isinstance(msg, str):
+            text = msg
+        elif isinstance(msg, MessageSegment) and msg.type == "text":
+            text = str(msg.data.get("text", ""))
+        elif isinstance(msg, Message):
+            text = msg.extract_plain_text()
+        else:
+            text = str(msg)
+
+        text = mask_secret_keys(text)
+        if not text.strip():
+            await matcher.send("（电波受到干扰...想要发出的内容丢失了...）")
+            return
+
+        # Temporarily disable wrapper-level @ delivery; CQ placeholders in
+        # text are now the model-visible way to mention users.
+        # await matcher.send(MessageSegment.at(at_id) + " " + MessageSegment.text(text))
+        await matcher.send(MessageSegment.text(text))
+        return
+
     if isinstance(msg, str):
         if not msg.strip():
             await matcher.send("（电波受到干扰...想要发出的内容丢失了...）")
@@ -441,10 +462,7 @@ async def handle_ai_message(
 
     try:
         for seg in segments:
-            if at_id:
-                await matcher.send(MessageSegment.at(at_id) + " " + seg)
-            else:
-                await matcher.send(seg)
+            await matcher.send(seg)
     except Exception as e:
         print("Send error: ", e)
         await asyncio.sleep(3)
