@@ -471,7 +471,6 @@ async def generate_image(prompt: str, image_urls: list[str]) -> str:
         return "❌ 图片生成请求过于频繁，请 3 分钟后再试。"
 
     print(f"Generate image: {prompt}")
-    _update_generate_image_time()
     try:
         if random.random() <= 0.5 or len(image_urls) > 0:
             print("Using Seedream 5.0 Lite...")
@@ -481,6 +480,7 @@ async def generate_image(prompt: str, image_urls: list[str]) -> str:
             print("Using grok-imagine-image...")
             url = generate_image_for_kege(prompt)
             result_msg = f"图片生成成功（此次请求不支持参考图）\n临时 URL：{url}"
+        _update_generate_image_time()
     except Exception as e:
         print(f"❌ generate_image failed: {e}")
         traceback.print_exc()
