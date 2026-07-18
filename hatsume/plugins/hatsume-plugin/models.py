@@ -12,9 +12,7 @@ from . import config as _config
 from .config import (
     DEEPSEEK_V4_FLASH,
     EMBEDDING_MODEL,
-    GPT_5_5,
     GROK_IMAGINE_IMAGE,
-    GPT_5_6_LUNA,
     KEGEAI_API_KEY,
     KEGEAI_BASE_URL,
     LITE_MODEL_NAME,
