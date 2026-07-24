@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import sys
 import types
@@ -255,6 +256,87 @@ class TestGetAvatarMultiCall:
 
 
 # -----------------------------------------------------------------------
+# view_image: lite-model image description
+# -----------------------------------------------------------------------
+
+
+class TestViewImage:
+    @staticmethod
+    def _set_lite_model(content="图片描述"):
+        model = types.SimpleNamespace(
+            ainvoke=AsyncMock(return_value=types.SimpleNamespace(content=content))
+        )
+        models = sys.modules["hatsume.plugins.hatsume-plugin.models"]
+        models.get_lite_model = MagicMock(return_value=model)
+        return model
+
+    @pytest.mark.asyncio
+    async def test_passes_http_image_to_lite_model(self):
+        tools = _load_tools_module()
+        model = self._set_lite_model("一张海边日落的照片")
+
+        result = await tools.view_image("https://example.com/sunset.jpg")
+
+        assert result == "一张海边日落的照片"
+        messages = model.ainvoke.await_args.args[0]
+        content = messages[0].content
+        assert content[0]["type"] == "text"
+        assert content[1] == {
+            "type": "image_url",
+            "image_url": {"url": "https://example.com/sunset.jpg"},
+        }
+
+    @pytest.mark.asyncio
+    async def test_reads_file_url_from_sandbox_as_data_uri(self):
+        tools = _load_tools_module()
+        model = self._set_lite_model([{"type": "text", "text": "沙盒图片描述"}])
+        tools.ensure_container_running = AsyncMock()
+        tools.run_cmd = AsyncMock(
+            side_effect=[
+                "image/png\n::EXIT::0\n",
+                "aW1hZ2U=::EXIT::0\n",
+            ]
+        )
+
+        result = await tools.view_image("file:///work/example image.png")
+
+        assert result == "沙盒图片描述"
+        tools.ensure_container_running.assert_awaited_once_with()
+        assert tools.run_cmd.await_count == 2
+        messages = model.ainvoke.await_args.args[0]
+        assert messages[0].content[1]["image_url"]["url"] == (
+            "data:image/png;base64,aW1hZ2U="
+        )
+        assert "'/work/example image.png'" in tools.run_cmd.await_args_list[0].args[0]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "image_url",
+        ["", "file://relative/image.png", "/work/image.png", "ftp://example.com/a.png"],
+    )
+    async def test_rejects_unsupported_or_non_absolute_input(self, image_url):
+        tools = _load_tools_module()
+        model = self._set_lite_model()
+
+        result = await tools.view_image(image_url)
+
+        assert result.startswith("❌")
+        model.ainvoke.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_rejects_non_image_sandbox_file(self):
+        tools = _load_tools_module()
+        model = self._set_lite_model()
+        tools.ensure_container_running = AsyncMock()
+        tools.run_cmd = AsyncMock(return_value="text/plain\n::EXIT::0\n")
+
+        result = await tools.view_image("file:///work/readme.txt")
+
+        assert "不是图片" in result
+        model.ainvoke.assert_not_awaited()
+
+
+# -----------------------------------------------------------------------
 # create_timer: per-task trigger frequency
 # -----------------------------------------------------------------------
 
@@ -346,11 +428,113 @@ class TestCreateTimerFrequency:
 
 
 # -----------------------------------------------------------------------
-# generate_image: rate limiting via callbacks
+# timer listing: overview and trigger details
 # -----------------------------------------------------------------------
 
-import asyncio
 
+class TestTimerListing:
+    @staticmethod
+    def _setup_timer_dependencies(tools, tasks, triggers_by_task):
+        store = types.SimpleNamespace(
+            list_tasks_by_group=MagicMock(return_value=tasks),
+            get_task=MagicMock(
+                side_effect=lambda task_id: next(
+                    (task for task in tasks if task["id"] == task_id), None
+                )
+            ),
+            get_triggers_for_task=MagicMock(
+                side_effect=lambda task_id: triggers_by_task.get(task_id, [])
+            ),
+        )
+        timer_mod = types.ModuleType("hatsume.plugins.hatsume-plugin.timer")
+        timer_mod.get_store = lambda: store
+        sys.modules["hatsume.plugins.hatsume-plugin.timer"] = timer_mod
+        tools.set_current_group_id(123)
+        return store
+
+    @pytest.mark.asyncio
+    async def test_list_timers_groups_tasks_and_only_shows_next_pending_trigger(self):
+        tools = _load_tools_module()
+        tasks = [
+            {"id": 1, "group_id": 123, "user_id": 456, "prompt": "完整提示词"},
+            {"id": 2, "group_id": 123, "user_id": 0, "prompt": "已完成提示词"},
+        ]
+        triggers = {
+            1: [
+                {"trigger_at": 1_800_000_000, "fired": 1},
+                {"trigger_at": 1_800_003_600, "fired": 0},
+                {"trigger_at": 1_800_007_200, "fired": 0},
+            ],
+            2: [{"trigger_at": 1_800_000_000, "fired": 1}],
+        }
+        self._setup_timer_dependencies(tools, tasks, triggers)
+        bot = object()
+        sys.modules["nonebot"].get_bot = lambda: bot
+        utils = sys.modules["hatsume.plugins.hatsume-plugin.utils"]
+        utils.get_group_member_name = AsyncMock(return_value="提醒对象")
+
+        result = await tools.list_timers()
+
+        assert "## 尚未完成的定时任务" in result
+        assert "## 已完成的定时任务" in result
+        pending_section, completed_section = result.split("## 已完成的定时任务")
+        assert "任务 ID：1" in pending_section
+        assert "提醒用户：@提醒对象(456)" in pending_section
+        assert "任务提示词：完整提示词" in pending_section
+        assert "下一次触发时间：2027-01-15 17:00" in pending_section
+        assert "2027-01-15 18:00" not in pending_section
+        assert "任务 ID：2" in completed_section
+        assert "提醒用户：无" in completed_section
+        assert "下一次触发时间：无" in completed_section
+
+    @pytest.mark.asyncio
+    async def test_list_timers_keeps_both_categories_when_group_has_no_tasks(self):
+        tools = _load_tools_module()
+        self._setup_timer_dependencies(tools, [], {})
+
+        result = await tools.list_timers()
+
+        assert result == (
+            "# 当前群的定时任务\n\n"
+            "## 尚未完成的定时任务\n无\n\n"
+            "## 已完成的定时任务\n无"
+        )
+
+    @pytest.mark.asyncio
+    async def test_get_timer_lists_every_trigger_with_completion_status(self):
+        tools = _load_tools_module()
+        tasks = [
+            {"id": 7, "group_id": 123, "user_id": 456, "prompt": "提示词"},
+        ]
+        triggers = {
+            7: [
+                {"trigger_at": 1_800_000_000, "fired": 1},
+                {"trigger_at": 1_800_003_600, "fired": 0},
+            ],
+        }
+        self._setup_timer_dependencies(tools, tasks, triggers)
+
+        result = await tools.get_timer(7)
+
+        assert "2027-01-15 16:00：已完成" in result
+        assert "2027-01-15 17:00：未完成" in result
+
+    @pytest.mark.asyncio
+    async def test_get_timer_rejects_task_from_another_group(self):
+        tools = _load_tools_module()
+        tasks = [
+            {"id": 7, "group_id": 999, "user_id": 456, "prompt": "提示词"},
+        ]
+        self._setup_timer_dependencies(tools, tasks, {})
+
+        result = await tools.get_timer(7)
+
+        assert result == "错误：任务 ID 7 不属于当前群。"
+
+
+# -----------------------------------------------------------------------
+# generate_image: rate limiting via callbacks
+# -----------------------------------------------------------------------
 
 class TestGenerateImageRateLimit:
     """generate_image should use is_image_rate_limited / update_image_time callbacks."""
@@ -360,9 +544,12 @@ class TestGenerateImageRateLimit:
         tools = _load_tools_module()
 
 
-        rate_limited = lambda: True
-        update_time = lambda: None
-        tools.configure_tool_callbacks(None, set(), None, answer_fn=None)
+        def rate_limited():
+            return True
+
+        def update_time():
+            return None
+        tools.configure_tool_callbacks(set(), None, answer_fn=None)
         # Set the new callbacks
         tools._is_generate_image_rate_limited = rate_limited
         tools._update_generate_image_time = update_time
@@ -378,13 +565,16 @@ class TestGenerateImageRateLimit:
 
 
         update_called = []
-        rate_limited = lambda: False
-        update_time = lambda: update_called.append(True)
+        def rate_limited():
+            return False
+
+        def update_time():
+            update_called.append(True)
         # Force volc branch for consistency
         import random as _random
         _orig_random = _random.random
         _random.random = lambda: 0.0
-        tools.configure_tool_callbacks(None, set(), None, answer_fn=None)
+        tools.configure_tool_callbacks(set(), None, answer_fn=None)
         tools._is_generate_image_rate_limited = rate_limited
         tools._update_generate_image_time = update_time
 
@@ -418,8 +608,11 @@ class TestGenerateImageRateLimit:
 
 
         update_called = []
-        rate_limited = lambda: False
-        update_time = lambda: update_called.append(True)
+        def rate_limited():
+            return False
+
+        def update_time():
+            update_called.append(True)
 
         # Override generate_image_for_volc to raise
         models_mod = sys.modules["hatsume.plugins.hatsume-plugin.models"]
@@ -433,7 +626,7 @@ class TestGenerateImageRateLimit:
         original_random = random.random
         random.random = lambda: 0.0
 
-        tools.configure_tool_callbacks(None, set(), None, answer_fn=None)
+        tools.configure_tool_callbacks(set(), None, answer_fn=None)
         tools._is_generate_image_rate_limited = rate_limited
         tools._update_generate_image_time = update_time
 
@@ -1049,7 +1242,6 @@ async def test_generate_video_returns_url_without_sending():
     models_mod.generate_video_for = AsyncMock(return_value="https://example.com/out.mp4")
     update_called = []
     tools.configure_tool_callbacks(
-        None,
         set(),
         None,
         answer_fn=AsyncMock(),
@@ -1240,7 +1432,6 @@ def test_end_conversation_calls_configured_callback():
     tools = _load_tools_module()
     callback = MagicMock()
     tools.configure_tool_callbacks(
-        None,
         set(),
         query_user_id=None,
         end_conversation_fn=callback,
@@ -1263,6 +1454,7 @@ def test_character_proxy_tools_are_mutually_exclusive():
     sys.modules[module_name] = character_proxy
 
     off_names = {item.__name__ for item in tools.get_chat_tools()}
+    assert "view_image" in off_names
     assert "send_video" in off_names
     assert "end_conversation" in off_names
     assert "create_character_proxy" in off_names
@@ -1303,7 +1495,7 @@ def test_create_character_proxy_uses_explicit_user_id_and_valid_duration(
     utils = sys.modules["hatsume.plugins.hatsume-plugin.utils"]
     utils.get_group_member_name = AsyncMock(return_value="Target")
     tools.set_current_group_id(456)
-    tools.configure_tool_callbacks(None, set(), query_user_id=111)
+    tools.configure_tool_callbacks(set(), query_user_id=111)
 
     result = asyncio.run(
         tools.create_character_proxy(proxied_user_id=222, **duration_args)

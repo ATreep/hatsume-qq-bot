@@ -22,11 +22,16 @@ PLUGIN_DIR = ROOT / "hatsume/plugins/hatsume-plugin"
 def _ensure_module(name: str, path: str | None = None, as_package: bool = False):
     """Ensure a module exists in sys.modules without overwriting existing ones."""
     if name in sys.modules:
-        return sys.modules[name]
-    mod = types.ModuleType(name)
-    if as_package and path:
-        mod.__path__ = [str(path)]
-    sys.modules[name] = mod
+        mod = sys.modules[name]
+    else:
+        mod = types.ModuleType(name)
+        if as_package and path:
+            mod.__path__ = [str(path)]
+        sys.modules[name] = mod
+
+    parent_name, _, child_name = name.rpartition(".")
+    if parent_name in sys.modules and child_name:
+        setattr(sys.modules[parent_name], child_name, mod)
     return mod
 
 
@@ -43,7 +48,7 @@ def _setup_package_hierarchy():
     _ensure_module("hatsume.plugins", str(ROOT / "hatsume/plugins"), as_package=True)
     _ensure_module("hatsume.plugins.hatsume-plugin", str(PLUGIN_DIR), as_package=True)
     # Alias
-    alias = _ensure_module("hatsume.plugins.hatsume_plugin", str(PLUGIN_DIR), as_package=True)
+    _ensure_module("hatsume.plugins.hatsume_plugin", str(PLUGIN_DIR), as_package=True)
 
     # Sub-packages
     _ensure_module("hatsume.plugins.hatsume_plugin.graph", str(PLUGIN_DIR / "graph"), as_package=True)
@@ -81,7 +86,6 @@ def _setup_package_hierarchy():
     # Add missing attributes to graph.nodes (merged, not graph.nodes.ai)
     nodes_mod = sys.modules["hatsume.plugins.hatsume_plugin.graph.nodes"]
     _ensure_attr(nodes_mod, "inject_agent_notification", lambda *a, **kw: None)
-    _ensure_attr(nodes_mod, "NOTIFY_MARK", "__agent_notify__")
 
     # Add missing attributes to graph.tools
     tools_mod = sys.modules["hatsume.plugins.hatsume_plugin.graph.tools"]
@@ -104,19 +108,21 @@ def _setup_package_hierarchy():
     if lc_name not in sys.modules:
         lc_msg = types.ModuleType(lc_name)
         sys.modules[lc_name] = lc_msg
+    else:
+        lc_msg = sys.modules[lc_name]
 
-        class _StubSystemMessage:
-            def __init__(self, content=""):
-                self.content = content
-            type = "system"
+    class _StubSystemMessage:
+        def __init__(self, content=""):
+            self.content = content
+        type = "system"
 
-        class _StubHumanMessage:
-            def __init__(self, content=""):
-                self.content = content
-            type = "human"
+    class _StubHumanMessage:
+        def __init__(self, content=""):
+            self.content = content
+        type = "human"
 
-        lc_msg.SystemMessage = _StubSystemMessage
-        lc_msg.HumanMessage = _StubHumanMessage
+    _ensure_attr(lc_msg, "SystemMessage", _StubSystemMessage)
+    _ensure_attr(lc_msg, "HumanMessage", _StubHumanMessage)
 
     # Stub nonebot (only if missing)
     if "nonebot" not in sys.modules:
@@ -143,7 +149,56 @@ def _setup_package_hierarchy():
         sys.modules[v11_name] = v11
 
 
-_setup_package_hierarchy()
+def _cleanup_package_hierarchy():
+    for name in list(sys.modules):
+        if name.startswith("hatsume.plugins.hatsume_plugin"):
+            del sys.modules[name]
+    plugins_mod = sys.modules.get("hatsume.plugins")
+    if plugins_mod is not None and hasattr(plugins_mod, "hatsume_plugin"):
+        delattr(plugins_mod, "hatsume_plugin")
+
+
+def _restore_package_hierarchy(
+    saved_modules: dict[str, types.ModuleType],
+    saved_plugins_attr,
+) -> None:
+    for name, mod in sorted(saved_modules.items(), key=lambda item: item[0].count(".")):
+        sys.modules[name] = mod
+        parent_name, _, child_name = name.rpartition(".")
+        if parent_name in sys.modules and child_name:
+            setattr(sys.modules[parent_name], child_name, mod)
+
+    plugins_mod = sys.modules.get("hatsume.plugins")
+    if plugins_mod is None:
+        return
+    if saved_plugins_attr is _MISSING:
+        if hasattr(plugins_mod, "hatsume_plugin"):
+            delattr(plugins_mod, "hatsume_plugin")
+    else:
+        setattr(plugins_mod, "hatsume_plugin", saved_plugins_attr)
+
+
+_MISSING = object()
+
+
+@pytest.fixture(autouse=True)
+def _isolated_package_hierarchy():
+    saved_modules = {
+        name: mod
+        for name, mod in sys.modules.items()
+        if name.startswith("hatsume.plugins.hatsume_plugin")
+    }
+    plugins_mod = sys.modules.get("hatsume.plugins")
+    saved_plugins_attr = (
+        getattr(plugins_mod, "hatsume_plugin")
+        if plugins_mod is not None and hasattr(plugins_mod, "hatsume_plugin")
+        else _MISSING
+    )
+    _cleanup_package_hierarchy()
+    _setup_package_hierarchy()
+    yield
+    _cleanup_package_hierarchy()
+    _restore_package_hierarchy(saved_modules, saved_plugins_attr)
 
 
 # ---------------------------------------------------------------------------

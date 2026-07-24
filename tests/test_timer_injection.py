@@ -1,9 +1,10 @@
-"""Tests for timer graph injection: TIMER_MARK detection and injection."""
+"""Tests for timer graph injection."""
 
 from __future__ import annotations
 
 import sys
 import types
+import re
 from pathlib import Path
 
 import pytest
@@ -68,15 +69,18 @@ def _load_ai_module():
 
     class _AIMessage:
         def __init__(self, content=""):
-            self.content = content; self.type = "ai"
+            self.content = content
+            self.type = "ai"
 
     class _HumanMessage:
         def __init__(self, content=""):
-            self.content = content; self.type = "human"
+            self.content = content
+            self.type = "human"
 
     class _SystemMessage:
         def __init__(self, content=""):
-            self.content = content; self.type = "system"
+            self.content = content
+            self.type = "system"
 
     lc_msgs = types.ModuleType("langchain.messages")
     lc_msgs.AIMessage = _AIMessage
@@ -118,6 +122,9 @@ def _load_ai_module():
     )
     sys.modules["nonebot_plugin_localstore"] = localstore
 
+    async def _get_timer_overview():
+        return ""
+
     stub_defs = {
         "hatsume.plugins.hatsume-plugin.models": {
             "get_advance_model": lambda thinking=True: None,
@@ -140,6 +147,7 @@ def _load_ai_module():
         },
         "hatsume.plugins.hatsume-plugin.graph": {},
         "hatsume.plugins.hatsume-plugin.utils": {
+            "CQ_AT_PATTERN": re.compile(r"\[CQ:at,qq=(\d+)\]"),
             "get_group_member_name": lambda *a, **kw: "",
             "get_date": lambda: "2026-01-01",
             "message_to_json": lambda *a, **kw: {},
@@ -150,16 +158,17 @@ def _load_ai_module():
         "hatsume.plugins.hatsume-plugin.graph.tools": {
             "search_web": None, "shell_executor": None, "find_memory": None,
             "query_memory": lambda *a, **kw: "", "capture_html_shot": None,
-            "generate_image": None, "generate_video": None,
+            "generate_image": None, "generate_video": None, "view_image": None,
             "send_image": None, "send_video": None,
             "reset_capture_flag": lambda: None,
             "get_avatar": None, "random_acg_photo": None,
-            "create_timer": None, "list_timers": None,
+            "create_timer": None, "list_timers": None, "get_timer": None,
+            "get_timer_overview": _get_timer_overview,
             "delete_timer": None, "skill_loader": None, "skill_remove": None,
             "skill_download": None, "skill_create": None, "membersearch": None,
             "agent_dispatch": None, "respond_to_shell_prompt": None,
-            "CHAT_TOOLS": [None] * 19,
-            "get_chat_tools": lambda: [None] * 19,
+            "CHAT_TOOLS": [None] * 21,
+            "get_chat_tools": lambda: [None] * 21,
             "set_shell_executor_limit": None,
             "_current_group_id": 0, "_capture_html_shot_used": False,
             "_generate_image_used": False, "_last_capture_html_demand": "",
@@ -187,43 +196,6 @@ def _load_ai_module():
     return mod
 
 
-class TestDetectTimerNotification:
-    """T003: detect_timer_notification extracts user_id from __timer__ mark."""
-
-    def test_detects_string_content(self):
-        ai_mod = _load_ai_module()
-        messages = [
-            MockMessage(content="hello"),
-            MockMessage(content="__timer__:12345"),
-        ]
-        result = ai_mod.detect_timer_notification({"messages": messages})
-        assert result == 12345
-
-    def test_detects_list_content(self):
-        ai_mod = _load_ai_module()
-        messages = [
-            MockMessage(content=[
-                {"type": "text", "text": "__timer__:67890\n定时任务内容..."},
-            ]),
-        ]
-        result = ai_mod.detect_timer_notification({"messages": messages})
-        assert result == 67890
-
-    def test_returns_none_for_regular_message(self):
-        ai_mod = _load_ai_module()
-        messages = [MockMessage(content="hello world")]
-        result = ai_mod.detect_timer_notification({"messages": messages})
-        assert result is None
-
-    def test_returns_none_for_agent_notify(self):
-        ai_mod = _load_ai_module()
-        messages = [
-            MockMessage(content="__agent_notify__:123:coding_agent\\nresult"),
-        ]
-        result = ai_mod.detect_timer_notification({"messages": messages})
-        assert result is None
-
-
 class TestInjectTimer:
     """T004: inject_timer builds correct message and injects into state."""
 
@@ -238,10 +210,10 @@ class TestInjectTimer:
         assert len(mock_state.human_queue) == 1
         msg = mock_state.human_queue[0]
         assert msg["type"] == "text"
-        assert "__timer__:123" in msg["text"]
+        assert "__timer__" not in msg["text"]
         assert "提醒开会" in msg["text"]
         assert "coroutine" not in msg["text"]
-        assert "group_0_123" in mock_state.chat_peers
+        assert mock_state.chat_peers == set()
 
     def test_includes_notified_user_identity_in_prompt(self):
         ai_mod = _load_ai_module()
@@ -275,7 +247,7 @@ class TestInjectTimer:
         )
         assert cb_called["called"]
         assert cb_called["user_id"] == 456
-        assert "__timer__:456" in cb_called["msg"]
+        assert "__timer__" not in cb_called["msg"]
         assert "喝水提醒" in cb_called["msg"]
 
     @pytest.mark.skip(reason="Merged nodes.py inject_timer calls _start_direct_conv which requires full dialogue.py import chain; out of scope for this test file")
@@ -300,9 +272,9 @@ class TestTimerInjectionRoundTrip:
             start_conversation_cb=None,
         )
         msg = mock_state.human_queue[0]
-        assert "__timer__:111" in msg["text"]
+        assert "__timer__" not in msg["text"]
         assert "定时提醒：喝水" in msg["text"]
-        assert "group_0_111" in mock_state.chat_peers
+        assert mock_state.chat_peers == set()
 
 
 class TestInjectAgentNotification:
@@ -323,7 +295,8 @@ class TestInjectAgentNotification:
             notified_user_name="Treep",
         )
         msg = mock_state.human_queue[0]["text"]
+        assert "__agent_notify__" not in msg
         assert "用户名：Treep" in msg
         assert "QQ号：234" in msg
         assert "[CQ:at,qq=234]" in msg
-        assert "group_9_234" in mock_state.chat_peers
+        assert mock_state.chat_peers == set()

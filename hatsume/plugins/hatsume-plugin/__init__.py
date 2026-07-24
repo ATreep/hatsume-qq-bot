@@ -14,7 +14,6 @@ from .config import ADMIN_QQ_ID
 from .handlers.dialogue import start_chat, user_chat_handle
 from .handlers.tools import (
     handle_agents,
-    handle_autocreate,
     handle_autoresponse,
     handle_clear,
     handle_generate_video,
@@ -126,7 +125,6 @@ resetsandbox_cmd = on_command(
 )
 agents_cmd = on_command("agents", priority=10, block=True)
 clear_cmd = on_command("clear", rule=lambda event: str(event.get_user_id()) == ADMIN_QQ_ID, priority=10, block=True)
-autocreate_cmd = on_command("autocreate", rule=lambda event: str(event.get_user_id()) == ADMIN_QQ_ID, priority=10, block=True)
 autoresponse_cmd = on_command("autoresponse", rule=lambda event: str(event.get_user_id()) == ADMIN_QQ_ID, priority=10, block=True)
 proxy_cmd = on_command("proxy", priority=10, block=True)
 
@@ -215,11 +213,6 @@ async def _():
 @clear_cmd.handle()
 async def _():
     await handle_clear(clear_cmd)
-
-
-@autocreate_cmd.handle()
-async def _(bot: Bot, event: GroupMessageEvent, args: Message = CommandArg()):
-    await handle_autocreate(bot, event, autocreate_cmd, args)
 
 
 @autoresponse_cmd.handle()

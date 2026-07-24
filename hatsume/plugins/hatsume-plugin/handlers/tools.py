@@ -246,29 +246,6 @@ async def handle_timer(bot, event, matcher, args: Message) -> None:
             )
         await matcher.finish("\n".join(lines))
 
-    elif sub == "autocreate":
-        task = store.get_auto_create()
-        if task is None or task.get("trigger_at") is None:
-            await matcher.finish("当前没有排期的自主创作任务。")
-
-        trigger_at = task["trigger_at"]  # type: ignore[index]  # guarded above
-        now = time.time()
-        tz_shanghai = timezone(timedelta(hours=8))
-        run_dt = datetime.fromtimestamp(trigger_at, tz=tz_shanghai)
-        ts_str = run_dt.strftime("%Y-%m-%d %H:%M:%S")
-
-        if trigger_at > now:
-            remaining = trigger_at - now
-            hours = int(remaining // 3600)
-            minutes = int((remaining % 3600) // 60)
-            await matcher.finish(
-                f"🎨 下一次自主创作预计在 {ts_str} 触发（约 {hours} 小时 {minutes} 分钟后）。"
-            )
-        else:
-            await matcher.finish(
-                f"🎨 上一次自主创作预计在 {ts_str} 触发，当前正在等待重新排期中..."
-            )
-
     elif sub == "delete":
         if len(parts) < 2:
             await matcher.finish(f"请提供任务 ID。\n\n{HELP}")
@@ -476,35 +453,6 @@ async def handle_clear(matcher) -> None:
         await matcher.finish("✅ 对话已强制结束，上下文已清除。")
     else:
         await matcher.finish("✅ 上下文已清除。（当前无活跃对话）")
-
-
-async def handle_autocreate(bot, event, matcher, args: Message) -> None:
-    """Immediately trigger an auto-create execution (debug command).
-
-    Injects the auto-create prompt into the graph targeting the group
-    where the command was sent.
-    If args is non-empty, use it as the prompt instead of AUTO_CREATE_PROMPT.
-    Does NOT modify the database — no task created, no reschedule.
-    """
-    from ..graph.nodes import inject_timer
-    from ..prompts import get_auto_create_prompt
-    from ..config import AUTO_CREATE_GROUP_ID
-
-    custom_prompt = args.extract_plain_text().strip()
-    group_id = event.group_id
-    if args.extract_plain_text().strip() == "prod":
-        prompt = get_auto_create_prompt()
-        group_id = AUTO_CREATE_GROUP_ID
-    else:
-        prompt = custom_prompt if custom_prompt else get_auto_create_prompt()
-
-    inject_timer(
-        user_id=0,
-        group_id=group_id,
-        timer_prompt=prompt,
-        start_conversation_cb=None,
-    )
-    await matcher.finish(f"🎨 Autonomous Creative Mode ON\n\n {prompt}")
 
 
 async def handle_autoresponse(bot, event, matcher, args: Message) -> None:

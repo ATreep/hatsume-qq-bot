@@ -39,22 +39,20 @@ from ..prompts import (
 from ..skills import get_skill_manager
 from .tools import (
     get_chat_tools,
+    get_timer_overview,
     _current_group_id,
     query_memory,
     reset_capture_flag,
     set_shell_executor_limit,
 )
 
-from ..utils import get_group_member_name, get_date, message_to_json
+from ..utils import CQ_AT_PATTERN, get_group_member_name, get_date, message_to_json
 from ..utils.md_to_image import auto_convert_text
-
 from ..config import CONTEXT_QUEUE_LEN
 
 # ---------------------------------------------------------------------------
-# Marks & patterns
+# Patterns
 # ---------------------------------------------------------------------------
-NOTIFY_MARK = "__agent_notify__"
-TIMER_MARK = "__timer__"
 FACE_TAG_PATTERN = re.compile(r"\[hatsumeface:(.*?)\]")
 MEMORY_RECORD_PATTERN = re.compile(r"\[memoryrecord:\s*(.+?)\]", re.DOTALL)
 MEMORY_KEYMAN_PATTERN = re.compile(r"\[memorykeyman:\s*(.+?)\]")
@@ -117,64 +115,6 @@ def _extract_memory_records(text: str) -> tuple[dict | None, str]:
 
 
 # ---------------------------------------------------------------------------
-# Notification detection
-# ---------------------------------------------------------------------------
-def detect_agent_notification(state: MessagesState) -> int | None:
-    """Scan state["messages"][-1].content for NOTIFY_MARK.
-
-    Returns the notified user_id (int) if the last message contains
-    a __agent_notify__ mark, or None otherwise.
-    """
-    last_content = state["messages"][-1].content
-
-    if isinstance(last_content, list):
-        for part in reversed(last_content):
-            text = ""
-            if isinstance(part, dict) and part.get("type") == "text":
-                text = str(part.get("text", ""))
-            elif isinstance(part, str):
-                text = part
-            if text.startswith(NOTIFY_MARK):
-                _, uid_str, _ = text.split(":", 2)
-                print(f"🧩 [detect_agent_notification] Detected agent notification for user {uid_str}")
-                return int(uid_str)
-    elif isinstance(last_content, str) and last_content.startswith(NOTIFY_MARK):
-        _, uid_str, _ = last_content.split(":", 2)
-        print(f"🧩 [detect_agent_notification] Detected agent notification for user {uid_str}")
-        return int(uid_str)
-
-    return None
-
-def detect_timer_notification(state: MessagesState) -> int | None:
-    """Scan state["messages"][-1].content for TIMER_MARK.
-
-    Returns the notified user_id (int) if the last message contains
-    a __timer__ mark, or None otherwise.
-    """
-    last_content = state["messages"][-1].content
-
-    if isinstance(last_content, list):
-        for part in reversed(last_content):
-            text = ""
-            if isinstance(part, dict) and part.get("type") == "text":
-                text = str(part.get("text", ""))
-            elif isinstance(part, str):
-                text = part
-            if text.startswith(TIMER_MARK):
-                _, uid_str = text.split(":", 1)
-                uid_str = uid_str.split("\n")[0].strip()
-                print(f"⏰ [detect_timer_notification] Detected timer notification for user {uid_str}")
-                return int(uid_str)
-    elif isinstance(last_content, str) and last_content.startswith(TIMER_MARK):
-        _, uid_str = last_content.split(":", 1)
-        uid_str = uid_str.split("\n")[0].strip()
-        print(f"⏰ [detect_timer_notification] Detected timer notification for user {uid_str}")
-        return int(uid_str)
-
-    return None
-
-
-# ---------------------------------------------------------------------------
 # User-id extraction from message content
 # ---------------------------------------------------------------------------
 def extract_user_ids_from_content(content: Any) -> list[int]:
@@ -230,21 +170,10 @@ def inject_agent_notification(
     notified_user_name: str | None = None,
     start_conversation_cb: Any = None,
 ) -> None:
-    """Inject agent result into the conversation flow with a special mark prefix.
-
-    Injects "(SYSTEM) ..., __agent_notify__:<user_id>:<agent_name>, <result>"
-    into the conversation queue and adds the notified user as a peer.
-
-    If currently chatting (_state.is_chatting), appends to human_queue and
-    adds the notified user to chat_peers (skipped when user_id is 0, meaning
-    no user needs to be @-mentioned).
-    Otherwise, calls start_conversation_cb(user_id, group_id, msg) to launch
-    a new graph conversation targeting the specified group.
-    """
+    """Inject an agent result into the conversation flow."""
     context_line = f"📋 派发背景：{context}\n" if context else ""
     notified_user_prompt = _build_notified_user_prompt(user_id, notified_user_name)
     notify_msg = (
-        f"{NOTIFY_MARK}:{user_id}:{agent_name}\n"
         f"(SYSTEM) Agent '{agent_name}' 执行完毕。\n"
         f"{notified_user_prompt}"
         f"{context_line}"
@@ -261,8 +190,6 @@ def inject_agent_notification(
 
     if _state and _state.is_chatting:
         _state.human_queue.append({"type": "text", "text": notify_msg})
-        if user_id != 0:
-            _state.chat_peers.add(f"group_{group_id}_{user_id}")
         print(f"🧩 [inject_agent_notification] Injected {agent_name} result into human_queue")
     else:
         if start_conversation_cb is not None:
@@ -278,33 +205,20 @@ def inject_timer(
     group_id: int,
     timer_prompt: str,
     start_conversation_cb: Any = None,
-    is_auto_create: bool = False,
     notified_user_name: str | None = None,
 ) -> None:
-    """Inject a timer prompt into the conversation flow with a __timer__ mark.
-
-    Builds a timer notification message and injects it into the graph:
-    - If currently chatting (_state.is_chatting), appends to human_queue
-      and adds the notified user to chat_peers.
-    - Otherwise, calls start_conversation_cb to launch a new graph conversation.
+    """Inject a timer prompt into the conversation flow.
 
     Args:
         user_id: QQ user ID to notify (0 means no user to @-mention).
-        is_auto_create: True when called from the auto_create rescheduling loop.
-            Distinguishes auto_create from normal timers with user_id=0.
     """
-    # user_id=0: no user to notify (auto_create or normal timer without recipient)
+    # user_id=0: no user to notify.
     if user_id == 0:
-        timer_msg = (
-            f"{TIMER_MARK}:0\n"
-            f"{timer_prompt}"
-        )
-        tag = "auto_create" if is_auto_create else "timer (no user)"
-        print(f"⏰ [inject_timer] {tag}: {timer_prompt[:80]}...")
+        timer_msg = timer_prompt
+        print(f"⏰ [inject_timer] timer (no user): {timer_prompt[:80]}...")
     else:
         notified_user_prompt = _build_notified_user_prompt(user_id, notified_user_name)
         timer_msg = (
-            f"{TIMER_MARK}:{user_id}\n"
             f"(SYSTEM) 定时任务已触发。\n"
             f"{notified_user_prompt}"
             f"{timer_prompt}"
@@ -313,8 +227,6 @@ def inject_timer(
 
     if _state and _state.is_chatting:
         _state.human_queue.append({"type": "text", "text": timer_msg})
-        if user_id != 0:
-            _state.chat_peers.add(f"group_{group_id}_{user_id}")
         print(f"⏰ [inject_timer] Injected timer into human_queue for user {user_id}")
     else:
         if start_conversation_cb is not None:
@@ -327,7 +239,7 @@ def inject_timer(
 def _start_direct_conv(user_id: int, group_id: int, notify_msg: str) -> None:
     """Start a new graph conversation targeting a specific group directly.
 
-    Used when no callback is registered (e.g., /autocreate debug command).
+    Used when no callback is registered (e.g., /autoresponse debug command).
     Sends messages to the target group via bot.send_group_msg().
     """
     from nonebot import get_bot
@@ -337,20 +249,17 @@ def _start_direct_conv(user_id: int, group_id: int, notify_msg: str) -> None:
 
     bot = get_bot()
 
-    async def _send_to_group(msg, at_id=None):
+    async def _send_to_group(msg):
         if msg == "[CONVERSATION END]":
             conv_state.end_conversation()
             return
         text = mask_secret_keys(str(msg))
-        if at_id:
-            text = f"[CQ:at,qq={at_id}] {text}"
         try:
             await bot.send_group_msg(group_id=group_id, message=text)
         except Exception as e:
             print(f"❌ _send_to_group failed: group={group_id} err={e}")
 
     conv_state.ai_answer = _send_to_group
-    conv_state.ai_answer_with_at = _send_to_group
     conv_state.activate_chat(f"group_{group_id}_{user_id}")
 
     asyncio.create_task(
@@ -498,10 +407,6 @@ async def ai_node(state: MessagesState) -> dict:
 
     print("Memory retrieved: \n" + memory_summary)
 
-    # ── Detect agent/timer notification mark in the last message ──
-    notified_uid = detect_agent_notification(state)
-    timer_uid = detect_timer_notification(state)
-
     model_chosen = get_advance_model(thinking=True)
     sys_prompt = get_role_sys_prompt()
 
@@ -529,6 +434,10 @@ async def ai_node(state: MessagesState) -> dict:
     if agent_prompt:
         sys_prompt += agent_prompt
         print("[agents] Injected agent state info into system prompt")
+
+    timer_overview = await get_timer_overview()
+    sys_prompt += "\n\n" + timer_overview
+    print("[timers] Injected timer overview into system prompt")
 
     # ── Face injection gate ──
 
@@ -605,9 +514,6 @@ async def ai_node(state: MessagesState) -> dict:
                 part.get("text", "") if isinstance(part, dict) else str(part)
                 for part in ai_text
             )
-        if not isinstance(ai_text, str) or ai_text.strip() == "":
-            print("❌ No response in chat_agent")
-            return {}
 
         # LLM outputs plain text directly
         print(f"Raw AI response: {ai_text}")
@@ -618,7 +524,7 @@ async def ai_node(state: MessagesState) -> dict:
 
     # ── Extract face tag from ai_text ──
     face_emotion: str | None = None
-    ai_text_clean = ai_text
+    ai_text_clean = str(ai_text)
     match = FACE_TAG_PATTERN.search(ai_text)
     if match:
         face_emotion = match.group(1).strip()
@@ -634,26 +540,16 @@ async def ai_node(state: MessagesState) -> dict:
     end_requested = bool(
         _state is not None and getattr(_state, "end_requested", False)
     )
-    ai_segments = [] if end_requested else await auto_convert_text(ai_text_clean)
     if end_requested:
         print("[end_conversation] Suppressed the final AI reply.")
-    elif notified_uid is not None and notified_uid != 0:
-        at_callback = _state.ai_answer_with_at if _state else None
-        if at_callback:
-            for seg in ai_segments:
-                await at_callback(seg, notified_uid)
-            print(f"🧩 [ai_node] Sent agent result via ai_answer_with_at to user {notified_uid}")
-    elif timer_uid is not None:
-        at_callback = _state.ai_answer_with_at if _state else None
-        if at_callback:
-            for seg in ai_segments:
-                await at_callback(seg, timer_uid)
-            print(f"⏰ [ai_node] Sent timer result via ai_answer_with_at to user {timer_uid}")
-    else:
+    elif ai_text_clean:
         _ai_answer = _get_ai_answer()
         if _ai_answer:
-            for seg in ai_segments:
-                await _ai_answer(seg)
+            if CQ_AT_PATTERN.search(ai_text_clean):
+                await _ai_answer(ai_text_clean)
+            else:
+                for seg in await auto_convert_text(ai_text_clean):
+                    await _ai_answer(seg)
 
     t_mem_start = time.time()
 
@@ -727,14 +623,6 @@ async def human_node(state: MessagesState) -> dict:
 # ---------------------------------------------------------------------------
 async def chat_end_detect_node(state: MessagesState) -> dict:
     print("Enter chat_end_detect_node")
-
-    # Agent notification: always route to chat_llm, never end conversation
-    if detect_agent_notification(state) is not None:
-        return {"messages": []}
-
-    # Timer notification: always route to chat_llm, never end conversation
-    if detect_timer_notification(state) is not None:
-        return {"messages": []}
 
     from ..character_proxy import message_mentions_character_proxy
 

@@ -11,7 +11,10 @@ from typing import Any
 
 from nonebot import require
 
-from ..config import AUTO_CREATE_GROUP_ID, TIMER_TOLERANCE_MINUTES
+from ..config import (
+    AUTO_RESPONSE_GROUP_ID,
+    TIMER_TOLERANCE_MINUTES,
+)
 from .store import TimerStore
 
 scheduler = require("nonebot_plugin_apscheduler").scheduler
@@ -80,22 +83,6 @@ def add_jobs_for_task(task_id: int, store: TimerStore) -> None:
     print(f"⏰ [timer] Added {count} jobs for task {task_id}")
 
 
-# ---------------------------------------------------------------------------
-# Auto Create — random trigger time
-# ---------------------------------------------------------------------------
-
-def _random_next_trigger() -> float:
-    """Generate a random trigger time in [now+4h, now+6h].
-
-    Returns a Unix timestamp (float).
-    """
-    tz = timezone(timedelta(hours=8))
-    now = datetime.now(tz)
-    delta_seconds = random.uniform(4 * 3600, 6 * 3600)
-    t = now + timedelta(seconds=delta_seconds)
-    return t.timestamp()
-
-
 def _random_response_trigger() -> float:
     """Generate a random trigger time in [now+1h, now+3h].
 
@@ -110,69 +97,24 @@ def _random_response_trigger() -> float:
 
 
 # ---------------------------------------------------------------------------
-# Auto Create — execution and lifecycle
-# ---------------------------------------------------------------------------
-
-async def _execute_auto_create(task: dict, store: TimerStore) -> None:
-    """Execute an auto_create timer: inject into graph, then reschedule.
-
-    The auto_create task produces creative output visible in the group
-    but does NOT @-mention any user (user_id=0).
-    Rescheduling happens immediately after injection — we don't wait
-    for the LLM to finish processing.
-    """
-    from ..prompts import get_auto_create_prompt
-    from ..graph.nodes import inject_timer
-
-    prompt = task.get("prompt") or get_auto_create_prompt()
-
-    print("🎨 [auto_create] Executing...")
-    inject_timer(
-        user_id=0,
-        group_id=AUTO_CREATE_GROUP_ID,
-        timer_prompt=prompt,
-        start_conversation_cb=_timer_start_conv_cb,
-        is_auto_create=True,
-    )
-
-    # Reschedule immediately — fire-and-forget pattern
-    reschedule_auto_create(store)
-
-
-def reschedule_auto_create(store: TimerStore) -> None:
-    """Delete the old auto_create task and create a new one with a random
-    trigger time in [now+4h, now+6h].
-
-    Registers the new APScheduler job for the random trigger time.
-    """
-    next_trigger = _random_next_trigger()
-    task_id = store.upsert_auto_create(next_trigger)
-
-    triggers = store.get_triggers_for_task(task_id)
-    for t in triggers:
-        if not t["fired"]:
-            register_job(t, store)
-
-    run_dt = datetime.fromtimestamp(next_trigger, tz=timezone(timedelta(hours=8)))
-    print(
-        f"🎨 [auto_create] Rescheduled: task={task_id} "
-        f"next={run_dt.strftime('%Y-%m-%d %H:%M:%S')}"
-    )
-
-
-# ---------------------------------------------------------------------------
 # Auto Response — execution and lifecycle
 # ---------------------------------------------------------------------------
 
 async def _execute_auto_response(task: dict, store: TimerStore) -> None:
     """Execute an auto_response timer: inject into graph, then reschedule.
 
-    Mirror of _execute_auto_create — injects the prompt with user_id=0
-    (no @-mention) and reschedules immediately (fire-and-forget).
+    Injects the prompt with user_id=0 (no @-mention) and reschedules
+    immediately (fire-and-forget).
     """
+    if AUTO_RESPONSE_GROUP_ID <= 0:
+        print(
+            "❌ [auto_response] Skipped: "
+            "AUTO_RESPONSE_GROUP_ID is not configured"
+        )
+        return
+
     from ..prompts import get_auto_response_prompt
     from ..graph.nodes import inject_timer
-    from ..config import AUTO_RESPONSE_GROUP_ID
 
     prompt = task.get("prompt") or get_auto_response_prompt()
 
@@ -182,7 +124,6 @@ async def _execute_auto_response(task: dict, store: TimerStore) -> None:
         group_id=AUTO_RESPONSE_GROUP_ID,
         timer_prompt=prompt,
         start_conversation_cb=_timer_start_conv_cb,
-        is_auto_create=False,
     )
 
     # Reschedule immediately — fire-and-forget pattern
@@ -195,6 +136,13 @@ def reschedule_auto_response(store: TimerStore) -> None:
 
     Registers the new APScheduler job for the random trigger time.
     """
+    if AUTO_RESPONSE_GROUP_ID <= 0:
+        print(
+            "❌ [auto_response] Reschedule skipped: "
+            "AUTO_RESPONSE_GROUP_ID is not configured"
+        )
+        return
+
     next_trigger = _random_response_trigger()
     task_id = store.upsert_auto_response(next_trigger)
 
@@ -217,6 +165,21 @@ async def refresh_auto_response(store: TimerStore) -> None:
     its APScheduler job without changing the trigger time.
     Otherwise, create a fresh one via reschedule_auto_response.
     """
+    if AUTO_RESPONSE_GROUP_ID <= 0:
+        pending = store.list_auto_response_triggers()
+        for trigger in pending:
+            cancel_job(trigger["id"])
+        assert store._conn is not None, "TimerStore not initialized"
+        store._conn.execute(
+            "DELETE FROM timer_tasks WHERE task_type = 'auto_response'"
+        )
+        store._conn.commit()
+        print(
+            "❌ [auto_response] Disabled: "
+            "AUTO_RESPONSE_GROUP_ID is not configured"
+        )
+        return
+
     import time as time_mod
 
     now = time_mod.time()
@@ -314,11 +277,9 @@ async def _execute_timer(trigger: dict, store: TimerStore) -> None:
         print(f"⏰ [timer] Task {task_id} not found, skipping")
         return
 
-    # Auto-create tasks take a separate execution path
     if task.get("task_type") == "auto_create":
-        # Mark fired before executing (fire-and-forget)
-        store.mark_trigger_fired(trigger_id)
-        await _execute_auto_create(task, store)
+        store.delete_task(task_id)
+        print(f"⏰ [timer] Removed legacy auto_create task {task_id}")
         return
 
     # Auto-response tasks take a separate execution path
@@ -382,16 +343,14 @@ async def _inject_timer_to_graph(
     user_id: int,
     group_id: int,
     task_prompt: str,
-    is_auto_create: bool = False,
     user_name: str | None = None,
 ) -> None:
     """Inject a timer prompt into the conversation graph.
 
     Mirrors the agent_dispatch -> inject_agent_notification pattern.
-    Builds a __timer__:{user_id} marked message and injects it via
-    inject_timer() in graph/nodes.py. The existing LangGraph handles
-    everything: human_node picks it up, detect_node routes to continue,
-    ai_node @mentions the timer creator.
+    Builds a timer prompt and injects it via inject_timer() in graph/nodes.py.
+    The existing LangGraph handles the response, and any QQ at mention is
+    emitted through explicit [CQ:at,qq=...] placeholders in model output.
     """
     from ..graph.nodes import inject_timer
 
@@ -400,6 +359,5 @@ async def _inject_timer_to_graph(
         group_id=group_id,
         timer_prompt=task_prompt,
         start_conversation_cb=_timer_start_conv_cb,
-        is_auto_create=is_auto_create,
         notified_user_name=user_name,
     )

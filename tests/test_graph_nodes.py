@@ -305,9 +305,12 @@ def _load_nodes_module():
     tools_mod.capture_html_shot = None
     tools_mod.generate_image = None
     tools_mod.generate_video = None
+    tools_mod.view_image = None
     tools_mod.get_avatar = None
     tools_mod.create_timer = None
     tools_mod.list_timers = None
+    tools_mod.get_timer = None
+    tools_mod.get_timer_overview = AsyncMock(return_value="timer overview")
     tools_mod.delete_timer = None
     tools_mod.skill_loader = None
     tools_mod.skill_remove = None
@@ -326,6 +329,7 @@ def _load_nodes_module():
         tools_mod.search_web,
         tools_mod.shell_executor,
         tools_mod.find_memory,
+        tools_mod.view_image,
         tools_mod.generate_image,
         tools_mod.generate_video,
         tools_mod.send_image,
@@ -334,6 +338,7 @@ def _load_nodes_module():
         tools_mod.random_acg_photo,
         tools_mod.create_timer,
         tools_mod.list_timers,
+        tools_mod.get_timer,
         tools_mod.delete_timer,
         tools_mod.skill_loader,
         tools_mod.skill_remove,
@@ -629,8 +634,6 @@ def test_finish_conversation_node_saves_to_auxiliary_queue():
 
 def _load_docker_module():
     """Load infra.py with all external dependencies stubbed."""
-    import subprocess as sp
-
     base = ROOT / "hatsume/plugins/hatsume-plugin"
 
     # Ensure the package hierarchy exists in sys.modules
@@ -765,7 +768,7 @@ def test_cleanup_persistent_container_resets_flag():
 
 def test_tools_module_has_last_capture_html_variable():
     """Verify _last_capture_html module-level variable exists in the tools mock."""
-    nodes = _load_nodes_module()
+    _load_nodes_module()
     tools_mod = sys.modules["hatsume.plugins.hatsume-plugin.graph.tools"]
     assert hasattr(tools_mod, "_last_capture_html")
     assert tools_mod._last_capture_html == ""
@@ -834,7 +837,7 @@ def test_human_node_clears_auxiliary_only_flag_when_human_queue_present():
     )
     nodes.bind_state(mock_state)
 
-    result = asyncio.run(nodes.human_node({"messages": []}))
+    asyncio.run(nodes.human_node({"messages": []}))
 
     assert nodes._last_was_auxiliary_only is False
 
@@ -993,7 +996,6 @@ def test_ai_node_suppresses_reply_after_end_conversation_tool():
         is_graph_running=True,
         current_query_user_id=None,
         ai_answer=answer,
-        ai_answer_with_at=answer,
         end_requested=False,
     )
     nodes.bind_state(mock_state)
@@ -1227,6 +1229,39 @@ def test_ai_node_injects_invocation_datetime_into_system_prompt():
         nodes.get_date = original_get_date
 
 
+def test_ai_node_reuses_timer_overview_in_system_prompt():
+    nodes = _load_nodes_module()
+    tools_mod = sys.modules["hatsume.plugins.hatsume-plugin.graph.tools"]
+    tools_mod.get_timer_overview.return_value = "shared timer overview"
+    sys_prompts: list[str] = []
+
+    class _FakeAgent:
+        def with_retry(self, **kw):
+            return self
+
+        async def ainvoke(self, *a, **kw):
+            return {"messages": [types.SimpleNamespace(content="hello", type="ai")]}
+
+    original_create_agent = nodes.create_agent
+
+    def _tracking_create_agent(model, tools, system_prompt=None, **kw):
+        sys_prompts.append(system_prompt or "")
+        return _FakeAgent()
+
+    nodes.create_agent = _tracking_create_agent
+    try:
+        asyncio.run(
+            nodes.ai_node(
+                {"messages": [types.SimpleNamespace(content="hello", type="human")]}
+            )
+        )
+    finally:
+        nodes.create_agent = original_create_agent
+
+    tools_mod.get_timer_overview.assert_awaited_once_with()
+    assert "\n\nshared timer overview\n\n# 当前日期与时间" in sys_prompts[0]
+
+
 def test_generate_image_used_skips_face_injection():
     """When _generate_image_used is True, face injection prompt should NOT be
     added to chat_agent's system_prompt."""
@@ -1383,7 +1418,6 @@ def test_face_tag_stripped_from_user_text_preserved_in_aimessage():
         is_graph_running=True,
         current_query_user_id=None,
         ai_answer=_mock_send,
-        ai_answer_with_at=None,
     )
     nodes.bind_state(mock_state)
 
@@ -1530,78 +1564,3 @@ def test_append_auxiliary_message_clears_retrieved_mem_keys_on_compaction_failur
         nodes._retrieved_mem_keys.clear()
         nodes.auxiliary_messages_queue.clear()
         nodes.auxiliary_source_queue.clear()
-
-
-# -----------------------------------------------------------------------
-# detect_agent_notification — NOTIFY_MARK extraction (Feature 016)
-# -----------------------------------------------------------------------
-
-
-def test_detect_agent_notification_returns_uid_for_notify_mark_in_list_content():
-    """detect_agent_notification extracts user_id from NOTIFY_MARK in list content."""
-    nodes = _load_nodes_module()
-
-    state = {
-        "messages": [
-            MockMessage(
-                content=[
-                    {"type": "text", "text": f"{nodes.NOTIFY_MARK}:12345:coding_agent\nresult text"}
-                ]
-            )
-        ]
-    }
-
-    result = nodes.detect_agent_notification(state)
-    assert result == 12345
-
-
-def test_detect_agent_notification_returns_uid_for_notify_mark_in_string_content():
-    """detect_agent_notification extracts user_id from NOTIFY_MARK in string content."""
-    nodes = _load_nodes_module()
-
-    state = {
-        "messages": [
-            MockMessage(
-                content=f"{nodes.NOTIFY_MARK}:67890:generate_video\nvideo result"
-            )
-        ]
-    }
-
-    result = nodes.detect_agent_notification(state)
-    assert result == 67890
-
-
-def test_detect_agent_notification_returns_none_when_no_notify_mark():
-    """detect_agent_notification returns None for normal messages."""
-    nodes = _load_nodes_module()
-
-    state = {
-        "messages": [
-            MockMessage(
-                content=[{"type": "text", "text": "hello world"}]
-            )
-        ]
-    }
-
-    result = nodes.detect_agent_notification(state)
-    assert result is None
-
-
-def test_chat_end_detect_node_skips_detection_when_notify_mark_present():
-    """chat_end_detect_node returns {"messages": []} immediately when NOTIFY_MARK found."""
-    nodes = _load_nodes_module()
-
-    state = {
-        "messages": [
-            MockMessage("msg1", "human"),
-            MockMessage("msg2", "ai"),
-            MockMessage("msg3", "human"),
-            MockMessage(
-                content=[{"type": "text", "text": f"{nodes.NOTIFY_MARK}:11111:coding_agent\nsome result"}]
-            ),
-        ]
-    }
-
-    result = asyncio.run(nodes.chat_end_detect_node(state))
-    # Should return {"messages": []} (continue) without calling any model
-    assert result == {"messages": []}

@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import re
 import sys
 import types
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
-
-import pytest
+from unittest.mock import AsyncMock, MagicMock
 
 ROOT = Path(__file__).resolve().parents[1]
 PLUGIN_DIR = ROOT / "hatsume/plugins/hatsume-plugin"
@@ -179,7 +178,6 @@ def _load_conversation_module():
         prompts_mod = types.ModuleType(prompts_name)
         prompts_mod.HTML_GENERATION_PROMPT = "Generate HTML"
         sys.modules[prompts_name] = prompts_mod
-    sys.modules[prompts_name].get_auto_create_prompt = MagicMock(return_value="")
     sys.modules[prompts_name].get_auto_response_prompt = MagicMock(return_value="")
 
     # Stub utils with the complete interface dialogue.py imports. Other tests may
@@ -190,10 +188,12 @@ def _load_conversation_module():
         sys.modules[utils_name] = utils_mod
     utils_mod = sys.modules[utils_name]
     utils_mod.build_forward_json = MagicMock(return_value={})
+    utils_mod.CQ_AT_PATTERN = re.compile(r"\[CQ:at,qq=(\d+)\]")
     utils_mod.get_date = MagicMock(return_value="2026/01/01 00:00:00")
     utils_mod.get_group_member_name = AsyncMock(return_value="user")
     utils_mod.mask_secret_keys = MagicMock(side_effect=lambda text: text)
     utils_mod.message_to_json = MagicMock(return_value={})
+    utils_mod.render_cq_at_placeholders = AsyncMock(side_effect=lambda text, group_id: (text, []))
 
     # Stub memory.engine (imported by tools.py)
     mem_engine_name = "hatsume.plugins.hatsume-plugin.memory.engine"
@@ -233,14 +233,22 @@ def _load_conversation_module():
         sys.modules[onebot_name] = types.ModuleType(onebot_name)
         sys.modules[onebot_name].__path__ = []
     v11_name = "nonebot.adapters.onebot.v11"
-    if v11_name not in sys.modules or not hasattr(sys.modules[v11_name], "MessageEvent"):
-        if v11_name not in sys.modules:
-            sys.modules[v11_name] = types.ModuleType(v11_name)
-        sys.modules[v11_name].Message = MagicMock()
-        sys.modules[v11_name].MessageSegment = MagicMock()
-        sys.modules[v11_name].GroupMessageEvent = MagicMock()
-        sys.modules[v11_name].MessageEvent = MagicMock()
-        sys.modules[v11_name].PokeNotifyEvent = MagicMock()
+    if v11_name not in sys.modules:
+        sys.modules[v11_name] = types.ModuleType(v11_name)
+
+    class _Message(list):
+        def extract_plain_text(self):
+            return "".join(
+                str(getattr(seg, "data", {}).get("text", ""))
+                for seg in self
+                if getattr(seg, "type", None) == "text"
+            )
+
+    sys.modules[v11_name].Message = _Message
+    sys.modules[v11_name].MessageSegment = MagicMock()
+    sys.modules[v11_name].GroupMessageEvent = MagicMock()
+    sys.modules[v11_name].MessageEvent = MagicMock()
+    sys.modules[v11_name].PokeNotifyEvent = MagicMock()
 
     # Load dialogue.py — force reload even if a stale stub exists
     conv_path = PLUGIN_DIR / "handlers" / "dialogue.py"
@@ -254,13 +262,52 @@ def _load_conversation_module():
     return mod
 
 
-def test_handle_ai_message_temporarily_sends_text_without_at_prefix():
+def test_handle_ai_message_sends_plain_text_segments_without_at_prefix():
     dialogue = _load_conversation_module()
     dialogue.auto_convert_text = AsyncMock(return_value=["plain-text-segment"])
     dialogue.MessageSegment.at = MagicMock(return_value="at-segment")
     matcher = types.SimpleNamespace(send=AsyncMock())
 
-    asyncio.run(dialogue.handle_ai_message("hello", matcher, at_id=123456))
+    asyncio.run(dialogue.handle_ai_message("hello", matcher))
 
     dialogue.MessageSegment.at.assert_not_called()
     matcher.send.assert_awaited_once_with("plain-text-segment")
+
+
+def test_handle_ai_message_replaces_cq_at_in_pure_text():
+    dialogue = _load_conversation_module()
+    dialogue.auto_convert_text = AsyncMock(
+        return_value=[types.SimpleNamespace(type="text", data={"text": "hi @Treep"})]
+    )
+    dialogue.render_cq_at_placeholders = AsyncMock(return_value=("hi @Treep", [123456]))
+    dialogue.MessageSegment.text = MagicMock(
+        side_effect=lambda text: types.SimpleNamespace(type="text", data={"text": text})
+    )
+    dialogue.MessageSegment.at = MagicMock(
+        side_effect=lambda uid: types.SimpleNamespace(type="at", data={"qq": uid})
+    )
+    matcher = types.SimpleNamespace(send=AsyncMock())
+
+    asyncio.run(dialogue.handle_ai_message("hi [CQ:at,qq=123456]", matcher, group_id=7))
+
+    payload = matcher.send.await_args.args[0]
+    assert [seg.type for seg in payload] == ["text", "at"]
+    assert payload[0].data["text"] == "hi "
+    assert payload[1].data["qq"] == 123456
+
+
+def test_handle_ai_message_puts_cq_at_segments_before_rendered_image():
+    dialogue = _load_conversation_module()
+    image_seg = types.SimpleNamespace(type="image", data={"file": "img"})
+    dialogue.auto_convert_text = AsyncMock(return_value=[image_seg])
+    dialogue.render_cq_at_placeholders = AsyncMock(return_value=("# @Treep\nresult", [123456]))
+    dialogue.MessageSegment.at = MagicMock(
+        side_effect=lambda uid: types.SimpleNamespace(type="at", data={"qq": uid})
+    )
+    matcher = types.SimpleNamespace(send=AsyncMock())
+
+    asyncio.run(dialogue.handle_ai_message("# [CQ:at,qq=123456]\nresult", matcher, group_id=7))
+
+    payload = matcher.send.await_args.args[0]
+    assert [seg.type for seg in payload] == ["at", "image"]
+    assert payload[0].data["qq"] == 123456

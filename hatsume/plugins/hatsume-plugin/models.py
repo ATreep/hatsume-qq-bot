@@ -8,6 +8,8 @@ import random
 import time
 from typing import Any, Literal, Optional
 
+from langchain_core.language_models import BaseChatModel
+
 from . import config as _config
 from .config import (
     DEEPSEEK_V4_FLASH,
@@ -27,55 +29,8 @@ from .config import (
 )
 
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_google_genai import ChatGoogleGenerativeAI
 from volcenginesdkarkruntime import Ark
-
-# Monkey-patch: preserve non-OpenAI fields through message round-trips.
-# langchain_openai strips extra fields when serializing AIMessage dicts,
-# but provider-specific APIs require them:
-#   - reasoning_content: DeepSeek-compatible APIs (e.g. mimo, deepseek)
-#   - thought_signature: Gemini OpenAI-compatible API (required for tool calls)
-import langchain_core.messages as _lc_messages
-import langchain_openai.chat_models.base as _openai_base
-
-_orig_convert_dict = _openai_base._convert_dict_to_message
-_orig_convert_msg = _openai_base._convert_message_to_dict
-
-
-def _patched_convert_dict(_dict):
-    msg = _orig_convert_dict(_dict)
-    if isinstance(msg, _lc_messages.AIMessage):
-        rc = _dict.get("reasoning_content")
-        if rc:
-            msg.additional_kwargs["reasoning_content"] = rc
-        # Preserve thought_signature from each tool call (Gemini requirement)
-        tool_calls = _dict.get("tool_calls") or []
-        sigs = {}
-        for tc in tool_calls:
-            ts = tc.get("thought_signature")
-            if ts and tc.get("id"):
-                sigs[tc["id"]] = ts
-        if sigs:
-            msg.additional_kwargs["thought_signatures"] = sigs
-    return msg
-
-
-def _patched_convert_msg(message, **kwargs):
-    d = _orig_convert_msg(message, **kwargs)
-    if isinstance(message, _lc_messages.AIMessage):
-        if "reasoning_content" in message.additional_kwargs:
-            d["reasoning_content"] = message.additional_kwargs["reasoning_content"]
-        # Restore thought_signature to each tool call (Gemini requirement)
-        sigs = message.additional_kwargs.get("thought_signatures", {})
-        if sigs and "tool_calls" in d:
-            for tc in d["tool_calls"]:
-                ts = sigs.get(tc.get("id", ""))
-                if ts:
-                    tc["thought_signature"] = ts
-    return d
-
-
-_openai_base._convert_dict_to_message = _patched_convert_dict
-_openai_base._convert_message_to_dict = _patched_convert_msg
 
 ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh"]
 
@@ -87,7 +42,7 @@ def get_volcengine_api_model(
     temperature: float = 2,
 ) -> ChatOpenAI:
     return ChatOpenAI(
-        base_url=get_base_url("volc_plan"),
+        base_url=get_base_url("volc_plan") + "/v3",
         model=model_name,
         api_key=get_api_key("volc_plan"),
         temperature=temperature,
@@ -95,43 +50,50 @@ def get_volcengine_api_model(
         reasoning_effort="high" if thinking and effort_enable else None,
     )
 
-def get_standard_api_model(
+def get_openai_api_model(
     model_name: str,
     reasoning_effort: ReasoningEffort = "medium",
 ) -> ChatOpenAI:
     return ChatOpenAI(
-        base_url=get_base_url(),
+        base_url=get_base_url() + "/v1",
         model=model_name,
         api_key=get_api_key(),
-        # use_responses_api=True,
         reasoning_effort=reasoning_effort,
-        # context_management=[  # pyright: ignore[reportCallIssue]
-        #     {"type": "compaction", "compact_threshold": 900_000}
-        # ],
+    )
+
+def get_google_api_model(
+    model_name: str,
+    reasoning_effort: ReasoningEffort = "medium",
+) -> ChatGoogleGenerativeAI:
+    return ChatGoogleGenerativeAI(
+        base_url=get_base_url(),
+        model=model_name,
+        api_key=get_api_key()(),
+        reasoning_effort=reasoning_effort,
     )
 
 
 def get_advance_model(
     thinking: bool = True,
-    reasoning_effort: ReasoningEffort = "xhigh",
-) -> ChatOpenAI:
+    reasoning_effort: ReasoningEffort = "high",
+) -> BaseChatModel:
     model_name = _config.ADVANCE_MODEL_NAME
     print(f"⚡ Using {model_name} for advance model")
-    return get_standard_api_model(
+    return get_openai_api_model(
         model_name,
         reasoning_effort=reasoning_effort if thinking else "none",
     )
 
 
-def get_lite_model() -> ChatOpenAI:
-    return get_standard_api_model(LITE_MODEL_NAME)
+def get_lite_model() -> BaseChatModel:
+    return get_openai_api_model(LITE_MODEL_NAME)
 
 
-def get_mini_model() -> ChatOpenAI:
-    return get_standard_api_model(LITE_MODEL_NAME)
+def get_mini_model() -> BaseChatModel:
+    return get_openai_api_model(LITE_MODEL_NAME)
 
 
-def get_code_model() -> ChatOpenAI:
+def get_code_model() -> BaseChatModel:
     return ChatOpenAI(
         base_url=DS_BASE_URL,
         model=DEEPSEEK_V4_FLASH,

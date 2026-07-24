@@ -38,17 +38,19 @@ AR_API_KET = os.environ.get("AR_API_KEY", "")
 RUOLI_API_KEY = os.environ.get("ROULI_API_KEY", "")
 
 # ---------------------------------------------------------------------------
-# Base URLs
+# Base URLs (No `v1` suffix)
 # ---------------------------------------------------------------------------
-VOLCENGINE_BASE_URL: str = "https://ark.cn-beijing.volces.com/api/v3"
-VOLCENGINE_PLAN_BASE_URL: str = "https://ark.cn-beijing.volces.com/api/plan/v3"
-SILICONFLOW_BASE_URL: str = "https://api.siliconflow.cn/v1"
-OPENCODE_ZEN_BASE_URL = "https://opencode.ai/zen/v1"
-KEGEAI_BASE_URL = "https://ai.kegeai.top/v1"
-ZHTH_BASE_URL = "https://api.zhehentiaohe.cn/v1"
+
+## Attention: add `/v3` to volc and volc_plan baseurl.
+VOLCENGINE_BASE_URL: str = "https://ark.cn-beijing.volces.com/api"
+VOLCENGINE_PLAN_BASE_URL: str = "https://ark.cn-beijing.volces.com/api/plan"
+SILICONFLOW_BASE_URL: str = "https://api.siliconflow.cn"
+OPENCODE_ZEN_BASE_URL = "https://opencode.ai/zen"
+KEGEAI_BASE_URL = "https://ai.kegeai.top"
+ZHTH_BASE_URL = "https://api.zhehentiaohe.cn"
 DS_BASE_URL = "https://api.deepseek.com"
-AR_BASE_URL = "https://agentrouter.org/v1"
-RUOLI_BASE_URL = "https://ruoli.dev/v1"
+AR_BASE_URL = "https://agentrouter.org"
+RUOLI_BASE_URL = "https://ruoli.dev"
 
 
 # ---------------------------------------------------------------------------
@@ -67,8 +69,10 @@ GPT_5_6_LUNA = "gpt-5.6-luna"
 GPT_5_4_NANO = "gpt-5.4-nano-2026-03-17:stable"
 GPT_5_6_TERRA = "gpt-5.6-terra"
 GPT_5_5 = "gpt-5.5"
+GEMINI_3_5_FLASH = "gemini-3.5-flash"
+GROK_4_5 = "grok-4.5"
 
-ADVANCE_MODEL_NAME: str = GPT_5_6_TERRA
+ADVANCE_MODEL_NAME: str = GPT_5_6_TERRA 
 LITE_MODEL_NAME =  GPT_5_6_LUNA
 
 
@@ -100,6 +104,7 @@ def get_base_url(
             return AR_BASE_URL
         case "ruoli":
             return RUOLI_BASE_URL
+ 
 
 def get_api_key(
     provider: Literal["volc", "volc_plan", "sf", "kege", "zhth", "ar", "ruoli"] = PROVIDER,
@@ -136,10 +141,6 @@ MAX_FORWARD_DEPTH: int = 3
 FORWARD_API_TIMEOUT_SECONDS: int = 10
 LONG_MSG_THRESHOLD: int = 500
 
-# ---------------------------------------------------------------------------
-# Auto create timer
-# ---------------------------------------------------------------------------
-AUTO_CREATE_GROUP_ID: int = _get_int_env("AUTO_CREATE_GROUP_ID")
 # ---------------------------------------------------------------------------
 # Auto response timer
 # ---------------------------------------------------------------------------

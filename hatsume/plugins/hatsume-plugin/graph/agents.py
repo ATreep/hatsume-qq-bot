@@ -260,7 +260,7 @@ async def _run_background_shell(task: str, user_id: int) -> str:
         kill_background_cmd,
         _background_procs,
     )
-    from .nodes import inject_agent_notification, NOTIFY_MARK
+    from .nodes import inject_agent_notification
     from .tools import _agent_notification_callback, _current_group_id
 
     # ── Step 1: Parse task with code model ──
@@ -416,7 +416,6 @@ Rules:
 
                 # Inject mid-progress output to graph
                 notify_msg = (
-                    f"{NOTIFY_MARK}:{user_id}:background_shell\n"
                     f"(SYSTEM) Agent 'background_shell' 执行中的中间输出。\n"
                     f"任务：{task[:300]}\n"
                     f"Agent 仍在后台运行中（已耗时 {elapsed}s / {total_timeout}s）。\n"
@@ -454,7 +453,6 @@ Rules:
                 _stdin_queues[request_id] = queue
 
                 notify_msg = (
-                    f"{NOTIFY_MARK}:{user_id}:background_shell\n"
                     f"[SHELL_STDIN_REQUEST]\n"
                     f"request_id: {request_id}\n"
                     f"description: {stdin_description}\n"
@@ -529,7 +527,6 @@ Rules:
                     _stdin_queues[request_id] = queue
 
                     reissue_msg = (
-                        f"{NOTIFY_MARK}:{user_id}:background_shell\n"
                         f"[SHELL_STDIN_REQUEST]\n"
                         f"request_id: {request_id}\n"
                         f"description: {reissue_desc}\n"

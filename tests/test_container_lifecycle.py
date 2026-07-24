@@ -31,6 +31,9 @@ def _setup_package_hierarchy():
         alias = types.ModuleType("hatsume.plugins.hatsume_plugin")
         alias.__path__ = [str(PLUGIN_DIR)]
         sys.modules["hatsume.plugins.hatsume_plugin"] = alias
+    sys.modules["hatsume.plugins"].hatsume_plugin = sys.modules[
+        "hatsume.plugins.hatsume_plugin"
+    ]
 
     # Stub config
     config_name = "hatsume.plugins.hatsume_plugin.config"
@@ -41,6 +44,7 @@ def _setup_package_hierarchy():
     config_mod.DOCKER_ENV_PATH = Path("/tmp/test_docker")
     config_mod.SHELL_MAX_OUTPUT = 1000
     config_mod.SHELL_TIMEOUT = 10
+    sys.modules["hatsume.plugins.hatsume_plugin"].config = config_mod
 
     # Load infra module from actual file
     import importlib.util
@@ -48,10 +52,13 @@ def _setup_package_hierarchy():
     infra_name = "hatsume.plugins.hatsume_plugin.infra"
     if infra_name in sys.modules:
         del sys.modules[infra_name]
+    if hasattr(sys.modules["hatsume.plugins.hatsume_plugin"], "infra"):
+        delattr(sys.modules["hatsume.plugins.hatsume_plugin"], "infra")
     spec = importlib.util.spec_from_file_location(infra_name, infra_path)
     infra_mod = importlib.util.module_from_spec(spec)
     sys.modules[infra_name] = infra_mod
     spec.loader.exec_module(infra_mod)
+    sys.modules["hatsume.plugins.hatsume_plugin"].infra = infra_mod
 
 
 _setup_package_hierarchy()
@@ -60,6 +67,7 @@ _setup_package_hierarchy()
 @pytest.fixture(autouse=True)
 def _reset_refcount_state():
     """Reset refcount state before each test to prevent cross-test pollution."""
+    _setup_package_hierarchy()
     from hatsume.plugins.hatsume_plugin.infra import (
         _background_procs,
     )

@@ -70,7 +70,6 @@ def tool(*args: Any, **kwargs: Any) -> Any:
 # ---------------------------------------------------------------------------
 # Deferred references — set by the graph layer before use
 # ---------------------------------------------------------------------------
-_ai_answer_with_at: Any = None
 _ai_answer: Any = None
 _retrieved_mem_keys: set[str] = set()
 _current_memory_query_user_id: int | None = None
@@ -136,7 +135,6 @@ def set_current_group_id(group_id: int | None) -> None:
 
 
 def configure_tool_callbacks(
-    answer_with_at: Any,
     retrieved_keys: set[str],
     query_user_id: int | None,
     answer_fn: Any = None,
@@ -146,11 +144,10 @@ def configure_tool_callbacks(
     update_generate_image_time: Callable[[], None] | None = None,
     end_conversation_fn: Callable[[], None] | None = None,
 ) -> None:
-    global _ai_answer_with_at, _ai_answer, _retrieved_mem_keys, _current_memory_query_user_id
+    global _ai_answer, _retrieved_mem_keys, _current_memory_query_user_id
     global _is_video_rate_limited, _update_video_time
     global _is_generate_image_rate_limited, _update_generate_image_time
     global _end_conversation_callback
-    _ai_answer_with_at = answer_with_at
     _ai_answer = answer_fn
     _retrieved_mem_keys = retrieved_keys
     _current_memory_query_user_id = query_user_id
@@ -268,6 +265,88 @@ def get_avatar(qq_id: int) -> str:
     from ..utils import get_qq_avatar_url
     print(f"Get avatar: QQ {qq_id}")
     return get_qq_avatar_url(qq_id)
+
+
+@tool
+async def view_image(image_url: str) -> str:
+    """
+    使用轻量模型读取一张图片，并返回客观、详细的文字描述。此工具不会发送图片。
+
+    ## 参数：
+    - image_url: 图片地址，支持：
+        1) HTTP/HTTPS 网络图片 URL
+        2) 沙盒内图片的 file:// 绝对路径，如 "file:///work/image.png"
+    """
+    url = image_url.strip()
+    if not url:
+        return "❌ 错误：image_url 不能为空。"
+
+    if url.startswith("file://"):
+        sandbox_path = url[7:]
+        if not sandbox_path.startswith("/"):
+            return "❌ 错误：file:// 后必须是沙盒内的绝对路径。"
+
+        await ensure_container_running()
+        quoted_path = shlex.quote(sandbox_path)
+        mime_output = await run_cmd(
+            f"file --mime-type -b -- {quoted_path} 2>&1; echo '::EXIT::'$?",
+            timeout=30,
+        )
+        if "::EXIT::" not in mime_output:
+            return "❌ 无法读取沙盒图片：未获得文件检测结果。"
+        mime_text, mime_exit = mime_output.rsplit("::EXIT::", 1)
+        mime = mime_text.strip()
+        if mime_exit.strip() != "0":
+            return f"❌ 无法读取沙盒图片：{mime or '(no output)'}"
+        if not mime.startswith("image/"):
+            return f"❌ 错误：该沙盒文件不是图片（MIME: {mime}）。"
+
+        b64_output = await run_cmd(
+            f"base64 -w 0 -- {quoted_path} 2>&1; echo '::EXIT::'$?",
+            timeout=30,
+        )
+        if "::EXIT::" not in b64_output:
+            return "❌ 无法读取沙盒图片：未获得文件内容。"
+        b64_text, b64_exit = b64_output.rsplit("::EXIT::", 1)
+        b64_data = b64_text.strip()
+        if b64_exit.strip() != "0" or not b64_data:
+            return f"❌ 无法读取沙盒图片：{b64_data or '(no output)'}"
+        url = f"data:{mime};base64,{b64_data}"
+    elif not url.startswith(("http://", "https://")):
+        return "❌ 错误：仅支持 HTTP/HTTPS URL 或 file:// 沙盒绝对路径。"
+
+    from langchain.messages import HumanMessage
+    from ..models import get_lite_model
+
+    prompt = (
+        "请客观、详细地描述这张图片。说明其中可见的人物、物体、场景、动作、"
+        "画面风格和重要细节，并准确抄录清晰可见的文字。只返回图片描述。"
+    )
+    try:
+        response = await get_lite_model().ainvoke(
+            [
+                HumanMessage(
+                    content=[
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": url}},
+                    ]
+                )
+            ]
+        )
+    except Exception as e:
+        print(f"❌ view_image failed: {e}")
+        traceback.print_exc()
+        return f"❌ 图片读取失败：{e}"
+
+    content = response.content
+    if isinstance(content, list):
+        description = "".join(
+            str(part.get("text", "")) if isinstance(part, dict) else str(part)
+            for part in content
+        ).strip()
+    else:
+        description = str(content).strip()
+    return description or "❌ 图片读取失败：模型未返回描述。"
 
 
 # ---- Helper: export a random photo from macOS Photos "ACG" album ----
@@ -790,9 +869,14 @@ async def create_timer(user_id: int, prompt: str, trigger_times: list[str]) -> s
 @tool
 async def list_timers() -> str:
     """
-    列出当前群的所有定时任务。返回每个任务的 ID、内容、触发时间和状态。
-    如果当前群没有定时任务，返回提示信息。
+    查看当前群的所有定时任务，按尚未完成和已完成分组。
+    每个任务只返回任务 ID、提醒用户、任务提示词和下一次触发时间。
     """
+    return await get_timer_overview()
+
+
+async def get_timer_overview() -> str:
+    """Return the exact timer overview shared by the tool and system prompt."""
     global _current_group_id
 
     if _current_group_id is None:
@@ -801,9 +885,6 @@ async def list_timers() -> str:
     from ..timer import get_store
     store = get_store()
     tasks = store.list_tasks_by_group(_current_group_id)
-
-    if not tasks:
-        return "当前群没有定时任务。"
 
     from datetime import datetime, timezone, timedelta
     tz_shanghai = timezone(timedelta(hours=8))
@@ -816,29 +897,87 @@ async def list_timers() -> str:
         bot = get_bot()
         for task in tasks:
             uid = task["user_id"]
-            if uid not in user_names:
+            if uid != 0 and uid not in user_names:
                 user_names[uid] = await get_group_member_name(bot, _current_group_id, uid)
     except Exception:
         pass  # fall back to showing raw user_id
 
-    lines = ["当前群的定时任务：\n"]
+    pending_tasks: list[str] = []
+    completed_tasks: list[str] = []
     for task in tasks:
         tid = task["id"]
         uid = task["user_id"]
-        prompt = task["prompt"][:50]
-        owner = user_names.get(uid, str(uid))
-        triggers = store.get_triggers_for_task(tid)
-        trigger_summary = []
-        for t in triggers:
-            ts = datetime.fromtimestamp(t["trigger_at"], tz=tz_shanghai).strftime("%m/%d %H:%M")
-            status = "✓" if t["fired"] else "○"
-            trigger_summary.append(f"  {status} {ts}")
+        prompt = task["prompt"]
+        user_name = user_names.get(uid)
         if uid == 0:
-            lines.append(f"ID={tid}]\n无需要通知的用户。\n任务描述：{prompt}\n" + "\n".join(trigger_summary) + "\n\n")
+            owner = "无"
+        elif user_name and user_name != str(uid):
+            owner = f"@{user_name}({uid})"
         else:
-            lines.append(f"ID={tid}]\n要通知的用户：@{owner}({uid})\n任务描述：{prompt}\n" + "\n".join(trigger_summary) + "\n\n")
+            owner = str(uid)
+        triggers = store.get_triggers_for_task(tid)
+        pending_triggers = [trigger for trigger in triggers if not trigger["fired"]]
+        if pending_triggers:
+            next_trigger = datetime.fromtimestamp(
+                pending_triggers[0]["trigger_at"], tz=tz_shanghai
+            ).strftime("%Y-%m-%d %H:%M")
+        else:
+            next_trigger = "无"
 
-    return "\n".join(lines)
+        summary = (
+            f"- 任务 ID：{tid}\n"
+            f"  提醒用户：{owner}\n"
+            f"  任务提示词：{prompt}\n"
+            f"  下一次触发时间：{next_trigger}"
+        )
+        target = pending_tasks if pending_triggers else completed_tasks
+        target.append(summary)
+
+    return (
+        "# 当前群的定时任务\n\n"
+        "## 尚未完成的定时任务\n"
+        + ("\n\n".join(pending_tasks) if pending_tasks else "无")
+        + "\n\n## 已完成的定时任务\n"
+        + ("\n\n".join(completed_tasks) if completed_tasks else "无")
+    )
+
+
+@tool
+async def get_timer(task_id: int) -> str:
+    """
+    查看当前群某一个定时任务的所有触发时间，并标注每个触发时间是否完成。
+
+    ## 参数：
+    - task_id: 要查看的任务 ID
+    """
+    global _current_group_id
+
+    if _current_group_id is None:
+        return "错误：无法确定当前群聊 ID。"
+
+    from ..timer import get_store
+    store = get_store()
+    task = store.get_task(task_id)
+    if task is None:
+        return f"错误：任务 ID {task_id} 不存在。"
+    if task["group_id"] != _current_group_id:
+        return f"错误：任务 ID {task_id} 不属于当前群。"
+
+    triggers = store.get_triggers_for_task(task_id)
+    if not triggers:
+        return f"定时任务 {task_id} 没有触发时间。"
+
+    from datetime import datetime, timezone, timedelta
+    tz_shanghai = timezone(timedelta(hours=8))
+    trigger_lines = [
+        "- "
+        + datetime.fromtimestamp(trigger["trigger_at"], tz=tz_shanghai).strftime(
+            "%Y-%m-%d %H:%M"
+        )
+        + ("：已完成" if trigger["fired"] else "：未完成")
+        for trigger in triggers
+    ]
+    return f"定时任务 {task_id} 的所有触发时间：\n" + "\n".join(trigger_lines)
 
 
 @tool
@@ -1275,6 +1414,7 @@ CHAT_TOOLS = [
     search_web,
     shell_executor,
     find_memory,
+    view_image,
     generate_image,
     generate_video,
     send_image,
@@ -1283,6 +1423,7 @@ CHAT_TOOLS = [
     random_acg_photo,
     create_timer,
     list_timers,
+    get_timer,
     delete_timer,
     skill_loader,
     skill_remove,

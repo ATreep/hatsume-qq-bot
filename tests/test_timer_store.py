@@ -83,14 +83,12 @@ TimerStore = importlib.import_module(
 @pytest.fixture
 def store():
     """Create a TimerStore backed by a temporary in-memory database."""
-    # Ensure prompts module has auto_create functions (other tests may leave stale stubs)
+    # Ensure prompts module has auto_response functions (other tests may leave stale stubs)
     prompts_name = "hatsume.plugins.hatsume-plugin.prompts"
     if prompts_name not in sys.modules:
         _ensure_package_hierarchy()
         mod = types.ModuleType(prompts_name)
         sys.modules[prompts_name] = mod
-    if not hasattr(sys.modules[prompts_name], "get_auto_create_prompt"):
-        sys.modules[prompts_name].get_auto_create_prompt = lambda: "auto create prompt"
     if not hasattr(sys.modules[prompts_name], "get_auto_response_prompt"):
         sys.modules[prompts_name].get_auto_response_prompt = lambda: "auto response prompt"
     s = TimerStore()
@@ -379,74 +377,27 @@ class TestValidatePrompt:
         assert err is None
 
 
-class TestAutoCreateTask:
-    """Auto-create special timer task CRUD."""
+class TestLegacyAutoCreateCleanup:
+    """Legacy auto_create rows are removed during DB initialization."""
 
-    def test_upsert_auto_create_creates_task(self, store):
-        """upsert_auto_create creates a task with task_type='auto_create'."""
-        now = time.time()
-        trigger_at = now + 86400
-        task_id = store.upsert_auto_create(trigger_at)
-        assert task_id is not None and task_id > 0
+    def test_init_db_removes_legacy_auto_create_tasks(self, tmp_path):
+        db_path = tmp_path / "timer.db"
+        s = TimerStore(str(db_path))
+        s.init_db()
+        assert s._conn is not None
+        s._conn.execute(
+            "INSERT INTO timer_tasks "
+            "(group_id, user_id, prompt, created_at, updated_at, task_type) "
+            "VALUES (0, 0, 'legacy', ?, ?, 'auto_create')",
+            (time.time(), time.time()),
+        )
+        s._conn.commit()
+        s._conn.close()
 
-        task = store.get_task(task_id)
-        assert task is not None
-        assert task["task_type"] == "auto_create"
-        assert task["group_id"] == 0
-        assert task["user_id"] == 0
-
-    def test_upsert_auto_create_ensures_singleton(self, store):
-        """Calling upsert_auto_create multiple times results in exactly 1 auto_create task."""
-        now = time.time()
-        t1 = store.upsert_auto_create(now + 3600)
-        t2 = store.upsert_auto_create(now + 7200)
-        t3 = store.upsert_auto_create(now + 10800)
-
-        assert store.get_task(t1) is None
-        assert store.get_task(t2) is None
-        assert store.get_task(t3) is not None
-
-        cur = store._conn.execute(
+        reopened = TimerStore(str(db_path))
+        reopened.init_db()
+        assert reopened._conn is not None
+        cur = reopened._conn.execute(
             "SELECT COUNT(*) as cnt FROM timer_tasks WHERE task_type = 'auto_create'"
         )
-        assert cur.fetchone()["cnt"] == 1
-
-    def test_upsert_auto_create_cascades_triggers(self, store):
-        """Old auto_create triggers are deleted with the task (CASCADE)."""
-        now = time.time()
-        t1 = store.upsert_auto_create(now + 3600)
-        triggers_before = store.get_triggers_for_task(t1)
-        assert len(triggers_before) == 1
-
-        t2 = store.upsert_auto_create(now + 7200)
-        assert store.get_triggers_for_task(t1) == []
-        triggers = store.get_triggers_for_task(t2)
-        assert len(triggers) == 1
-        assert triggers[0]["trigger_at"] == now + 7200
-
-    def test_get_auto_create_returns_none_when_empty(self, store):
-        """get_auto_create returns None when no auto_create task exists."""
-        assert store.get_auto_create() is None
-
-    def test_get_auto_create_returns_task(self, store):
-        """get_auto_create returns the single auto_create task with its trigger."""
-        now = time.time()
-        trigger_at = now + 86400
-        task_id = store.upsert_auto_create(trigger_at)
-
-        result = store.get_auto_create()
-        assert result is not None
-        assert result["id"] == task_id
-        assert result["task_type"] == "auto_create"
-        assert result["trigger_at"] == trigger_at
-
-    def test_list_auto_create_triggers(self, store):
-        """list_auto_create_triggers returns only unfired auto_create triggers."""
-        now = time.time()
-        store.upsert_auto_create(now + 3600)
-        store.create_task(
-            group_id=100, user_id=200, prompt="normal",
-            trigger_times=[now + 3600],
-        )
-        triggers = store.list_auto_create_triggers()
-        assert len(triggers) == 1
+        assert cur.fetchone()["cnt"] == 0

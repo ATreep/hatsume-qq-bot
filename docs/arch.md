@@ -41,6 +41,7 @@ flowchart LR
 | 记忆迁移与清理 | 显式迁移命令、每日 04:30 | SQLite legacy 向量只读复制到 Milvus；同步清理 150 天前的 SQLite/Milvus 记录 | memory/engine.py、memory/vector_store.py、scripts/migrate_memory_vectors.py |
 | 联网搜索 | search_web | 通过 DuckDuckGo 获取简要网络结果 | graph/tools.py |
 | QQ 头像 | get_avatar | 返回指定 QQ 号的头像 URL | graph/tools.py、`utils/__init__.py` |
+| 图片查看 | view_image | 使用轻量模型描述 HTTP/HTTPS 或沙盒 file:// 图片 | graph/tools.py、models.py、infra.py |
 | 随机 ACG 图片 | 戳一戳或 random_acg_photo | 从 macOS Photos 的 ACG 相册导出，可直接发送或复制到沙盒 | handlers/tools.py、graph/tools.py |
 | 图片发送 | send_image | 支持 HTTP、base64 和沙盒 file:// 文件，每轮最多三张 | graph/tools.py |
 | 图片生成 | generate_image | 在 Seedream 与兼容图像接口之间选择，支持参考图和限流 | graph/tools.py、models.py、state.py |
@@ -53,9 +54,8 @@ flowchart LR
 | Agent 通知 | 后台 Agent 中间输出或完成 | 注入当前对话；无活跃对话时为目标群启动新图 | graph/tools.py、graph/nodes.py、handlers/dialogue.py |
 | Agent stdin | respond_to_shell_prompt | 把用户回复交回等待输入的后台进程 | graph/tools.py、graph/agents.py |
 | 定时任务创建 | create_timer | 保存未来 30 天内的触发时间并注册 APScheduler 单次作业；每个任务任意连续 24 小时内最多触发 10 次 | graph/tools.py、timer/store.py、timer/executor.py |
-| 定时任务管理 | /timer 或聊天工具 | 按群列出、删除、更新任务；更新会替换全部触发器 | handlers/tools.py、graph/tools.py |
+| 定时任务管理 | /timer 或聊天工具 | 按群分组概览任务、查看单任务触发明细、删除或更新任务；更新会替换全部触发器 | handlers/tools.py、graph/tools.py |
 | 定时任务恢复 | Bot 连接完成 | 恢复未来触发器、补偿五分钟内漏触发、过期触发标记完成 | `timer/__init__.py`、timer/executor.py |
-| 自动创作 | auto_create 记录或 /autocreate | 固定群注入创作提示，持久化任务每 4 至 6 小时重新排期 | handlers/tools.py、timer/、prompts.py |
 | 自动回复 | auto_response 记录或 /autoresponse | 固定群主动参与话题，每 1 至 3 小时重新排期 | timer/、prompts.py |
 | Skill 加载 | /skills、skill_loader | 扫描 Markdown 与 YAML frontmatter，按需加载并进行单轮去重 | skills/ |
 | Skill 增删 | skill_create、skill_download、skill_remove | 运行时创建、下载、删除 Skill 并清理缓存 | graph/tools.py、skills/manager.py |
@@ -83,7 +83,6 @@ flowchart LR
 |---|---|---|---|
 | /video <提示词> [图片] | 所有人 | 生成视频，首张图片可作为参考 | handlers/tools.py |
 | /timer list | 所有人 | 列出当前群任务和触发状态 | handlers/tools.py |
-| /timer autocreate | 所有人 | 查看当前持久化自动创作任务的下次时间 | handlers/tools.py |
 | /timer delete <id> | 所有人 | 删除当前群指定任务 | handlers/tools.py |
 | /timer update <id> <内容> @ <ISO时间,...> | 所有人 | 替换任务内容和全部触发时间 | handlers/tools.py |
 | /skills | 所有人 | 列出有效 Skill 名称与描述 | handlers/tools.py |
@@ -94,7 +93,6 @@ flowchart LR
 | /ccsh <命令>、/cc <命令> | 管理员 | 在 Docker 沙盒执行 Shell | handlers/tools.py |
 | /resetsandbox | 管理员 | 删除并重置 Docker 沙盒 | handlers/tools.py |
 | /clear | 管理员 | 强制结束当前共享对话并清理状态队列 | handlers/tools.py |
-| /autocreate [提示词\|prod] | 管理员 | 一次性调试自动创作，不写数据库 | handlers/tools.py |
 | /proxy create <QQ号> [分钟]、/proxy terminate、/proxy status | 所有人 | 创建、终止或查看单一 RAM 角色代理、完整角色 Prompt 与自动结束时间 | handlers/tools.py、graph/tools.py |
 | /autoresponse [提示词\|prod] | 管理员 | 一次性调试自动回复，不写数据库 | handlers/tools.py |
 | 赞我、互赞、点赞 | 所有人 | 尝试点赞至当日接口上限 | handlers/social.py |
@@ -220,9 +218,9 @@ stateDiagram-v2
 ~~~
 
 - human_node 每 0.3 秒检查 human_queue，五分钟无输入时写入 __end__。
-- chat_end_detect_node 对 Agent 和 Timer 标记强制继续。早期轮次或最后消息包含“初芽”时直接继续；其他情况随机选择轻量或迷你模型判断，也保留随机直接继续分支。
+- chat_end_detect_node 在早期轮次或最后消息包含“初芽”时直接继续；其他情况随机选择轻量或迷你模型判断，也保留随机直接继续分支。
 - 图历史超过 60 条 LangGraph 消息时，删除最早的一对 Human/AI 消息。
-- ai_node 自动检索记忆，注入 Skill 列表、运行中 Agent 状态、可选表情提示和调用时的本地日期时间，再用 CHAT_TOOLS 创建 LangChain Agent。主调用最多重试五次，递归上限为 60。
+- ai_node 自动检索记忆，注入 Skill 列表、运行中 Agent 状态、当前群定时任务概览、可选表情提示和调用时的本地日期时间，再用 CHAT_TOOLS 创建 LangChain Agent。主调用最多重试五次，递归上限为 60。
 - ai_node 临时把辅助上下文放在当前 Human 内容之前。发送前移除 memory 与 face 标签，但返回图历史的是原始 AI 文本。
 - chat_agent 调用 end_conversation 后，ConversationState 立即关闭聊天并清空 chat_peers；ai_node 抑制该轮文本和表情发送，human_node 随即路由到 finish。下一次主动提及通过 activate_chat() 解除结束标记。
 - finish_conversation_node 清理图运行标记和 Human 队列，重置 Skill 单轮去重，把 Human/AI/Tool 历史规范化后放回辅助队列，最后发送 [CONVERSATION END]。
@@ -231,7 +229,7 @@ stateDiagram-v2
 
 - AI 文本经 mask_secret_keys() 脱敏。
 - 普通短文本直接发送；超过 LONG_MSG_THRESHOLD=500 或包含代码块、标题、公式、粗体等特征时由 md_to_image.py 渲染。
-- Agent 与 Timer 通知可通过 ai_answer_with_at 对指定 QQ 用户发送 @。
+- AI 输出中的 `[CQ:at,qq=123456]` 占位符由发送层转换为 QQ at 消息段；图片化发送时先发送 at 段再发送图片，图片内显示为 @用户名。
 - 发送失败最多尝试五次，每次间隔三秒。
 - [hatsumeface:情绪] 会从运行数据 faces/ 中选择同前缀图片并单独发送。
 
@@ -332,8 +330,8 @@ timer_triggers
 
 - 一个任务可以有多个具体触发时间。
 - timer_triggers.task_id 外键使用 ON DELETE CASCADE。
-- task_type 为 normal、auto_create 或 auto_response。
-- auto_create 与 auto_response 分别通过删除旧任务再创建新任务，保证各自最多一条当前记录。
+- task_type 为 normal 或 auto_response；legacy auto_create 记录会在启动时删除。
+- auto_response 通过删除旧任务再创建新任务，保证最多一条当前记录。
 
 ### 5.2 创建、更新与删除
 
@@ -349,6 +347,8 @@ create_timer 的流程：
 
 /timer update 会先取消旧作业，再替换数据库中的全部触发器并重新注册；delete 会先取消作业，再删除任务，触发器由外键级联删除。数据库与 APScheduler 的修改顺序必须一起维护。
 
+list_timers 将当前群任务按“尚未完成”和“已完成”分组，只展示任务 ID、提醒用户、完整任务提示词和下一次未完成触发时间；所有触发器均 fired 的任务归入已完成组。get_timer 按任务 ID 展示该任务的全部触发时间及每个触发点的完成状态，并拒绝访问其他群的任务。ai_node 每轮把与 list_timers 相同的概览文本直接加入 system prompt；由 Timer 或 Agent 启动新对话时会先同步目标群号，避免读取其他群的任务。
+
 ### 5.3 启动恢复
 
 Bot 连接后 init_scheduler()：
@@ -359,7 +359,7 @@ Bot 连接后 init_scheduler()：
 4. 更早的触发器标记 fired，避免无限重放。
 5. refresh_auto_response() 保留并重新注册已有未来任务；不存在时创建一个 1 至 3 小时后的新任务。
 
-reload_all_triggers() 会恢复数据库中已有的 auto_create 记录，但启动过程不会自动播种第一条 auto_create。
+TimerStore 初始化会删除旧版本遗留的 auto_create 记录，避免它们按普通 group_id=0 Timer 执行。
 
 ### 5.4 触发与图注入
 
@@ -367,26 +367,24 @@ reload_all_triggers() 会恢复数据库中已有的 auto_create 记录，但启
 flowchart LR
     Job[APScheduler 作业] --> Execute[_execute_timer]
     Execute --> Kind{task_type}
-    Kind -- normal --> Inject[inject __timer__ message]
-    Kind -- auto_create --> Create[创作 Prompt + 4 至 6 小时重排]
+    Kind -- normal --> Inject[inject timer prompt]
     Kind -- auto_response --> Response[回复 Prompt + 1 至 3 小时重排]
     Inject --> Graph[当前或新 LangGraph 对话]
-    Create --> Graph
     Response --> Graph
     Execute --> Fired[mark fired]
 ~~~
 
-- normal 任务通过 inject_timer() 注入 __timer__:<user_id> 消息。
+- normal 任务通过 inject_timer() 注入定时任务 Prompt。
 - 有活跃对话时进入 human_queue；无活跃对话时通过 dialogue 注册的回调为目标群启动新图。
-- chat_end_detect_node 识别 Timer 标记后强制进入 AI 节点。
-- user_id 非零时，ai_node 通过 @ 回调通知指定用户。
+- user_id 非零时，注入 Prompt 会告诉模型可用 `[CQ:at,qq=<user_id>]` 提醒用户，实际 at 由发送层转换。
 - normal 路径在图注入尝试结束后标记 fired；即使注入抛出异常，当前实现也仍会标记 fired。
-- auto_create 与 auto_response 在执行提示前先标记 fired，然后立即排期下一条任务，不等待 LLM 完成。
+- auto_response 在执行提示前先标记 fired，然后立即排期下一条任务，不等待 LLM 完成。
+- legacy auto_create 触发器若残留并触发，只会删除对应任务，不注入图。
 
 ### 5.5 自动任务
 
-- auto_create 向 AUTO_CREATE_GROUP_ID 注入自主调研或创作 Prompt，不 @ 用户，并在 4 至 6 小时后重新排期。管理员 /autocreate 只做一次性调试注入，不写数据库。
 - auto_response 向 AUTO_RESPONSE_GROUP_ID 注入主动参与群聊的 Prompt，不 @ 用户，并在 1 至 3 小时后重新排期。启动时自动确保存在未来任务。
+- 自动回复目标群号未配置或不大于 0 时禁止注入和重新排期；auto_response 启动恢复还会取消并清理残留待触发任务，避免向 group_id=0 发送消息。
 - 调试命令默认使用命令所在群；参数 prod 才使用配置中的固定群。
 
 ## 6. 聊天工具、后台 Agent 与 Skill
@@ -400,6 +398,7 @@ flowchart LR
 | search_web | DuckDuckGo 联网搜索 |
 | shell_executor | Docker 沙盒同步命令；普通聊天每轮最多三次 |
 | find_memory | 主动检索长期记忆 |
+| view_image | 使用轻量模型读取网络或沙盒图片并返回文字描述 |
 | generate_image | 图片生成，支持参考图与 60 秒限流 |
 | generate_video | 生成视频并返回临时 URL；每轮最多一次 |
 | send_image | 发送 HTTP、base64 或沙盒文件；每轮最多三张 |
@@ -407,7 +406,8 @@ flowchart LR
 | get_avatar | 获取 QQ 头像 URL |
 | random_acg_photo | 从 macOS Photos 导出 ACG 图片到沙盒 |
 | create_timer | 创建持久化定时任务 |
-| list_timers | 列出当前群任务 |
+| list_timers | 按完成状态分组概览当前群任务及下一次触发时间 |
+| get_timer | 查看当前群单个任务的全部触发时间及完成状态 |
 | delete_timer | 删除当前群任务 |
 | skill_loader | 加载 Skill 完整指令 |
 | skill_remove | 删除 Skill |
@@ -456,7 +456,7 @@ sequenceDiagram
 - background_shell 先把任务解析为单条命令、终止条件和总超时，然后后台启动进程并增量读取日志。
 - 后台决策支持 DONE、KILL、CONTINUE:N、NOTIFY:N 与 INPUT_NEEDED:<timeout>:<description>。
 - 每次派发生成唯一 instance_id，保存任务、上下文、用户、开始时间、状态和结果。
-- 中间通知与最终结果使用 __agent_notify__ 标记进入当前或新图。
+- 中间通知与最终结果作为普通系统提示进入当前或新图；需要提醒用户时由模型输出 `[CQ:at,qq=...]` 占位符。
 - stdin 请求使用 request_id -> asyncio.Queue 保存。聊天模型调用 respond_to_shell_prompt() 后，后台 Agent 再用代码模型把原始回复转换为最终进程输入。
 - Agent 状态与当前群号只保存在内存中，进程重启后不会恢复。
 
@@ -490,6 +490,7 @@ sequenceDiagram
 ### 7.2 图片与视频
 
 - 输入图片使用 requests 同步下载，限制为 9 MiB 和 3600 万像素。
+- view_image 将 HTTP/HTTPS 图片 URL 直接交给轻量模型；沙盒 file:// 绝对路径先检测图片 MIME 并转换为 data URI，再返回模型生成的文字描述。
 - generate_image 在 Seedream 和兼容图像接口之间选择；有参考图时使用支持参考图的路径。
 - 沙盒绝对路径会先在 Docker 内读取并转换为 data URI。
 - generate_video 在 Seedance 1.0 与 1.5 之间选择，轮询供应商任务直至完成或失败。
@@ -583,7 +584,7 @@ graph/tools.py、graph/agents.py、graph/nodes.py 与 handlers/dialogue.py 之�
 | hatsume/plugins/hatsume-plugin/skills/manager.py | 扫描 Markdown Skill、解析 frontmatter、缓存内容、单轮加载去重、保存覆盖、删除和目录创建。 |
 | `hatsume/plugins/hatsume-plugin/timer/__init__.py` | 提供 TimerStore 单例；Bot 连接后恢复触发器并确保 auto_response 存在。 |
 | hatsume/plugins/hatsume-plugin/timer/store.py | 管理 timer_tasks 与 timer_triggers 表、普通任务 CRUD、自动任务单例记录、触发状态和输入验证。 |
-| hatsume/plugins/hatsume-plugin/timer/executor.py | 注册、取消和恢复 APScheduler 作业；补偿漏触发；执行普通 Timer、自动创作和自动回复并注入图。 |
+| hatsume/plugins/hatsume-plugin/timer/executor.py | 注册、取消和恢复 APScheduler 作业；补偿漏触发；执行普通 Timer 和自动回复并注入图；清理 legacy auto_create 触发。 |
 | `hatsume/plugins/hatsume-plugin/utils/__init__.py` | QQ 昵称查询、时间、头像 URL、统一消息 JSON、forward JSON 和带五分钟缓存的成员模糊搜索。 |
 | hatsume/plugins/hatsume-plugin/utils/md_to_image.py | Markdown、代码、公式和表格到 HTML 与图片的转换，包含主题、角色印章、链接提取和纯文本回退。 |
 | hatsume/plugins/hatsume-plugin/utils/security.py | 无框架依赖的敏感凭证正则识别与脱敏。 |
@@ -600,7 +601,7 @@ virtual/ 下是 Shell 和 Docker 构建、启动、停止、删除脚本，不�
 | tests/test_agent_monitor.py | Agent 状态写入、运行判断、字段保留与开始时间。 |
 | tests/test_agents_command.py | /agents 在无任务、运行中、完成与混合状态下的输出。 |
 | tests/test_ai_json_output.py | 角色 Prompt 不再要求旧 JSON 输出格式，以及 AI JSON 与非 JSON 兼容行为。 |
-| tests/test_auto_create.py | 自动创作随机时间范围与分布。 |
+| tests/test_auto_response.py | 自动回复随机时间范围、目标群配置与 legacy auto_create 清理。 |
 | tests/test_background_shell_agent.py | 后台 Shell 注册、任务解析和 DONE/CONTINUE/NOTIFY/TIMEOUT/KILL 决策。 |
 | tests/test_background_shell_infra.py | 后台日志增量读取与进程终止清理。 |
 | tests/test_background_shell_prompts.py | Shell 决策 Prompt 和 stdin 解析 Prompt 约束。 |
@@ -627,7 +628,7 @@ virtual/ 下是 Shell 和 Docker 构建、启动、停止、删除脚本，不�
 | tests/test_skill_manager.py | Skill 扫描、加载去重、缓存、删除、目录创建与 Prompt 列表。 |
 | tests/test_thought_signature.py | thought_signature 修补、捕获、恢复、缺失兼容，以及高级模型名向标准工厂的动态转发。 |
 | tests/test_timer_injection.py | Timer 标记检测、活跃或非活跃会话注入与完整投递上下文。 |
-| tests/test_timer_store.py | Timer 表结构、CRUD、触发验证、级联删除与自动创作任务。 |
+| tests/test_timer_store.py | Timer 表结构、CRUD、触发验证、级联删除与 legacy auto_create 清理。 |
 | tests/test_tools.py | 图片、视频、发送限流、头像、记忆格式、/model、角色 Prompt 与 stdin 工具。 |
 
 常用验证：
@@ -647,7 +648,7 @@ npx --no-install pyright
 config.py 会在本地加载 .env.prod，但公开仓库不提供该文件或任何真实值。生产联调至少需要由维护者按实际环境提供以下配置：
 
 - Bot 与权限：BOT_QQ_ID、ADMIN_QQ_ID、AGENT_QQ_EMAIL。
-- 自动任务目标：AUTO_CREATE_GROUP_ID、AUTO_RESPONSE_GROUP_ID。
+- 自动任务目标：AUTO_RESPONSE_GROUP_ID。
 - Agent 仓库身份：GITHUB_ACCOUNT、GITHUB_REPO。
 - 模型供应商：ARK_PLAN_API_KEY、ARK_API_KEY、SILICONFLOW_API_KEY、OPENCODE_API_KEY、KEGEAI_API_KEY、ZHTH_API_KEY。
 - Docker：DOCKER_ENV_PATH；未设置时指向源码内 virtual/ 目录。

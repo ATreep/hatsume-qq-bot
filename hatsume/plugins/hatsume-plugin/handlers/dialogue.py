@@ -32,11 +32,13 @@ from ..graph.nodes import (
 )
 from ..state import ConversationState
 from ..utils import (
+    CQ_AT_PATTERN,
     build_forward_json,
     get_date,
     get_group_member_name,
     mask_secret_keys,
     message_to_json,
+    render_cq_at_placeholders,
 )
 from ..utils.md_to_image import auto_convert_text
 
@@ -285,27 +287,28 @@ def _start_conv_for_trigger(
     Timer triggers always pass the effective user_id.
     """
     from nonebot import get_bot
-    from ..graph.tools import configure_tool_callbacks as configure_tools
+    from ..graph.tools import (
+        configure_tool_callbacks as configure_tools,
+        set_current_group_id,
+    )
 
     bot = get_bot()
+    set_current_group_id(group_id)
 
-    async def _send_to_group(msg, at_id=None):
+    async def _send_to_group(msg):
         if msg == "[CONVERSATION END]":
             conv_state.end_conversation()
             return
-        text = mask_secret_keys(str(msg))
-        if at_id:
-            text = f"[CQ:at,qq={at_id}] {text}"
         try:
-            await bot.send_group_msg(group_id=group_id, message=text)
+            segments, force_message = await _build_ai_response_segments(msg, group_id)
+            await bot.send_group_msg(
+                group_id=group_id,
+                message=_message_payload_for_segments(segments, force_message),
+            )
         except Exception as e:
             print(f"❌ _send_to_group failed: group={group_id} err={e}")
 
     conv_state.ai_answer = _send_to_group
-    conv_state.ai_answer_with_at = _send_to_group
-
-    if user_id != 0:
-        conv_state.activate_chat(f"group_{group_id}_{user_id}")
 
     effective_user_id: int | None = user_id
     if trigger_type == "agent" and user_id == 0:
@@ -357,7 +360,6 @@ async def start_new_conversation(
     conv_state.end_requested = False
 
     configure_tools_fn(
-        ai_callback,
         conv_state.retrieved_mem_keys,
         user_id,
         answer_fn=ai_callback,
@@ -404,10 +406,89 @@ async def start_new_conversation(
 # ---------------------------------------------------------------------------
 # Message sending
 # ---------------------------------------------------------------------------
+def _segment_type(seg: Any) -> str | None:
+    return getattr(seg, "type", None)
+
+
+def _is_text_segment(seg: Any) -> bool:
+    return _segment_type(seg) == "text" and isinstance(getattr(seg, "data", None), dict)
+
+
+def _message_payload_for_segments(segments: list[Any], force_message: bool = False) -> Any:
+    if len(segments) == 1 and not force_message:
+        return segments[0]
+    return Message(segments)
+
+
+def _replace_cq_at_with_segments(text: str) -> list[MessageSegment]:
+    segments: list[MessageSegment] = []
+    cursor = 0
+    for match in CQ_AT_PATTERN.finditer(text):
+        if match.start() > cursor:
+            segments.append(MessageSegment.text(text[cursor:match.start()]))
+        segments.append(MessageSegment.at(int(match.group(1))))
+        cursor = match.end()
+    if cursor < len(text):
+        segments.append(MessageSegment.text(text[cursor:]))
+    return segments
+
+
+async def _build_text_response_segments(
+    text: str,
+    group_id: int | None,
+) -> tuple[list[Any], bool]:
+    text = mask_secret_keys(text)
+    if not text.strip():
+        return [], False
+    if not CQ_AT_PATTERN.search(text):
+        return await auto_convert_text(text), False
+
+    at_user_ids = [int(match.group(1)) for match in CQ_AT_PATTERN.finditer(text)]
+    rendered_text, _ = await render_cq_at_placeholders(text, group_id)
+    rendered_segments = await auto_convert_text(rendered_text)
+    if any(_segment_type(seg) == "image" for seg in rendered_segments):
+        at_segments = [MessageSegment.at(uid) for uid in at_user_ids]
+        return at_segments + rendered_segments, bool(at_segments)
+
+    return _replace_cq_at_with_segments(text), True
+
+
+async def _build_ai_response_segments(
+    msg: str | Message | MessageSegment,
+    group_id: int | None,
+) -> tuple[list[Any], bool]:
+    if isinstance(msg, str):
+        return await _build_text_response_segments(msg, group_id)
+
+    if _is_text_segment(msg):
+        return await _build_text_response_segments(str(msg.data.get("text", "")), group_id)
+
+    if _segment_type(msg):
+        return [msg], False
+
+    try:
+        raw_segments = list(msg)  # type: ignore[arg-type]
+    except TypeError:
+        return [msg], False
+
+    output: list[Any] = []
+    force_message = False
+    for seg in raw_segments:
+        if _is_text_segment(seg):
+            built, force = await _build_text_response_segments(
+                str(seg.data.get("text", "")), group_id,
+            )
+            output.extend(built)
+            force_message = force_message or force
+        else:
+            output.append(seg)
+    return output, force_message
+
+
 async def handle_ai_message(
     msg: str | Message | MessageSegment,
     matcher,
-    at_id: int | None = None,
+    group_id: int | None = None,
     retry: int = 0
 ) -> None:
     """Send AI response to the chat. Retries up to 5 times."""
@@ -423,51 +504,22 @@ async def handle_ai_message(
         print("Current conversation ends")
         return
 
-    if at_id is not None:
-        if isinstance(msg, str):
-            text = msg
-        elif isinstance(msg, MessageSegment) and msg.type == "text":
-            text = str(msg.data.get("text", ""))
-        elif isinstance(msg, Message):
-            text = msg.extract_plain_text()
-        else:
-            text = str(msg)
-
-        text = mask_secret_keys(text)
-        if not text.strip():
-            await matcher.send("（电波受到干扰...想要发出的内容丢失了...）")
-            return
-
-        # Temporarily disable wrapper-level @ delivery; CQ placeholders in
-        # text are now the model-visible way to mention users.
-        # await matcher.send(MessageSegment.at(at_id) + " " + MessageSegment.text(text))
-        await matcher.send(MessageSegment.text(text))
+    segments, force_message = await _build_ai_response_segments(msg, group_id)
+    if not segments:
+        await matcher.send("（电波受到干扰...想要发出的内容丢失了...）")
         return
 
-    if isinstance(msg, str):
-        if not msg.strip():
-            await matcher.send("（电波受到干扰...想要发出的内容丢失了...）")
-            return
-        segments = await auto_convert_text(mask_secret_keys(msg))
-    elif isinstance(msg, MessageSegment):
-        if msg.type == "text":
-            raw = str(msg.data.get("text", ""))
-            segments = await auto_convert_text(mask_secret_keys(raw))
-        else:
-            segments = [msg]
-    elif isinstance(msg, Message):
-        segments = list(msg)
-    else:
-        segments = [msg]
-
     try:
-        for seg in segments:
-            await matcher.send(seg)
+        if force_message:
+            await matcher.send(_message_payload_for_segments(segments, force_message=True))
+        else:
+            for seg in segments:
+                await matcher.send(seg)
     except Exception as e:
         print("Send error: ", e)
         await asyncio.sleep(3)
         print(f"Retry sending message, {retry=}")
-        await handle_ai_message(segments, matcher, retry=retry + 1) # type: ignore
+        await handle_ai_message(msg, matcher, group_id=group_id, retry=retry + 1)
 
 
 # ---------------------------------------------------------------------------
@@ -543,11 +595,10 @@ async def user_chat_handle(bot: Bot, event: GroupMessageEvent, user_chat_matcher
 
             from ..graph.tools import configure_tool_callbacks as configure_tools
 
-            async def ai_cb(msg, at_id=None):
-                await handle_ai_message(msg, user_chat_matcher, at_id=at_id)
+            async def ai_cb(msg):
+                await handle_ai_message(msg, user_chat_matcher, group_id=event.group_id)
 
             conv_state.ai_answer = ai_cb
-            conv_state.ai_answer_with_at = ai_cb
             await start_new_conversation(
                 conv_state, ai_cb, configure_tools,
                 user_id=event.user_id, flush_idle=True,

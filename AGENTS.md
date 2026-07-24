@@ -20,7 +20,7 @@ Hatsume 是 Python 3.12+ 的 QQ 群聊 AI 机器人，以 NoneBot2 插件运行�
 - 记忆：显式 `[memoryrecord]` 写入、`[memorykeyman]` 关联用户、SQLite LIKE、临时 BM25、Milvus Lite + BGE-M3、150 天清理。
 - 工具：搜索、Shell、记忆、图片/视频生成、图片发送、QQ 头像、ACG 相册、Timer、Skill、成员搜索、Agent 派发、stdin 回复。
 - Agent：`coding_agent`、`background_shell`、实例状态、中间通知、完成通知、交互输入。
-- Timer：普通多触发任务、群内管理、重启恢复、漏触发补偿、自动创作、自动回复。
+- Timer：普通多触发任务、群内管理、重启恢复、漏触发补偿、自动回复。
 - 社交：点赞、累计点赞排行榜、戳一戳随机图片。
 - 运维：高级模型热切换、Docker 引用计数、延迟停止、沙盒重置、Agent 监控、对话强制清理、凭证脱敏。
 
@@ -105,8 +105,8 @@ hatsume/plugins/hatsume-plugin/
 1. `timer_tasks` 保存任务，`timer_triggers` 保存具体触发时间；删除任务必须级联删除触发器。
 2. 数据库记录与 APScheduler 作业必须同步：创建/更新后注册，删除/更新前取消。
 3. 启动恢复必须区分未来、容忍窗口内漏触发和过期触发。
-4. 普通 Timer、auto-create、auto-response 最终都通过图注入，不另建独立聊天 Agent。
-5. `auto_response` 启动时自动保证存在；`auto_create` 当前只恢复已有记录，不自动播种首个任务。
+4. 普通 Timer 与 auto-response 最终都通过图注入，不另建独立聊天 Agent。
+5. `auto_response` 启动时自动保证存在；legacy `auto_create` 记录必须清理，不得注入或重新排期。
 
 ## Extension Rules
 
