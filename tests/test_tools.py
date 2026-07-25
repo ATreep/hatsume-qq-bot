@@ -6,11 +6,12 @@ import asyncio
 import importlib.util
 import sys
 import types
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from langchain_core.tools import tool as _real_langchain_tool
 
 ROOT = Path(__file__).resolve().parents[1]
 TOOLS_PATH = ROOT / "hatsume/plugins/hatsume-plugin/graph/tools.py"
@@ -337,24 +338,36 @@ class TestViewImage:
 
 
 # -----------------------------------------------------------------------
-# create_timer: per-task trigger frequency
+# timer-v2 creation tools
 # -----------------------------------------------------------------------
 
 
-class TestCreateTimerFrequency:
-    """create_timer enforces the rolling 24-hour trigger limit."""
+class TestCreateTimerTools:
+    """The four timer-v2 creation tools expose and enforce their contracts."""
 
     @staticmethod
     def _setup_timer_dependencies(tools):
         store = types.SimpleNamespace(
             create_task=MagicMock(return_value=42),
-            get_triggers_for_task=lambda task_id: [],
-            validate_trigger_times=lambda times, now=None: [],
             validate_prompt=lambda prompt: None,
         )
         timer_mod = types.ModuleType("hatsume.plugins.hatsume-plugin.timer")
+        timer_mod.__path__ = [str(ROOT / "hatsume/plugins/hatsume-plugin/timer")]
         timer_mod.get_store = lambda: store
         sys.modules["hatsume.plugins.hatsume-plugin.timer"] = timer_mod
+
+        config_mod = sys.modules["hatsume.plugins.hatsume-plugin.config"]
+        config_mod.TIMER_MAX_FREQUENCY_POINTS = 5
+        config_mod.TIMER_MAX_EXACT_POINTS = 10
+        schedule_name = "hatsume.plugins.hatsume-plugin.timer.schedule"
+        schedule_spec = importlib.util.spec_from_file_location(
+            schedule_name,
+            ROOT / "hatsume/plugins/hatsume-plugin/timer/schedule.py",
+        )
+        assert schedule_spec is not None and schedule_spec.loader is not None
+        schedule = importlib.util.module_from_spec(schedule_spec)
+        sys.modules[schedule_name] = schedule
+        schedule_spec.loader.exec_module(schedule)
 
         add_jobs = MagicMock()
         executor_mod = types.ModuleType(
@@ -363,68 +376,214 @@ class TestCreateTimerFrequency:
         executor_mod.add_jobs_for_task = add_jobs
         sys.modules["hatsume.plugins.hatsume-plugin.timer.executor"] = executor_mod
 
-        config_mod = sys.modules["hatsume.plugins.hatsume-plugin.config"]
-        config_mod.TIMER_MAX_TRIGGERS_PER_24_HOURS = 10
         tools.set_current_group_id(123)
-        return store, add_jobs
+        return store, add_jobs, schedule
 
     @pytest.mark.asyncio
-    async def test_rejects_more_than_ten_unique_triggers_in_24_hours(self):
+    async def test_daily_tool_rejects_more_than_five_exact_clock_points(self):
         tools = _load_tools_module()
-        store, add_jobs = self._setup_timer_dependencies(tools)
-        start = 1_800_000_000
-        trigger_times = [
-            datetime.fromtimestamp(
-                start + index * 2 * 3600,
-                tz=timezone.utc,
-            ).isoformat()
-            for index in range(11)
-        ]
+        store, add_jobs, _ = self._setup_timer_dependencies(tools)
 
-        result = await tools.create_timer(456, "频繁提醒", trigger_times)
+        result = await tools.create_daily_timer(
+            456,
+            "提醒喝水",
+            "2999-01-01T00:00:00+08:00",
+            "2999-01-10T23:59:59+08:00",
+            [f"0{index}:00:00" for index in range(6)],
+            1,
+        )
 
-        assert "24 小时内最多触发 10 次" in result
+        assert "最多 5" in result
+        assert "HH:MM:SS" in tools.create_daily_timer.__doc__
         store.create_task.assert_not_called()
         add_jobs.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_accepts_ten_unique_triggers_in_24_hours(self):
+    async def test_at_tool_rejects_more_than_ten_timestamps(self):
         tools = _load_tools_module()
-        store, add_jobs = self._setup_timer_dependencies(tools)
-        start = 1_800_000_000
-        trigger_times = [
-            datetime.fromtimestamp(
-                start + index * 2 * 3600,
-                tz=timezone.utc,
-            ).isoformat()
-            for index in range(10)
-        ]
+        store, add_jobs, _ = self._setup_timer_dependencies(tools)
+        trigger_times = [f"2999-01-{index:02d}T09:00:00+08:00" for index in range(1, 12)]
 
-        result = await tools.create_timer(456, "合理频率提醒", trigger_times)
+        result = await tools.create_at_timer(456, "提醒", trigger_times)
+
+        assert "最多 10" in result
+        store.create_task.assert_not_called()
+        add_jobs.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("tool_name", "builder_name", "arguments"),
+        [
+            (
+                "create_daily_timer",
+                "build_daily_plan",
+                (
+                    456,
+                    "daily",
+                    "2999-01-01T00:00:00+08:00",
+                    "2999-01-10T23:59:59+08:00",
+                    ["09:00:00"],
+                    2,
+                ),
+            ),
+            (
+                "create_weekly_timer",
+                "build_weekly_plan",
+                (
+                    456,
+                    "weekly",
+                    "2999-01-01T00:00:00+08:00",
+                    "2999-02-28T23:59:59+08:00",
+                    [{"weekday": 1, "time": "09:00:00"}],
+                    2,
+                ),
+            ),
+            (
+                "create_monthly_timer",
+                "build_monthly_plan",
+                (
+                    456,
+                    "monthly",
+                    "2999-01-01T00:00:00+08:00",
+                    "2999-12-31T23:59:59+08:00",
+                    [{"day": 15, "time": "09:00:00"}],
+                    2,
+                ),
+            ),
+            (
+                "create_at_timer",
+                "build_at_plan",
+                (456, "at", ["2999-01-01T09:00:00+08:00"]),
+            ),
+        ],
+    )
+    async def test_each_creation_tool_delegates_to_its_builder(
+        self, tool_name, builder_name, arguments
+    ):
+        tools = _load_tools_module()
+        store, add_jobs, schedule = self._setup_timer_dependencies(tools)
+        original_builder = getattr(schedule, builder_name)
+        builder = MagicMock(wraps=original_builder)
+        setattr(schedule, builder_name, builder)
+
+        result = await getattr(tools, tool_name)(*arguments)
 
         assert "定时任务已创建（ID: 42）" in result
+        builder.assert_called_once()
         store.create_task.assert_called_once()
         add_jobs.assert_called_once_with(42, store)
 
-    @pytest.mark.asyncio
-    async def test_duplicate_times_do_not_count_toward_frequency_limit(self):
+    def test_registry_contains_four_creation_tools_and_no_removed_tools(self):
         tools = _load_tools_module()
-        store, _ = self._setup_timer_dependencies(tools)
-        start = 1_800_000_000
-        unique_times = [
-            datetime.fromtimestamp(
-                start + index * 2 * 3600,
-                tz=timezone.utc,
-            ).isoformat()
-            for index in range(10)
-        ]
 
-        result = await tools.create_timer(
-            456, "重复时间提醒", [*unique_times, unique_times[0]]
-        )
+        for name in (
+            "create_daily_timer",
+            "create_weekly_timer",
+            "create_monthly_timer",
+            "create_at_timer",
+        ):
+            assert tools.CHAT_TOOLS.count(getattr(tools, name)) == 1
+        assert not hasattr(tools, "create_timer")
+        assert not hasattr(tools, "get_timer")
 
-        assert "定时任务已创建（ID: 42）" in result
-        assert len(store.create_task.call_args.kwargs["trigger_times"]) == 11
+    @pytest.mark.parametrize(
+        "tool_name",
+        [
+            "create_daily_timer",
+            "create_weekly_timer",
+            "create_monthly_timer",
+            "create_at_timer",
+        ],
+    )
+    def test_creation_tool_docs_include_shared_prompt_contract(self, tool_name):
+        tools = _load_tools_module()
+
+        doc = getattr(tools, tool_name).__doc__ or ""
+
+        assert "user_id" in doc
+        assert "prompt" in doc
+        assert "500" in doc
+
+    @pytest.mark.parametrize(
+        "tool_name",
+        ["create_daily_timer", "create_weekly_timer", "create_monthly_timer"],
+    )
+    def test_frequency_tool_docs_do_not_describe_an_occurrence_cap(self, tool_name):
+        tools = _load_tools_module()
+
+        doc = getattr(tools, tool_name).__doc__ or ""
+
+        assert "50 次" not in doc
+        assert "保留最早" not in doc
+
+    @pytest.mark.parametrize(
+        ("tool_name", "required_fields"),
+        [
+            ("create_weekly_timer", {"weekday", "time"}),
+            ("create_monthly_timer", {"day", "time"}),
+        ],
+    )
+    def test_frequency_tool_schema_requires_structured_time_points(
+        self, tool_name, required_fields
+    ):
+        tools = _load_tools_module()
+        structured_tool = _real_langchain_tool(getattr(tools, tool_name))
+        schema = structured_tool.args_schema.model_json_schema()
+        items = schema["properties"]["time_points"]["items"]
+        assert "$ref" in items, schema
+        definition = schema["$defs"][items["$ref"].removeprefix("#/$defs/")]
+
+        assert set(definition["required"]) == required_fields
+        assert set(definition["properties"]) == required_fields
+
+    @pytest.mark.parametrize(
+        ("tool_name", "payload"),
+        [
+            (
+                "create_daily_timer",
+                {
+                    "user_id": 1,
+                    "prompt": "daily",
+                    "start_at": "2999-01-01T00:00:00+08:00",
+                    "end_at": "2999-01-02T00:00:00+08:00",
+                    "time_points": ["09:00:00"],
+                    "step": True,
+                },
+            ),
+            (
+                "create_weekly_timer",
+                {
+                    "user_id": 1,
+                    "prompt": "weekly",
+                    "start_at": "2999-01-01T00:00:00+08:00",
+                    "end_at": "2999-02-01T00:00:00+08:00",
+                    "time_points": [{"weekday": True, "time": "09:00:00"}],
+                    "step": 1,
+                },
+            ),
+            (
+                "create_monthly_timer",
+                {
+                    "user_id": 1,
+                    "prompt": "monthly",
+                    "start_at": "2999-01-01T00:00:00+08:00",
+                    "end_at": "2999-03-01T00:00:00+08:00",
+                    "time_points": [{"day": True, "time": "09:00:00"}],
+                    "step": 1,
+                },
+            ),
+        ],
+    )
+    def test_frequency_tool_schema_rejects_boolean_integers(
+        self, tool_name, payload
+    ):
+        from pydantic import ValidationError
+
+        tools = _load_tools_module()
+        structured_tool = _real_langchain_tool(getattr(tools, tool_name))
+
+        with pytest.raises(ValidationError):
+            structured_tool.args_schema.model_validate(payload)
 
 
 # -----------------------------------------------------------------------
@@ -434,40 +593,84 @@ class TestCreateTimerFrequency:
 
 class TestTimerListing:
     @staticmethod
-    def _setup_timer_dependencies(tools, tasks, triggers_by_task):
+    def _setup_timer_dependencies(tools, tasks, points_by_task):
         store = types.SimpleNamespace(
             list_tasks_by_group=MagicMock(return_value=tasks),
-            get_task=MagicMock(
-                side_effect=lambda task_id: next(
-                    (task for task in tasks if task["id"] == task_id), None
-                )
-            ),
-            get_triggers_for_task=MagicMock(
-                side_effect=lambda task_id: triggers_by_task.get(task_id, [])
+            get_points_for_task=MagicMock(
+                side_effect=lambda task_id: points_by_task.get(task_id, [])
             ),
         )
         timer_mod = types.ModuleType("hatsume.plugins.hatsume-plugin.timer")
+        timer_mod.__path__ = [str(ROOT / "hatsume/plugins/hatsume-plugin/timer")]
         timer_mod.get_store = lambda: store
         sys.modules["hatsume.plugins.hatsume-plugin.timer"] = timer_mod
+
+        config_mod = sys.modules["hatsume.plugins.hatsume-plugin.config"]
+        config_mod.TIMER_MAX_FREQUENCY_POINTS = 5
+        config_mod.TIMER_MAX_EXACT_POINTS = 10
         tools.set_current_group_id(123)
         return store
 
     @pytest.mark.asyncio
-    async def test_list_timers_groups_tasks_and_only_shows_next_pending_trigger(self):
+    async def test_overview_accepts_an_explicit_group_without_changing_context(self):
         tools = _load_tools_module()
+        store = self._setup_timer_dependencies(tools, [], {})
+
+        result = await tools.get_timer_overview(456)
+
+        store.list_tasks_by_group.assert_called_once_with(456)
+        assert result.startswith("# 群 456 的定时任务")
+        assert tools._current_group_id == 123
+
+    @pytest.mark.asyncio
+    async def test_list_timers_shows_complete_weekly_frequency(self):
+        tools = _load_tools_module()
+        start_at = datetime.fromisoformat("2026-07-25T00:00:00+08:00").timestamp()
+        end_at = datetime.fromisoformat("2026-12-31T23:59:59+08:00").timestamp()
+        effective_until = datetime.fromisoformat(
+            "2026-11-30T09:00:00+08:00"
+        ).timestamp()
         tasks = [
-            {"id": 1, "group_id": 123, "user_id": 456, "prompt": "完整提示词"},
-            {"id": 2, "group_id": 123, "user_id": 0, "prompt": "已完成提示词"},
+            {
+                "id": 1,
+                "group_id": 123,
+                "user_id": 456,
+                "prompt": "完整提示词",
+                "schedule_type": "weekly",
+                "start_at": start_at,
+                "end_at": end_at,
+                "step": 2,
+                "total_occurrences": 20,
+                "processed_occurrences": 1,
+                "effective_until": effective_until,
+                "truncated": 1,
+            }
         ]
-        triggers = {
+        points = {
             1: [
-                {"trigger_at": 1_800_000_000, "fired": 1},
-                {"trigger_at": 1_800_003_600, "fired": 0},
-                {"trigger_at": 1_800_007_200, "fired": 0},
-            ],
-            2: [{"trigger_at": 1_800_000_000, "fired": 1}],
+                {
+                    "period_value": 1,
+                    "clock_time": "09:00:00",
+                    "first_fire_at": datetime.fromisoformat(
+                        "2026-08-03T09:00:00+08:00"
+                    ).timestamp(),
+                    "last_fire_at": end_at,
+                    "planned_occurrences": 10,
+                    "processed_occurrences": 0,
+                },
+                {
+                    "period_value": 5,
+                    "clock_time": "18:00:00",
+                    "first_fire_at": datetime.fromisoformat(
+                        "2026-07-31T18:00:00+08:00"
+                    ).timestamp(),
+                    "last_fire_at": end_at,
+                    "planned_occurrences": 10,
+                    "processed_occurrences": 1,
+                },
+            ]
         }
-        self._setup_timer_dependencies(tools, tasks, triggers)
+        self._setup_timer_dependencies(tools, tasks, points)
         bot = object()
         sys.modules["nonebot"].get_bot = lambda: bot
         utils = sys.modules["hatsume.plugins.hatsume-plugin.utils"]
@@ -481,11 +684,67 @@ class TestTimerListing:
         assert "任务 ID：1" in pending_section
         assert "提醒用户：@提醒对象(456)" in pending_section
         assert "任务提示词：完整提示词" in pending_section
-        assert "下一次触发时间：2027-01-15 17:00" in pending_section
-        assert "2027-01-15 18:00" not in pending_section
-        assert "任务 ID：2" in completed_section
-        assert "提醒用户：无" in completed_section
-        assert "下一次触发时间：无" in completed_section
+        assert "类型：每 2 周" in pending_section
+        assert "范围：2026-07-25 00:00:00 至 2026-12-31 23:59:59" in pending_section
+        assert "时间点：周一 09:00:00、周五 18:00:00" in pending_section
+        assert "计划触发：20 次；已处理：1 次" in pending_section
+        assert "已按上限截断" not in pending_section
+        assert "实际保留至" not in pending_section
+        assert "下一次触发：2026-08-03 09:00:00" in pending_section
+        assert completed_section.strip() == "\n无".strip()
+
+    @pytest.mark.asyncio
+    async def test_list_timers_keeps_requested_zero_occurrence_point(self):
+        tools = _load_tools_module()
+        start_at = datetime.fromisoformat("2026-08-01T00:00:00+08:00").timestamp()
+        end_at = datetime.fromisoformat("2026-08-01T23:59:59+08:00").timestamp()
+        retained_at = datetime.fromisoformat(
+            "2026-08-01T18:00:00+08:00"
+        ).timestamp()
+        tasks = [
+            {
+                "id": 1,
+                "group_id": 123,
+                "user_id": 0,
+                "prompt": "完整时间点",
+                "schedule_type": "daily",
+                "start_at": start_at,
+                "end_at": end_at,
+                "step": 1,
+                "total_occurrences": 1,
+                "processed_occurrences": 0,
+                "effective_until": retained_at,
+                "truncated": 0,
+            }
+        ]
+        points = {
+            1: [
+                {
+                    "period_value": None,
+                    "clock_time": "09:00:00",
+                    "exact_at": None,
+                    "first_fire_at": None,
+                    "last_fire_at": None,
+                    "planned_occurrences": 0,
+                    "processed_occurrences": 0,
+                },
+                {
+                    "period_value": None,
+                    "clock_time": "18:00:00",
+                    "exact_at": None,
+                    "first_fire_at": retained_at,
+                    "last_fire_at": retained_at,
+                    "planned_occurrences": 1,
+                    "processed_occurrences": 0,
+                },
+            ]
+        }
+        self._setup_timer_dependencies(tools, tasks, points)
+
+        result = await tools.list_timers()
+
+        assert "时间点：09:00:00、18:00:00" in result
+        assert "下一次触发：2026-08-01 18:00:00" in result
 
     @pytest.mark.asyncio
     async def test_list_timers_keeps_both_categories_when_group_has_no_tasks(self):
@@ -501,35 +760,55 @@ class TestTimerListing:
         )
 
     @pytest.mark.asyncio
-    async def test_get_timer_lists_every_trigger_with_completion_status(self):
+    async def test_list_timers_shows_every_exact_timestamp_and_status(self):
         tools = _load_tools_module()
         tasks = [
-            {"id": 7, "group_id": 123, "user_id": 456, "prompt": "提示词"},
+            {
+                "id": 7,
+                "group_id": 123,
+                "user_id": 456,
+                "prompt": "提示词",
+                "schedule_type": "at",
+                "start_at": None,
+                "end_at": None,
+                "step": None,
+                "total_occurrences": 2,
+                "processed_occurrences": 1,
+                "truncated": 0,
+            },
         ]
-        triggers = {
+        points = {
             7: [
-                {"trigger_at": 1_800_000_000, "fired": 1},
-                {"trigger_at": 1_800_003_600, "fired": 0},
+                {
+                    "exact_at": datetime.fromisoformat(
+                        "2026-08-01T09:00:00+08:00"
+                    ).timestamp(),
+                    "first_fire_at": datetime.fromisoformat(
+                        "2026-08-01T09:00:00+08:00"
+                    ).timestamp(),
+                    "planned_occurrences": 1,
+                    "processed_occurrences": 1,
+                },
+                {
+                    "exact_at": datetime.fromisoformat(
+                        "2026-08-02T18:00:00+08:00"
+                    ).timestamp(),
+                    "first_fire_at": datetime.fromisoformat(
+                        "2026-08-02T18:00:00+08:00"
+                    ).timestamp(),
+                    "planned_occurrences": 1,
+                    "processed_occurrences": 0,
+                },
             ],
         }
-        self._setup_timer_dependencies(tools, tasks, triggers)
+        self._setup_timer_dependencies(tools, tasks, points)
 
-        result = await tools.get_timer(7)
+        result = await tools.list_timers()
 
-        assert "2027-01-15 16:00：已完成" in result
-        assert "2027-01-15 17:00：未完成" in result
-
-    @pytest.mark.asyncio
-    async def test_get_timer_rejects_task_from_another_group(self):
-        tools = _load_tools_module()
-        tasks = [
-            {"id": 7, "group_id": 999, "user_id": 456, "prompt": "提示词"},
-        ]
-        self._setup_timer_dependencies(tools, tasks, {})
-
-        result = await tools.get_timer(7)
-
-        assert result == "错误：任务 ID 7 不属于当前群。"
+        assert "类型：指定时间" in result
+        assert "2026-08-01 09:00:00：已完成" in result
+        assert "2026-08-02 18:00:00：未完成" in result
+        assert "下一次触发：2026-08-02 18:00:00" in result
 
 
 # -----------------------------------------------------------------------
@@ -867,6 +1146,217 @@ class MessageStub:
         if seg_type == "at":
             return [types.SimpleNamespace(data={"qq": qq}) for qq in self._at_qqs]
         return []
+
+
+class TestTimerCommand:
+    @staticmethod
+    def _setup(commands, *, task=None):
+        store = types.SimpleNamespace(
+            get_task=MagicMock(return_value=task),
+            replace_task_with_exact_plan=MagicMock(),
+            delete_task=MagicMock(),
+            validate_prompt=MagicMock(return_value=None),
+        )
+        timer = types.ModuleType("hatsume.plugins.hatsume-plugin.timer")
+        timer.get_store = lambda: store
+        sys.modules[timer.__name__] = timer
+
+        graph_tools = types.ModuleType("hatsume.plugins.hatsume-plugin.graph.tools")
+        graph_tools.set_current_group_id = MagicMock()
+        graph_tools.get_timer_overview = AsyncMock(
+            return_value="shared detailed overview"
+        )
+        sys.modules[graph_tools.__name__] = graph_tools
+
+        executor = types.ModuleType("hatsume.plugins.hatsume-plugin.timer.executor")
+        executor.cancel_task_jobs = MagicMock()
+        executor.add_jobs_for_task = MagicMock()
+        sys.modules[executor.__name__] = executor
+
+        class ScheduleValidationError(ValueError):
+            pass
+
+        plan = object()
+        schedule = types.ModuleType("hatsume.plugins.hatsume-plugin.timer.schedule")
+        schedule.ScheduleValidationError = ScheduleValidationError
+        schedule.build_at_plan = MagicMock(return_value=plan)
+        sys.modules[schedule.__name__] = schedule
+        return store, graph_tools, executor, schedule, plan
+
+    @pytest.mark.asyncio
+    async def test_list_reuses_shared_detailed_overview(self):
+        commands = _load_commands_module()
+        _, graph_tools, _, _, _ = self._setup(commands)
+        matcher = _FakeMatcher()
+        event = types.SimpleNamespace(group_id=123)
+
+        with pytest.raises(_Finished):
+            await commands.handle_timer(
+                object(), event, matcher, MessageStub("list")
+            )
+
+        graph_tools.set_current_group_id.assert_called_once_with(123)
+        graph_tools.get_timer_overview.assert_awaited_once_with()
+        assert matcher.finished_with == "shared detailed overview"
+
+    @pytest.mark.asyncio
+    async def test_admin_can_list_timers_for_a_specified_group(self):
+        commands = _load_commands_module()
+        _, graph_tools, _, _, _ = self._setup(commands)
+        matcher = _FakeMatcher()
+        event = types.SimpleNamespace(
+            group_id=123,
+            get_user_id=lambda: "999999",
+        )
+
+        with pytest.raises(_Finished):
+            await commands.handle_timer(
+                object(), event, matcher, MessageStub("list 456")
+            )
+
+        graph_tools.set_current_group_id.assert_called_once_with(123)
+        graph_tools.get_timer_overview.assert_awaited_once_with(456)
+        assert matcher.finished_with == "shared detailed overview"
+
+    @pytest.mark.asyncio
+    async def test_non_admin_cannot_list_timers_for_another_group(self):
+        commands = _load_commands_module()
+        _, graph_tools, _, _, _ = self._setup(commands)
+        matcher = _FakeMatcher()
+        event = types.SimpleNamespace(
+            group_id=123,
+            get_user_id=lambda: "111111",
+        )
+
+        with pytest.raises(_Finished):
+            await commands.handle_timer(
+                object(), event, matcher, MessageStub("list 456")
+            )
+
+        graph_tools.get_timer_overview.assert_not_awaited()
+        assert matcher.finished_with == "只有管理员可以查看其他群的定时任务。"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("argument", ["abc", "0", "-1", "456 extra"])
+    async def test_list_rejects_invalid_group_argument(self, argument):
+        commands = _load_commands_module()
+        _, graph_tools, _, _, _ = self._setup(commands)
+        matcher = _FakeMatcher()
+        event = types.SimpleNamespace(
+            group_id=123,
+            get_user_id=lambda: "999999",
+        )
+
+        with pytest.raises(_Finished):
+            await commands.handle_timer(
+                object(), event, matcher, MessageStub(f"list {argument}")
+            )
+
+        graph_tools.get_timer_overview.assert_not_awaited()
+        assert "群号必须是正整数" in matcher.finished_with
+
+    @pytest.mark.asyncio
+    async def test_update_replaces_with_validated_exact_plan(self):
+        commands = _load_commands_module()
+        task = {"id": 7, "group_id": 123}
+        store, _, executor, schedule, plan = self._setup(commands, task=task)
+        matcher = _FakeMatcher()
+        event = types.SimpleNamespace(group_id=123)
+
+        with pytest.raises(_Finished):
+            await commands.handle_timer(
+                object(),
+                event,
+                matcher,
+                MessageStub(
+                    "update 7 new prompt @ "
+                    "2999-08-01T09:00:00+08:00, 2999-08-02T18:00:00+08:00"
+                ),
+            )
+
+        schedule.build_at_plan.assert_called_once_with(
+            ["2999-08-01T09:00:00+08:00", "2999-08-02T18:00:00+08:00"]
+        )
+        executor.cancel_task_jobs.assert_called_once_with(7, store)
+        store.replace_task_with_exact_plan.assert_called_once_with(
+            7, "new prompt", plan
+        )
+        executor.add_jobs_for_task.assert_called_once_with(7, store)
+
+    @pytest.mark.asyncio
+    async def test_update_validates_before_cancelling_existing_jobs(self):
+        commands = _load_commands_module()
+        task = {"id": 7, "group_id": 123}
+        store, _, executor, schedule, _ = self._setup(commands, task=task)
+        schedule.build_at_plan.side_effect = schedule.ScheduleValidationError(
+            "错误：指定时间列表最多 10 个。"
+        )
+        matcher = _FakeMatcher()
+        event = types.SimpleNamespace(group_id=123)
+
+        with pytest.raises(_Finished):
+            await commands.handle_timer(
+                object(), event, matcher, MessageStub("update 7 prompt @ invalid")
+            )
+
+        assert "最多 10" in matcher.finished_with
+        executor.cancel_task_jobs.assert_not_called()
+        store.replace_task_with_exact_plan.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_update_rejects_task_from_another_group_before_mutation(self):
+        commands = _load_commands_module()
+        task = {"id": 7, "group_id": 999}
+        store, _, executor, schedule, _ = self._setup(commands, task=task)
+        matcher = _FakeMatcher()
+        event = types.SimpleNamespace(group_id=123)
+
+        with pytest.raises(_Finished):
+            await commands.handle_timer(
+                object(),
+                event,
+                matcher,
+                MessageStub("update 7 prompt @ 2999-08-01T09:00:00+08:00"),
+            )
+
+        assert matcher.finished_with == "任务 ID 7 不属于当前群。"
+        schedule.build_at_plan.assert_not_called()
+        executor.cancel_task_jobs.assert_not_called()
+        store.replace_task_with_exact_plan.assert_not_called()
+        executor.add_jobs_for_task.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_delete_cancels_v2_jobs_before_deleting_task(self):
+        commands = _load_commands_module()
+        task = {"id": 7, "group_id": 123}
+        store, _, executor, _, _ = self._setup(commands, task=task)
+        matcher = _FakeMatcher()
+        event = types.SimpleNamespace(group_id=123)
+
+        with pytest.raises(_Finished):
+            await commands.handle_timer(
+                object(), event, matcher, MessageStub("delete 7")
+            )
+
+        executor.cancel_task_jobs.assert_called_once_with(7, store)
+        store.delete_task.assert_called_once_with(7)
+
+    @pytest.mark.asyncio
+    async def test_delete_rejects_task_from_another_group(self):
+        commands = _load_commands_module()
+        task = {"id": 7, "group_id": 999}
+        store, _, executor, _, _ = self._setup(commands, task=task)
+        matcher = _FakeMatcher()
+        event = types.SimpleNamespace(group_id=123)
+
+        with pytest.raises(_Finished):
+            await commands.handle_timer(
+                object(), event, matcher, MessageStub("delete 7")
+            )
+
+        assert matcher.finished_with == "任务 ID 7 不属于当前群。"
+        executor.cancel_task_jobs.assert_not_called()
+        store.delete_task.assert_not_called()
 
     def count(self, seg_type):
         if seg_type == "image":

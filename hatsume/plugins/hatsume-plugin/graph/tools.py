@@ -12,16 +12,35 @@ import subprocess
 import traceback
 import urllib.request
 import urllib.error
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Annotated, Any, Callable, TypedDict
 
 from langchain_core.tools import tool as _langchain_tool
 from langchain_community.tools import DuckDuckGoSearchRun
 from nonebot.adapters.onebot.v11 import MessageSegment
+from pydantic import Field
 
 from ..infra import run_cmd, ensure_container_running
 
 from ..memory import query_mems
 from .agents import get_agent_list, get_agent_handler
+
+if TYPE_CHECKING:
+    from ..timer.schedule import SchedulePlan
+
+
+PositiveTimerStep = Annotated[int, Field(strict=True, gt=0)]
+IsoWeekday = Annotated[int, Field(strict=True, ge=1, le=7)]
+MonthDay = Annotated[int, Field(strict=True, ge=1, le=31)]
+
+
+class WeeklyTimePoint(TypedDict):
+    weekday: IsoWeekday
+    time: str
+
+
+class MonthlyTimePoint(TypedDict):
+    day: MonthDay
+    time: str
 
 
 # ---------------------------------------------------------------------------
@@ -730,164 +749,204 @@ async def shell_executor(shell: str, timeout: int) -> str:
 # ---------------------------------------------------------------------------
 # Timer tools
 # ---------------------------------------------------------------------------
-def _exceeds_timer_trigger_frequency(
-    trigger_times: list[float],
-    *,
-    max_triggers: int,
-    window_seconds: int,
-) -> bool:
-    """Return whether any rolling window contains too many unique triggers."""
-    unique_times = sorted(set(trigger_times))
-    for index in range(max_triggers, len(unique_times)):
-        if unique_times[index] - unique_times[index - max_triggers] < window_seconds:
-            return True
-    return False
-
-
-@tool
-async def create_timer(user_id: int, prompt: str, trigger_times: list[str]) -> str:
-    """
-    为当前群聊创建定时任务。任务到期时，你会自动执行该 prompt 并 @ 创建者发送结果。
-
-    ## 参数：
-    - user_id: 要通知的用户 QQ ID。如果目标是全体用户，或者明确不指定用户，则传入 0。
-    - prompt: 任务内容描述。写出任务要你做什么，用自然语言。不要包含时间信息。
-    - trigger_times: ISO 8601 格式的触发时间列表，带时区偏移，如 "2026-06-08T08:00:00+08:00"。
-      时间必须在当前时间之后、未来 30 天之内。同一个定时任务在任意连续 24 小时内最多触发 10 次。
-      如果用户要求周期触发（如"每天7点"），你需要计算出未来 30 天内的所有具体触发时刻。
-
-    ## Few-shot 示例
-
-    ### 示例 1：一次性提醒
-    用户 QQ 123456789："明早8点提醒我开会"
-    当前时间：2026-06-07 20:00:00+08:00
-    → create_timer(user_id=123456789, prompt="提醒开会，告诉用户该准备会议材料了",
-                    trigger_times=["2026-06-08T08:00:00+08:00"])
-
-    ### 示例 2：每天重复
-    用户 QQ 123456789："未来7天每天早上7点叫我起床"
-    当前时间：2026-06-07 20:00:00+08:00
-    → create_timer(user_id=123456789, prompt="叫用户起床，用精神抖擞的语气",
-                    trigger_times=[
-                      "2026-06-08T07:00:00+08:00",
-                      "2026-06-09T07:00:00+08:00",
-                      "2026-06-10T07:00:00+08:00",
-                      "2026-06-11T07:00:00+08:00",
-                      "2026-06-12T07:00:00+08:00",
-                      "2026-06-13T07:00:00+08:00",
-                      "2026-06-14T07:00:00+08:00"])
-
-    ### 示例 3：多个指定时刻
-    用户 QQ 987654321："明天下午3点和后天下午3点提醒我吃药"
-    → create_timer(user_id=987654321, prompt="提醒用户按时吃药，语气要关切",
-                    trigger_times=[
-                      "2026-06-08T15:00:00+08:00",
-                      "2026-06-09T15:00:00+08:00"])
-
-    ### 示例 4：相对时间
-    用户 QQ 111222333："3小时后提醒我收衣服"
-    当前时间：2026-06-07 20:00:00+08:00
-    → create_timer(user_id=111222333, prompt="提醒用户收衣服，外面可能要下雨了",
-                    trigger_times=["2026-06-07T23:00:00+08:00"])
-
-    ### 示例 5：工作日
-    用户 QQ 555666777："未来5个工作日晚上9点提醒我写日报"
-    当前时间：2026-06-07 周六 20:00:00+08:00
-    → create_timer(user_id=555666777, prompt="提醒用户写工作日报",
-                    trigger_times=[
-                      "2026-06-09T21:00:00+08:00",
-                      "2026-06-10T21:00:00+08:00",
-                      "2026-06-11T21:00:00+08:00",
-                      "2026-06-12T21:00:00+08:00",
-                      "2026-06-13T21:00:00+08:00"])
-    """
-    import time as _time
-    from datetime import datetime, timezone, timedelta
-
-    global _current_group_id
-
+async def _create_scheduled_timer(
+    user_id: int, prompt: str, plan: SchedulePlan
+) -> str:
+    """Persist and register one already-validated timer-v2 schedule."""
     if _current_group_id is None:
         return "错误：无法确定当前群聊 ID。"
 
-    # Parse ISO 8601 times to Unix timestamps
-    now = _time.time()
-    parsed: list[float] = []
-    tz_shanghai = timezone(timedelta(hours=8))
-    for ts in trigger_times:
-        try:
-            # Parse ISO 8601 with timezone
-            dt = datetime.fromisoformat(ts)
-            parsed.append(dt.timestamp())
-        except ValueError:
-            return f"错误：无法解析时间 '{ts}'，请使用 ISO 8601 格式如 2026-06-08T08:00:00+08:00"
-
-    # Validate
     from ..timer import get_store
-    store = get_store()
-    errors = store.validate_trigger_times(parsed, now)
-    if errors:
-        return "\n".join(errors) # type: ignore
-
-    from ..config import TIMER_MAX_TRIGGERS_PER_24_HOURS
-    if _exceeds_timer_trigger_frequency(
-        parsed,
-        max_triggers=TIMER_MAX_TRIGGERS_PER_24_HOURS,
-        window_seconds=24 * 60 * 60,
-    ):
-        return (
-            "错误：同一个定时任务在任意连续 24 小时内最多触发 "
-            f"{TIMER_MAX_TRIGGERS_PER_24_HOURS} 次。"
-        )
-
-    prompt_err = store.validate_prompt(prompt)
-    if prompt_err:
-        return prompt_err
-
-    task_id = store.create_task(
-        group_id=_current_group_id,
-        user_id=user_id,
-        prompt=prompt,
-        trigger_times=parsed,
-    )
-
-    # Register APScheduler jobs
     from ..timer.executor import add_jobs_for_task
-    add_jobs_for_task(task_id, store)
 
-    # Format confirmation
-    time_strs = [
-        datetime.fromtimestamp(t, tz=tz_shanghai).strftime("%m/%d %H:%M")
-        for t in sorted(set(parsed))
-    ]
+    store = get_store()
+    if prompt_error := store.validate_prompt(prompt):
+        return prompt_error
+    task_id = store.create_task(_current_group_id, user_id, prompt, plan)
+    add_jobs_for_task(task_id, store)
     return (
         f"定时任务已创建（ID: {task_id}）\n"
         f"内容：{prompt}\n"
-        f"触发时间：{', '.join(time_strs)}"
+        f"类型：{plan.mode}\n"
+        f"计划触发：{plan.total_occurrences} 次"
     )
+
+
+@tool
+async def create_daily_timer(
+    user_id: int,
+    prompt: str,
+    start_at: str,
+    end_at: str,
+    time_points: list[str],
+    step: PositiveTimerStep = 1,
+) -> str:
+    """创建按天重复的定时任务。
+
+    参数：user_id 是通知对象 QQ ID（全体传 0）；prompt 必须非空、不包含时间信息，
+    且最多 500 个字符；
+    start_at 和 end_at 是含时区的 ISO 8601 起止时刻且边界均包含；step 必须为正整数，
+    表示每隔 step 天触发；time_points 最多 5 个，且每项必须严格使用 HH:MM:SS。
+
+    示例：create_daily_timer(123, "提醒喝水", "2026-08-01T00:00:00+08:00",
+    "2026-08-10T23:59:59+08:00", ["09:00:00", "18:00:00"], 2)
+    """
+    from ..timer.schedule import ScheduleValidationError, build_daily_plan
+
+    try:
+        plan = build_daily_plan(start_at, end_at, time_points, step)
+    except ScheduleValidationError as exc:
+        return str(exc)
+    return await _create_scheduled_timer(user_id, prompt, plan)
+
+
+@tool
+async def create_weekly_timer(
+    user_id: int,
+    prompt: str,
+    start_at: str,
+    end_at: str,
+    time_points: list[WeeklyTimePoint],
+    step: PositiveTimerStep = 1,
+) -> str:
+    """创建按周重复的定时任务。
+
+    参数：user_id 是通知对象 QQ ID（全体传 0）；prompt 必须非空、不包含时间信息，
+    且最多 500 个字符；start_at/end_at 是含时区且边界均包含的 ISO 8601 时刻；step 必须为正整数，
+    表示每隔 step 周触发；time_points 最多 5 个，每项为 weekday（1=周一，7=周日）
+    和严格 HH:MM:SS 格式的 time。
+
+    示例：create_weekly_timer(123, "提醒周会", "2026-08-01T00:00:00+08:00",
+    "2026-12-31T23:59:59+08:00", [{"weekday": 1, "time": "09:00:00"}], 2)
+    """
+    from ..timer.schedule import ScheduleValidationError, build_weekly_plan
+
+    try:
+        plan = build_weekly_plan(start_at, end_at, time_points, step)
+    except ScheduleValidationError as exc:
+        return str(exc)
+    return await _create_scheduled_timer(user_id, prompt, plan)
+
+
+@tool
+async def create_monthly_timer(
+    user_id: int,
+    prompt: str,
+    start_at: str,
+    end_at: str,
+    time_points: list[MonthlyTimePoint],
+    step: PositiveTimerStep = 1,
+) -> str:
+    """创建按月重复的定时任务。
+
+    参数：user_id 是通知对象 QQ ID（全体传 0）；prompt 必须非空、不包含时间信息，
+    且最多 500 个字符；start_at/end_at 是含时区且边界均包含的 ISO 8601 时刻；step 必须为正整数，
+    表示每隔 step 个月触发；time_points 最多 5 个，每项为 day（1..31）和严格
+    HH:MM:SS 格式的 time，不存在该日期的月份自动跳过。
+
+    示例：create_monthly_timer(123, "提醒结算", "2026-08-01T00:00:00+08:00",
+    "2027-07-31T23:59:59+08:00", [{"day": 31, "time": "18:00:00"}], 1)
+    """
+    from ..timer.schedule import ScheduleValidationError, build_monthly_plan
+
+    try:
+        plan = build_monthly_plan(start_at, end_at, time_points, step)
+    except ScheduleValidationError as exc:
+        return str(exc)
+    return await _create_scheduled_timer(user_id, prompt, plan)
+
+
+@tool
+async def create_at_timer(
+    user_id: int, prompt: str, trigger_times: list[str]
+) -> str:
+    """创建指定时刻触发的定时任务。
+
+    trigger_times 必须是未来、互不重复、含时区的 ISO 8601 时间列表，最多 10 个。
+    user_id 是通知对象 QQ ID（全体传 0）；prompt 必须非空、不包含时间信息，且最多 500 个字符。
+
+    示例：create_at_timer(123, "提醒吃药",
+    ["2026-08-01T09:00:00+08:00", "2026-08-02T18:00:00+08:00"])
+    """
+    from ..timer.schedule import ScheduleValidationError, build_at_plan
+
+    try:
+        plan = build_at_plan(trigger_times)
+    except ScheduleValidationError as exc:
+        return str(exc)
+    return await _create_scheduled_timer(user_id, prompt, plan)
 
 
 @tool
 async def list_timers() -> str:
     """
     查看当前群的所有定时任务，按尚未完成和已完成分组。
-    每个任务只返回任务 ID、提醒用户、任务提示词和下一次触发时间。
+    频率任务显示完整起止范围、间隔、时间点和进度；指定时刻任务显示每个触发时间及状态。
     """
     return await get_timer_overview()
 
 
-async def get_timer_overview() -> str:
-    """Return the exact timer overview shared by the tool and system prompt."""
-    global _current_group_id
+def _format_timer_timestamp(timestamp: float) -> str:
+    from datetime import datetime
 
-    if _current_group_id is None:
+    from ..timer.schedule import SHANGHAI
+
+    return datetime.fromtimestamp(timestamp, tz=SHANGHAI).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+
+
+def _format_frequency_rule(task: dict[str, Any], points: list[dict[str, Any]]) -> str:
+    mode = task["schedule_type"]
+    step = int(task["step"])
+    if mode == "daily":
+        schedule_type = "每天" if step == 1 else f"每 {step} 天"
+        point_text = "、".join(sorted(str(point["clock_time"]) for point in points))
+    elif mode == "weekly":
+        schedule_type = "每周" if step == 1 else f"每 {step} 周"
+        weekday_names = ("", "周一", "周二", "周三", "周四", "周五", "周六", "周日")
+        ordered = sorted(points, key=lambda point: (point["period_value"], point["clock_time"]))
+        point_text = "、".join(
+            f"{weekday_names[int(point['period_value'])]} {point['clock_time']}"
+            for point in ordered
+        )
+    else:
+        schedule_type = "每月" if step == 1 else f"每 {step} 个月"
+        ordered = sorted(points, key=lambda point: (point["period_value"], point["clock_time"]))
+        point_text = "、".join(
+            f"{int(point['period_value'])} 日 {point['clock_time']}"
+            for point in ordered
+        )
+    return (
+        f"  类型：{schedule_type}\n"
+        f"  范围：{_format_timer_timestamp(task['start_at'])} 至 "
+        f"{_format_timer_timestamp(task['end_at'])}\n"
+        f"  时间点：{point_text}"
+    )
+
+
+def _next_timer_occurrence(
+    task: dict[str, Any], points: list[dict[str, Any]]
+) -> float | None:
+    from ..timer.schedule import occurrence_at_index
+
+    candidates = [
+        occurrence_at_index(task, point, int(point["processed_occurrences"]))
+        for point in points
+        if point["processed_occurrences"] < point["planned_occurrences"]
+    ]
+    return min(candidates, default=None)
+
+
+async def get_timer_overview(group_id: int | None = None) -> str:
+    """Return the exact timer overview shared by the tool and system prompt."""
+    resolved_group_id = group_id if group_id is not None else _current_group_id
+    if resolved_group_id is None:
         return "错误：无法确定当前群聊 ID。"
 
     from ..timer import get_store
     store = get_store()
-    tasks = store.list_tasks_by_group(_current_group_id)
-
-    from datetime import datetime, timezone, timedelta
-    tz_shanghai = timezone(timedelta(hours=8))
+    tasks = store.list_tasks_by_group(resolved_group_id)
 
     # Look up user names (cache per user_id for tasks sharing the same owner)
     user_names: dict[int, str] = {}
@@ -898,7 +957,9 @@ async def get_timer_overview() -> str:
         for task in tasks:
             uid = task["user_id"]
             if uid != 0 and uid not in user_names:
-                user_names[uid] = await get_group_member_name(bot, _current_group_id, uid)
+                user_names[uid] = await get_group_member_name(
+                    bot, resolved_group_id, uid
+                )
     except Exception:
         pass  # fall back to showing raw user_id
 
@@ -915,69 +976,68 @@ async def get_timer_overview() -> str:
             owner = f"@{user_name}({uid})"
         else:
             owner = str(uid)
-        triggers = store.get_triggers_for_task(tid)
-        pending_triggers = [trigger for trigger in triggers if not trigger["fired"]]
-        if pending_triggers:
-            next_trigger = datetime.fromtimestamp(
-                pending_triggers[0]["trigger_at"], tz=tz_shanghai
-            ).strftime("%Y-%m-%d %H:%M")
-        else:
-            next_trigger = "无"
-
+        points = store.get_points_for_task(tid)
+        next_occurrence = _next_timer_occurrence(task, points)
+        next_text = (
+            _format_timer_timestamp(next_occurrence)
+            if next_occurrence is not None
+            else "无"
+        )
+        details = (
+            _format_frequency_rule(task, points)
+            if task["schedule_type"] != "at"
+            else "  类型：指定时间\n  触发时间：\n"
+            + "\n".join(
+                "    - "
+                + _format_timer_timestamp(float(point["exact_at"]))
+                + (
+                    "：已完成"
+                    if point["processed_occurrences"] >= point["planned_occurrences"]
+                    else "：未完成"
+                )
+                for point in points
+            )
+        )
+        cap_note = (
+            "；已按上限截断"
+            if task["schedule_type"] == "at" and task["truncated"]
+            else ""
+        )
+        retained_until = (
+            "\n  实际保留至："
+            + _format_timer_timestamp(float(task["effective_until"]))
+            if task["schedule_type"] == "at" and task["truncated"]
+            else ""
+        )
         summary = (
             f"- 任务 ID：{tid}\n"
             f"  提醒用户：{owner}\n"
             f"  任务提示词：{prompt}\n"
-            f"  下一次触发时间：{next_trigger}"
+            f"{details}\n"
+            f"  计划触发：{task['total_occurrences']} 次；"
+            f"已处理：{task['processed_occurrences']} 次{cap_note}"
+            f"{retained_until}\n"
+            f"  下一次触发：{next_text}"
         )
-        target = pending_tasks if pending_triggers else completed_tasks
+        target = (
+            pending_tasks
+            if task["processed_occurrences"] < task["total_occurrences"]
+            else completed_tasks
+        )
         target.append(summary)
 
+    title = (
+        "# 当前群的定时任务"
+        if group_id is None
+        else f"# 群 {resolved_group_id} 的定时任务"
+    )
     return (
-        "# 当前群的定时任务\n\n"
+        f"{title}\n\n"
         "## 尚未完成的定时任务\n"
         + ("\n\n".join(pending_tasks) if pending_tasks else "无")
         + "\n\n## 已完成的定时任务\n"
         + ("\n\n".join(completed_tasks) if completed_tasks else "无")
     )
-
-
-@tool
-async def get_timer(task_id: int) -> str:
-    """
-    查看当前群某一个定时任务的所有触发时间，并标注每个触发时间是否完成。
-
-    ## 参数：
-    - task_id: 要查看的任务 ID
-    """
-    global _current_group_id
-
-    if _current_group_id is None:
-        return "错误：无法确定当前群聊 ID。"
-
-    from ..timer import get_store
-    store = get_store()
-    task = store.get_task(task_id)
-    if task is None:
-        return f"错误：任务 ID {task_id} 不存在。"
-    if task["group_id"] != _current_group_id:
-        return f"错误：任务 ID {task_id} 不属于当前群。"
-
-    triggers = store.get_triggers_for_task(task_id)
-    if not triggers:
-        return f"定时任务 {task_id} 没有触发时间。"
-
-    from datetime import datetime, timezone, timedelta
-    tz_shanghai = timezone(timedelta(hours=8))
-    trigger_lines = [
-        "- "
-        + datetime.fromtimestamp(trigger["trigger_at"], tz=tz_shanghai).strftime(
-            "%Y-%m-%d %H:%M"
-        )
-        + ("：已完成" if trigger["fired"] else "：未完成")
-        for trigger in triggers
-    ]
-    return f"定时任务 {task_id} 的所有触发时间：\n" + "\n".join(trigger_lines)
 
 
 @tool
@@ -1421,9 +1481,11 @@ CHAT_TOOLS = [
     send_video,
     get_avatar,
     random_acg_photo,
-    create_timer,
+    create_daily_timer,
+    create_weekly_timer,
+    create_monthly_timer,
+    create_at_timer,
     list_timers,
-    get_timer,
     delete_timer,
     skill_loader,
     skill_remove,

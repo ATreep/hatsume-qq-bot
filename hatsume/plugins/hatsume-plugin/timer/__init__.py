@@ -13,8 +13,17 @@ def get_store() -> TimerStore:
     global _store
     if _store is None:
         print("⏰ [timer] Initializing TimerStore...")
-        _store = TimerStore()
-        _store.init_db()
+        candidate = TimerStore()
+        try:
+            candidate.init_db()
+        except BaseException:
+            print(
+                "⏰ [timer] TimerStore initialization failed "
+                f"(db: {candidate._db_path})"
+            )
+            candidate.close()
+            raise
+        _store = candidate
         print(f"⏰ [timer] TimerStore ready (db: {_store._db_path})")
     return _store
 
@@ -27,13 +36,17 @@ async def init_scheduler() -> None:
     - Compensating missed triggers within tolerance window
     - Marking expired triggers as fired
     """
-    from .executor import reload_all_triggers, refresh_auto_response
+    from .executor import (
+        refresh_auto_response,
+        register_cleanup_job,
+        reload_all_schedules,
+    )
 
     print("⏰ [timer] Starting scheduler recovery...")
     store = get_store()
-    await reload_all_triggers(store)
+    await reload_all_schedules(store)
 
-    # Refresh auto-response: re-register pending or create fresh
     await refresh_auto_response(store)
+    register_cleanup_job(store)
 
     print("⏰ [timer] Scheduler recovery complete")

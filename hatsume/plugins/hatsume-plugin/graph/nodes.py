@@ -544,7 +544,7 @@ async def ai_node(state: MessagesState) -> dict:
         if isinstance(last_human_content, str):
             last_human_content = [{"type": "text", "text": last_human_content}]
         merged_content = (
-            [{"type": "text", "text": "## 历史聊天记录："}]
+            [{"type": "text", "text": "## 背景聊天记录："}]
             + aux_queue
             + [{"type": "text", "text": "## 当前聊天记录："}]
             + last_human_content

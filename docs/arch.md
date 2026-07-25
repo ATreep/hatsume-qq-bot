@@ -1,6 +1,6 @@
 # Hatsume 架构与运行逻辑
 
-本文档以 2026-07-17 的源码为准，是完整功能、运行流程、模块职责与测试索引的当前真源。specs/ 与 docs/superpowers/ 保存功能规格和历史设计决策，不代表所有内容仍与当前实现一致。
+本文档以 2026-07-25 的源码为准，是完整功能、运行流程、模块职责与测试索引的当前真源。specs/ 与 docs/superpowers/ 保存功能规格和历史设计决策，不代表所有内容仍与当前实现一致。
 
 ## 1. 功能总览
 
@@ -53,9 +53,9 @@ flowchart LR
 | 编码 Agent | agent_dispatch(coding_agent, ...) | 使用代码模型与 Shell、Skill、搜索、图像工具处理复杂开发任务 | graph/agents.py、prompts.py |
 | Agent 通知 | 后台 Agent 中间输出或完成 | 注入当前对话；无活跃对话时为目标群启动新图 | graph/tools.py、graph/nodes.py、handlers/dialogue.py |
 | Agent stdin | respond_to_shell_prompt | 把用户回复交回等待输入的后台进程 | graph/tools.py、graph/agents.py |
-| 定时任务创建 | create_timer | 保存未来 30 天内的触发时间并注册 APScheduler 单次作业；每个任务任意连续 24 小时内最多触发 10 次 | graph/tools.py、timer/store.py、timer/executor.py |
-| 定时任务管理 | /timer 或聊天工具 | 按群分组概览任务、查看单任务触发明细、删除或更新任务；更新会替换全部触发器 | handlers/tools.py、graph/tools.py |
-| 定时任务恢复 | Bot 连接完成 | 恢复未来触发器、补偿五分钟内漏触发、过期触发标记完成 | `timer/__init__.py`、timer/executor.py |
+| 定时任务创建 | daily、weekly、monthly、at 四个聊天工具 | 频率任务每周期最多 5 个 `HH:MM:SS` 时间点、正整数间隔且由结束时间限定；指定时刻最多 10 个 | graph/tools.py、timer/schedule.py、timer/store.py |
+| 定时任务管理 | /timer 或聊天工具 | 按群显示完整频率规则或全部指定时刻，支持删除；命令更新兼容为最多 10 个指定时刻 | handlers/tools.py、graph/tools.py |
+| 定时任务迁移、恢复与清理 | 显式迁移命令、Bot 连接完成、每日 03:00 | 手动只读迁移未完成旧任务；启动只恢复 v2 作业、补偿五分钟内漏触发，并清理已完成普通任务 | scripts/migrate_timer_v2.py、`timer/__init__.py`、timer/migration.py、timer/executor.py |
 | 自动回复 | auto_response 记录或 /autoresponse | 固定群主动参与话题，每 1 至 3 小时重新排期 | timer/、prompts.py |
 | Skill 加载 | /skills、skill_loader | 扫描 Markdown 与 YAML frontmatter，按需加载并进行单轮去重 | skills/ |
 | Skill 增删 | skill_create、skill_download、skill_remove | 运行时创建、下载、删除 Skill 并清理缓存 | graph/tools.py、skills/manager.py |
@@ -82,9 +82,9 @@ flowchart LR
 | 命令或事件 | 权限 | 作用 | 实现 |
 |---|---|---|---|
 | /video <提示词> [图片] | 所有人 | 生成视频，首张图片可作为参考 | handlers/tools.py |
-| /timer list | 所有人 | 列出当前群任务和触发状态 | handlers/tools.py |
+| /timer list | 所有人 | 列出当前群任务的完整频率规则或全部指定时刻及状态 | handlers/tools.py |
 | /timer delete <id> | 所有人 | 删除当前群指定任务 | handlers/tools.py |
-| /timer update <id> <内容> @ <ISO时间,...> | 所有人 | 替换任务内容和全部触发时间 | handlers/tools.py |
+| /timer update <id> <内容> @ <ISO时间,...> | 所有人 | 把任务替换为最多 10 个指定时刻 | handlers/tools.py |
 | /skills | 所有人 | 列出有效 Skill 名称与描述 | handlers/tools.py |
 | /membersearch <关键词> | 所有人 | 模糊搜索当前群成员，最多返回五个 | handlers/tools.py |
 | /likerank | 所有人 | 展示累计点赞前十名 | handlers/social.py |
@@ -125,7 +125,7 @@ sequenceDiagram
 2. 入口立即调用 init_memory_system()，初始化记忆数据库、执行必要迁移并加载索引。
 3. 入口注册 matcher，并安装全消息段 @ 检测补丁。
 4. 入口通过 on_bot_connect 注册 init_scheduler()。
-5. OneBot 连接完成后初始化 TimerStore、恢复 APScheduler 作业，并确保 auto_response 有未来任务。
+5. OneBot 连接完成后只初始化 timer-v2 数据库、恢复 APScheduler 作业、确保 auto_response 有未来任务，并注册每日 03:00 清理；旧 Timer 任务迁移由开发完成后的显式脚本负责。
 
 ### 3.2 消息标准化
 
@@ -336,68 +336,86 @@ flowchart LR
 
 ### 5.1 数据模型
 
-默认数据库为 data/hatsume-plugin/timer_db/timer.db，启用 WAL、外键和级联删除。
+活动数据库固定为 data/timer-v2-db/timer.db，启用 WAL、外键和级联删除。
 
 ~~~text
 timer_tasks
-  id, group_id, user_id, prompt, created_at, updated_at, task_type
+  id, group_id, user_id, prompt, task_type, schedule_type
+  start_at, end_at, step, effective_until
+  total_occurrences, processed_occurrences, truncated
+  legacy_task_id, created_at, updated_at
 
-timer_triggers
-  id, task_id, trigger_at, fired, job_id
+timer_schedule_points
+  id, task_id, period_value, clock_time, exact_at
+  first_fire_at, last_fire_at
+  planned_occurrences, processed_occurrences, last_processed_at, job_id
+
+timer_migrations
+  name, completed_at
 ~~~
 
-- 一个任务可以有多个具体触发时间。
-- timer_triggers.task_id 外键使用 ON DELETE CASCADE。
-- task_type 为 normal 或 auto_response；legacy auto_create 记录会在启动时删除。
-- auto_response 通过删除旧任务再创建新任务，保证最多一条当前记录。
+- timer_tasks 保存用户规则和任务总进度；timer_schedule_points 保存每个请求的完整周期点及其进度，不展开每次递归触发。没有未来 occurrence 的描述性 point 使用 planned_occurrences=0 且 first_fire_at/last_fire_at 为 NULL，不注册作业也不计入任务总进度，但仍供 list_timers 完整显示。
+- schedule point 的 task_id 外键使用 ON DELETE CASCADE，job_id 为稳定的 timer_v2_point_<id>。
+- task_type 只允许 normal 或 auto_response；普通群列表和每日清理均排除 auto_response。
+- timer_migrations 保存跨库迁移标记；legacy_task_id 唯一记录旧任务来源。
 
 ### 5.2 创建、更新与删除
 
-create_timer 的流程：
+聊天 Agent 只有四个创建入口：create_daily_timer、create_weekly_timer、create_monthly_timer 和 create_at_timer。
 
-1. 模型把自然语言时间换算为带时区的 ISO 8601 列表。
-2. 工具解析为 Unix 时间戳。
-3. validate_trigger_times() 要求时间晚于当前时刻且不超过未来 30 天。
-4. create_timer 对去重后的时间执行滚动窗口检查，要求任意连续 24 小时内不超过 10 个触发时刻；该频率限制不应用于 /timer update 或 TimerStore CRUD。
-5. validate_prompt() 要求内容非空且不超过 500 字符。
-6. create_task() 去重时间，事务写入任务和触发器，并生成 timer_<trigger_id> 作业 ID。
-7. add_jobs_for_task() 为未来且未触发的记录注册 APScheduler DateTrigger。
+- 频率任务使用含时区、边界包含的 start_at/end_at 与正整数 step。daily 的点为严格 `HH:MM:SS`；weekly 使用 weekday 1..7 与 time；monthly 使用 day 1..31 与 time，不存在目标日期的月份直接跳过。
+- 每个频率任务原始时间点列表为 1..5 个，按起始日、起始周或起始月锚定间隔，并计算到包含边界的 end_at；不限制范围内的总触发次数。effective_until 记录最后一次有效触发，truncated 字段仅为 schema 和旧数据兼容保留。
+- 指定时刻任务接受 1..10 个互不重复、含时区且在未来的 ISO 8601 时间戳。
+- 四个工具的 docstring、LangChain 严格整数 schema 与 timer/schedule.py 的执行校验同时声明并落实上述限制；JSON boolean 不会被转换成 step、weekday 或 day，Prompt 仍要求非空且不超过 500 字符。
+- daily 与 weekly 每个仍有多次 occurrence 的点注册 IntervalTrigger，monthly 注册 CalendarIntervalTrigger；频率 point 只剩最后一次时与 at 一样注册 DateTrigger，避免为无须执行的下一周期计算超大 step。所有作业使用 UTC+08:00、replace_existing=True 和 coalesce=False，并把 next_run_time 显式固定为数据库中的下一次 occurrence，防止注册跨过首个时刻时静默跳到下一周期。
 
-/timer update 会先取消旧作业，再替换数据库中的全部触发器并重新注册；delete 会先取消作业，再删除任务，触发器由外键级联删除。数据库与 APScheduler 的修改顺序必须一起维护。
+/timer update 保留原有 `prompt @ timestamps` 语法，但统一调用 exact-time builder，验证最多 10 个时刻后才取消旧作业、事务替换 schedule points 并重新注册。delete 先取消任务的全部 point 作业，再删除任务并由外键级联删除 points。
 
-list_timers 将当前群任务按“尚未完成”和“已完成”分组，只展示任务 ID、提醒用户、完整任务提示词和下一次未完成触发时间；所有触发器均 fired 的任务归入已完成组。get_timer 按任务 ID 展示该任务的全部触发时间及每个触发点的完成状态，并拒绝访问其他群的任务。ai_node 每轮把与 list_timers 相同的概览文本直接加入 system prompt；由 Timer 或 Agent 启动新对话时会先同步目标群号，避免读取其他群的任务。
+list_timers 是唯一聊天工具读取入口，按“尚未完成”和“已完成”分组。频率任务展示模式、step、完整起止范围、全部周期点、计划/已处理次数和下一次触发；指定时刻任务展示每个时间戳及其状态。/timer list 和 ai_node system prompt 复用同一 get_timer_overview() 文本。`/timer list` 对所有成员显示当前群；`/timer list <group_id>` 只允许管理员跨群查看，正整数目标群通过显式参数传入 overview，不修改进程级当前群上下文。
 
-### 5.3 启动恢复
+### 5.3 迁移、启动恢复与清理
+
+旧任务迁移只通过显式命令执行，Bot 启动不导入迁移模块、不检查旧库路径，也不自动重试迁移：
+
+~~~bash
+.venv/bin/python scripts/migrate_timer_v2.py
+~~~
+
+1. 脚本默认从 data/hatsume-plugin/timer_db/timer.db 迁移到 data/timer-v2-db/timer.db；`--source` 与 `--destination` 可显式覆盖。源库不存在时以非零状态退出，且不创建目标库。
+2. 执行前必须停止 Bot。脚本把旧 DB 及既有 WAL 复制到私有临时目录，仅以 SQLite mode=ro 打开快照；成功时 stdout 只输出一行含 migrated_tasks、skipped_tasks、already_applied 与 expanded_frequency_tasks 的 JSON，所有路径都会关闭目标 TimerStore。
+3. 只迁移拥有未完成触发记录的 normal 旧任务；完成任务、auto_create 和 auto_response 均跳过。Prompt 提示词与时间 cadence 共同判断 daily/weekly/monthly，无法稳定分类时回退到最早 10 个指定时刻；频率点最多保留 5 个，但频率总次数不裁剪。脚本还会一次性扩展目标库中此前被截断的频率任务，并保留其 task/point/job ID 与处理进度。
+4. 迁移在单个目标事务内写入，旧 DB、WAL、SHM 均保持逐字节不变；migration marker 与唯一 legacy_task_id 保证幂等。失败会回滚目标事务，排查后必须再次手动运行。
 
 Bot 连接后 init_scheduler()：
 
-1. 读取全部 fired=0 触发器。
-2. 为未来触发器重新注册作业。
-3. 对错过但仍在五分钟容忍窗口内的触发器异步补偿执行。
-4. 更早的触发器标记 fired，避免无限重放。
-5. refresh_auto_response() 保留并重新注册已有未来任务；不存在时创建一个 1 至 3 小时后的新任务。
+1. get_store() 只初始化 v2 schema。
+2. reload_all_schedules() 按 point 已处理下标推导遗漏时间。五分钟容忍窗口以前的 occurrence 只推进进度；窗口内只补偿最近一次；剩余未来 occurrence 重新注册原生作业。
+3. refresh_auto_response() 保留并注册一个未来内部任务，或创建 1 至 3 小时后的新任务。
+4. 注册 UTC+08:00 每日 03:00:00 的稳定 cron 作业。清理 coroutine 留在事件循环线程，先防御性取消已完成 normal 任务的 point 作业，再删除任务；活动任务和 auto_response 不受影响。
 
-TimerStore 初始化会删除旧版本遗留的 auto_create 记录，避免它们按普通 group_id=0 Timer 执行。
+迁移不让 SQLite 直接打开旧数据库，不在源目录创建表、checkpoint、WAL 或 SHM，也不把旧 auto_create 注入或重新排期。
 
 ### 5.4 触发与图注入
 
 ~~~mermaid
 flowchart LR
-    Job[APScheduler 作业] --> Execute[_execute_timer]
+    Job[APScheduler 原生 point 作业] --> Reconcile[核对 submitted/missed scheduled_at]
+    Reconcile --> Execute[_execute_point]
     Execute --> Kind{task_type}
     Kind -- normal --> Inject[inject timer prompt]
     Kind -- auto_response --> Response[回复 Prompt + 1 至 3 小时重排]
     Inject --> Graph[当前或新 LangGraph 对话]
     Response --> Graph
-    Execute --> Fired[mark fired]
+    Execute --> Progress[更新 point 与 task 进度]
 ~~~
 
 - normal 任务通过 inject_timer() 注入定时任务 Prompt。
 - 有活跃对话时进入 human_queue；无活跃对话时通过 dialogue 注册的回调为目标群启动新图。
 - user_id 非零时，注入 Prompt 会告诉模型可用 `[CQ:at,qq=<user_id>]` 提醒用户，实际 at 由发送层转换。
-- normal 路径在图注入尝试结束后标记 fired；即使注入抛出异常，当前实现也仍会标记 fired。
-- auto_response 在执行提示前先标记 fired，然后立即排期下一条任务，不等待 LLM 完成。
-- legacy auto_create 触发器若残留并触发，只会删除对应任务，不注入图。
+- normal 路径在图注入尝试结束后原子推进 point 与 task 计数；即使注入抛出异常也视为已处理。
+- APScheduler listener 按 point 保存 EVENT_JOB_SUBMITTED 的实际 scheduled_run_times；callback 先把超出五分钟容忍窗口的旧时刻推进为过期，再只注入当前有效时刻。全批次均过期时由 EVENT_JOB_MISSED 推进进度，避免 callback 用数据库下标重建时间而发生永久偏移。
+- progress 以 scheduled_at 和 last_processed_at 幂等更新，重复恢复不会再次计数或注入同一 occurrence。
+- auto_response 在执行提示前先推进其 exact point，并保证即使注入失败也排期下一条任务，不等待 LLM 完成。
 
 ### 5.5 自动任务
 
@@ -423,9 +441,11 @@ flowchart LR
 | send_video | 发送 HTTP URL、沙盒绝对路径或沙盒文件；每轮最多一个 |
 | get_avatar | 获取 QQ 头像 URL |
 | random_acg_photo | 从 macOS Photos 导出 ACG 图片到沙盒 |
-| create_timer | 创建持久化定时任务 |
-| list_timers | 按完成状态分组概览当前群任务及下一次触发时间 |
-| get_timer | 查看当前群单个任务的全部触发时间及完成状态 |
+| create_daily_timer | 创建含起止边界、1..5 个 `HH:MM:SS` 点和天间隔的任务 |
+| create_weekly_timer | 创建含 weekday/time 周期点和周间隔的任务 |
+| create_monthly_timer | 创建含 day/time 周期点和月间隔的任务 |
+| create_at_timer | 创建含 1..10 个指定时间戳的任务 |
+| list_timers | 按完成状态显示完整频率规则或全部指定时刻 |
 | delete_timer | 删除当前群任务 |
 | skill_loader | 加载 Skill 完整指令 |
 | skill_remove | 删除 Skill |
@@ -600,14 +620,17 @@ graph/tools.py、graph/agents.py、graph/nodes.py 与 handlers/dialogue.py 之�
 | hatsume/plugins/hatsume-plugin/memory/tokenizer.py | 使用 Jieba 词性标注过滤并保留有意义的中文词，供临时 BM25 查询使用。 |
 | `hatsume/plugins/hatsume-plugin/skills/__init__.py` | 暴露 SkillManager 并提供进程级单例。 |
 | hatsume/plugins/hatsume-plugin/skills/manager.py | 扫描 Markdown Skill、解析 frontmatter、缓存内容、单轮加载去重、保存覆盖、删除和目录创建。 |
-| `hatsume/plugins/hatsume-plugin/timer/__init__.py` | 提供 TimerStore 单例；Bot 连接后恢复触发器并确保 auto_response 存在。 |
-| hatsume/plugins/hatsume-plugin/timer/store.py | 管理 timer_tasks 与 timer_triggers 表、普通任务 CRUD、自动任务单例记录、触发状态和输入验证。 |
-| hatsume/plugins/hatsume-plugin/timer/executor.py | 注册、取消和恢复 APScheduler 作业；补偿漏触发；执行普通 Timer 和自动回复并注入图；清理 legacy auto_create 触发。 |
+| `hatsume/plugins/hatsume-plugin/timer/__init__.py` | 提供 TimerStore 单例；只初始化 v2，并按 recovery -> auto_response -> cleanup 顺序启动，不访问旧库或迁移模块。 |
+| hatsume/plugins/hatsume-plugin/timer/schedule.py | 严格解析四类 schedule、生成和裁剪 occurrence、按下标推导触发时间，并用 Prompt 与 cadence 分类旧任务。 |
+| hatsume/plugins/hatsume-plugin/timer/migration.py | 复制旧 Timer DB/WAL 到私有临时快照并只读打开，在一个 v2 事务中迁移未完成 normal 任务并记录幂等 marker。 |
+| hatsume/plugins/hatsume-plugin/timer/store.py | 管理 timer_tasks、timer_schedule_points 与 timer_migrations，任务 CRUD、原子进度、exact replacement、完成清理和 auto_response。 |
+| hatsume/plugins/hatsume-plugin/timer/executor.py | 构建和管理原生 APScheduler triggers，执行/恢复 point、注入图、维护 auto_response，并注册每日 03:00 清理。 |
 | `hatsume/plugins/hatsume-plugin/utils/__init__.py` | QQ 昵称查询、时间、头像 URL、统一消息 JSON、forward JSON 和带五分钟缓存的成员模糊搜索。 |
 | hatsume/plugins/hatsume-plugin/utils/md_to_image.py | Markdown、代码、公式和表格到 HTML 与图片的转换，包含主题、角色印章、链接提取和纯文本回退。 |
 | hatsume/plugins/hatsume-plugin/utils/security.py | 无框架依赖的敏感凭证正则识别与脱敏。 |
 
 virtual/ 下是 Shell 和 Docker 构建、启动、停止、删除脚本，不是 Python 模块。
+`scripts/migrate_timer_v2.py` 是一次性显式迁移入口，以隔离模块名加载 Timer v2 组件，不执行 NoneBot 插件入口。
 
 ## 9. 测试模块索引
 
@@ -619,7 +642,7 @@ virtual/ 下是 Shell 和 Docker 构建、启动、停止、删除脚本，不�
 | tests/test_agent_monitor.py | Agent 状态写入、运行判断、字段保留与开始时间。 |
 | tests/test_agents_command.py | /agents 在无任务、运行中、完成与混合状态下的输出。 |
 | tests/test_ai_json_output.py | 角色 Prompt 不再要求旧 JSON 输出格式，以及 AI JSON 与非 JSON 兼容行为。 |
-| tests/test_auto_response.py | 自动回复随机时间范围、目标群配置与 legacy auto_create 清理。 |
+| tests/test_auto_response.py | v2 自动回复随机时间范围、目标群禁用、启动单例、执行前进度与后继排期。 |
 | tests/test_background_shell_agent.py | 后台 Shell 注册、任务解析和 DONE/CONTINUE/NOTIFY/TIMEOUT/KILL 决策。 |
 | tests/test_background_shell_infra.py | 后台日志增量读取与进程终止清理。 |
 | tests/test_background_shell_prompts.py | Shell 决策 Prompt 和 stdin 解析 Prompt 约束。 |
@@ -646,8 +669,13 @@ virtual/ 下是 Shell 和 Docker 构建、启动、停止、删除脚本，不�
 | tests/test_skill_manager.py | Skill 扫描、加载去重、缓存、删除、目录创建与 Prompt 列表。 |
 | tests/test_thought_signature.py | thought_signature 修补、捕获、恢复、缺失兼容，以及高级模型名向标准工厂的动态转发。 |
 | tests/test_timer_injection.py | Timer 标记检测、活跃或非活跃会话注入与完整投递上下文。 |
-| tests/test_timer_store.py | Timer 表结构、CRUD、触发验证、级联删除与 legacy auto_create 清理。 |
-| tests/test_tools.py | 图片、视频、发送限流、头像、记忆格式、/model、角色 Prompt 与 stdin 工具。 |
+| tests/test_timer_schedule.py | 四种规则解析、严格时间格式、锚定间隔、超大正整数 step、无效月份跳过、5/10 限制、无频率总次数上限和旧任务分类。 |
+| tests/test_timer_store.py | v2 schema、任务/point CRUD、幂等进度、exact replacement、级联删除和完成清理。 |
+| tests/test_timer_migration.py | 旧 SQLite 只读、WAL/SHM 逐字节保留、未完成任务筛选、分类迁移、幂等与回滚。 |
+| tests/test_timer_migration_cli.py | 显式迁移命令默认/覆盖路径、频率任务扩展、JSON 输出、源库缺失、失败脱敏、连接关闭、幂等与源 sidecar 保留。 |
+| tests/test_timer_executor.py | 原生 trigger、最终 occurrence 降级、注册/取消、实际 scheduled_at 漏触发核对、执行后进度、启动恢复和 03:00 清理。 |
+| tests/test_timer_startup.py | v2-only 初始化、启动迁移隔离及 recovery/auto_response/cleanup 启动顺序。 |
+| tests/test_tools.py | 图片、视频、发送限流、头像、记忆格式、四类 Timer 工具与详细列表、/timer、/model、角色 Prompt 和 stdin。 |
 
 常用验证：
 
@@ -680,7 +708,8 @@ data/ 是运行时目录，常见内容包括：
 
 - data/hatsume-plugin/memory.db*：长期记忆数据库及 WAL/SHM。
 - data/hatsume-plugin/memory_vectors.db/：Milvus Lite 记忆向量数据库目录。
-- data/hatsume-plugin/timer_db/timer.db*：定时任务数据库及 WAL/SHM。
+- data/timer-v2-db/timer.db*：当前定时任务数据库及 WAL/SHM。
+- data/hatsume-plugin/timer_db/timer.db*：只读迁移来源的旧定时任务数据库及既有 sidecar。
 - data/hatsume-plugin/likes.json：累计点赞数据。
 - data/hatsume-plugin/skills/：运行时安装或创建的 Skill。
 - data/hatsume-plugin/faces/：AI 表情和 Markdown 印章图片。

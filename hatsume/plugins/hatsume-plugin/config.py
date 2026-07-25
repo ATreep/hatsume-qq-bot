@@ -165,9 +165,9 @@ SHELL_TIMEOUT: int = 300
 # ---------------------------------------------------------------------------
 # Timer module
 # ---------------------------------------------------------------------------
-TIMER_MAX_FUTURE_DAYS: int = 30
-TIMER_MAX_TRIGGERS_PER_24_HOURS: int = 10
 TIMER_TOLERANCE_MINUTES: int = 5
+TIMER_MAX_FREQUENCY_POINTS: int = 5
+TIMER_MAX_EXACT_POINTS: int = 10
 
 # ---------------------------------------------------------------------------
 # Skill module

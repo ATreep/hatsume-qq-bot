@@ -311,9 +311,11 @@ def _load_nodes_module():
     tools_mod.generate_video = None
     tools_mod.view_image = None
     tools_mod.get_avatar = None
-    tools_mod.create_timer = None
+    tools_mod.create_daily_timer = None
+    tools_mod.create_weekly_timer = None
+    tools_mod.create_monthly_timer = None
+    tools_mod.create_at_timer = None
     tools_mod.list_timers = None
-    tools_mod.get_timer = None
     tools_mod.get_timer_overview = AsyncMock(return_value="timer overview")
     tools_mod.delete_timer = None
     tools_mod.skill_loader = None
@@ -340,9 +342,11 @@ def _load_nodes_module():
         tools_mod.send_video,
         tools_mod.get_avatar,
         tools_mod.random_acg_photo,
-        tools_mod.create_timer,
+        tools_mod.create_daily_timer,
+        tools_mod.create_weekly_timer,
+        tools_mod.create_monthly_timer,
+        tools_mod.create_at_timer,
         tools_mod.list_timers,
-        tools_mod.get_timer,
         tools_mod.delete_timer,
         tools_mod.skill_loader,
         tools_mod.skill_remove,
@@ -1025,7 +1029,7 @@ def test_ai_node_merges_auxiliary_queue_for_chat_agent_only():
 
         sent_last_msg = captured_invocations[0]["messages"][-1]
         assert sent_last_msg.content == [
-            {"type": "text", "text": "## 历史聊天记录："},
+            {"type": "text", "text": "## 背景聊天记录："},
             {"type": "text", "text": "aux part"},
             {"type": "text", "text": "## 当前聊天记录："},
             {"type": "text", "text": "current turn"},

@@ -1,340 +1,387 @@
-"""Timer executor: APScheduler job management + graph injection for timer delivery."""
+"""APScheduler job management and graph injection for timer-v2."""
 
 from __future__ import annotations
 
-import asyncio
 import random
 import time
 import traceback
-from datetime import datetime, timezone, timedelta
+from collections import deque
+from datetime import datetime, timedelta
 from typing import Any
 
+from apscheduler.events import EVENT_JOB_MISSED, EVENT_JOB_SUBMITTED
+from apscheduler.triggers.calendarinterval import CalendarIntervalTrigger
+from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.date import DateTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 from nonebot import require
 
-from ..config import (
-    AUTO_RESPONSE_GROUP_ID,
-    TIMER_TOLERANCE_MINUTES,
-)
+from ..config import AUTO_RESPONSE_GROUP_ID, TIMER_TOLERANCE_MINUTES
+from .schedule import SHANGHAI, occurrence_at_index
 from .store import TimerStore
 
 scheduler = require("nonebot_plugin_apscheduler").scheduler
 
-
-# ---------------------------------------------------------------------------
-# Job management
-# ---------------------------------------------------------------------------
-def _make_job_id(trigger_id: int) -> str:
-    return f"timer_{trigger_id}"
+_POINT_JOB_PREFIX = "timer_v2_point_"
+_pending_run_times: dict[int, deque[float]] = {}
+_point_stores: dict[int, TimerStore] = {}
+_listener_scheduler: Any = None
 
 
-def register_job(trigger: dict, store: TimerStore) -> str:
-    """Register an APScheduler date job for a trigger."""
-    from apscheduler.triggers.date import DateTrigger
-    from datetime import datetime, timezone, timedelta
+def _point_id_from_job_id(job_id: str) -> int | None:
+    if not job_id.startswith(_POINT_JOB_PREFIX):
+        return None
+    try:
+        return int(job_id.removeprefix(_POINT_JOB_PREFIX))
+    except ValueError:
+        return None
 
-    trigger_at = trigger["trigger_at"]
-    trigger_id = trigger["id"]
-    job_id = _make_job_id(trigger_id)
-    run_dt = datetime.fromtimestamp(trigger_at, tz=timezone(timedelta(hours=8)))
-    ts_str = run_dt.strftime("%Y-%m-%d %H:%M:%S")
 
-    scheduler.add_job(
-        _execute_wrapper,
-        DateTrigger(run_date=run_dt),
-        id=job_id,
-        args=[trigger, store],
-        misfire_grace_time=300,
-        replace_existing=True,
+def _clear_point_runtime(point_id: int) -> None:
+    _pending_run_times.pop(point_id, None)
+    _point_stores.pop(point_id, None)
+
+
+def _clear_point_runtime_if_complete(point_id: int, store: TimerStore) -> None:
+    point = store.get_point(point_id)
+    if point is None or point["processed_occurrences"] >= point["planned_occurrences"]:
+        _clear_point_runtime(point_id)
+
+
+def _handle_scheduler_event(event: Any) -> None:
+    point_id = _point_id_from_job_id(str(event.job_id))
+    if point_id is None:
+        return
+    if event.code == EVENT_JOB_SUBMITTED:
+        pending = _pending_run_times.setdefault(point_id, deque())
+        pending.extend(run_time.timestamp() for run_time in event.scheduled_run_times)
+        return
+    if event.code != EVENT_JOB_MISSED:
+        return
+
+    scheduled_at = event.scheduled_run_time.timestamp()
+    pending = _pending_run_times.get(point_id)
+    if pending is not None:
+        try:
+            pending.remove(scheduled_at)
+        except ValueError:
+            pass
+    store = _point_stores.get(point_id)
+    if store is not None:
+        store.mark_occurrence_processed(point_id, scheduled_at)
+        _clear_point_runtime_if_complete(point_id, store)
+
+
+def _ensure_scheduler_listener() -> None:
+    global _listener_scheduler
+    if _listener_scheduler is scheduler:
+        return
+    scheduler.add_listener(
+        _handle_scheduler_event,
+        EVENT_JOB_SUBMITTED | EVENT_JOB_MISSED,
     )
-    print(f"⏰ [timer] Job registered: {job_id} at {ts_str}")
+    _listener_scheduler = scheduler
+
+
+def build_trigger(
+    task: dict[str, Any],
+    point: dict[str, Any],
+    *,
+    start_at: float | None = None,
+) -> DateTrigger | IntervalTrigger | CalendarIntervalTrigger:
+    """Build the native trigger for the point's next retained occurrence."""
+    if start_at is None:
+        start_at = occurrence_at_index(
+            task, point, int(point["processed_occurrences"])
+        )
+    start_date = datetime.fromtimestamp(start_at, tz=SHANGHAI)
+    end_date = datetime.fromtimestamp(point["last_fire_at"], tz=SHANGHAI)
+    mode = task["schedule_type"]
+    remaining = int(point["planned_occurrences"]) - int(
+        point["processed_occurrences"]
+    )
+
+    if mode == "at" or remaining == 1:
+        return DateTrigger(run_date=start_date, timezone=SHANGHAI)
+    if mode == "daily":
+        return IntervalTrigger(
+            days=int(task["step"]),
+            start_date=start_date,
+            end_date=end_date,
+            timezone=SHANGHAI,
+        )
+    if mode == "weekly":
+        return IntervalTrigger(
+            weeks=int(task["step"]),
+            start_date=start_date,
+            end_date=end_date,
+            timezone=SHANGHAI,
+        )
+    if mode == "monthly":
+        return CalendarIntervalTrigger(
+            months=int(task["step"]),
+            hour=start_date.hour,
+            minute=start_date.minute,
+            second=start_date.second,
+            start_date=start_date.date(),
+            end_date=end_date.date(),
+            timezone=SHANGHAI,
+        )
+    raise ValueError(f"unsupported schedule type: {mode}")
+
+
+def register_point(point: dict[str, Any], store: TimerStore) -> str:
+    """Register one native APScheduler job for an incomplete schedule point."""
+    task = store.get_task(int(point["task_id"]))
+    if task is None:
+        raise KeyError(point["task_id"])
+    point_id = int(point["id"])
+    _clear_point_runtime(point_id)
+    _point_stores[point_id] = store
+    try:
+        _ensure_scheduler_listener()
+        next_at = occurrence_at_index(
+            task, point, int(point["processed_occurrences"])
+        )
+        trigger = build_trigger(task, point, start_at=next_at)
+        job_id = str(point["job_id"])
+        scheduler.add_job(
+            _execute_wrapper,
+            trigger,
+            id=job_id,
+            args=[int(point["id"]), store],
+            next_run_time=datetime.fromtimestamp(next_at, tz=SHANGHAI),
+            misfire_grace_time=TIMER_TOLERANCE_MINUTES * 60,
+            coalesce=False,
+            replace_existing=True,
+        )
+    except BaseException:
+        _clear_point_runtime(point_id)
+        raise
     return job_id
 
 
-def cancel_job(trigger_id: int) -> None:
-    """Cancel an APScheduler job by trigger ID."""
-    job_id = _make_job_id(trigger_id)
+def cancel_point_job(point_id: int) -> None:
+    """Cancel one point job, tolerating an already-absent scheduler entry."""
+    _clear_point_runtime(point_id)
     try:
-        scheduler.remove_job(job_id)
-        print(f"⏰ [timer] Job cancelled: {job_id}")
+        scheduler.remove_job(f"{_POINT_JOB_PREFIX}{point_id}")
     except Exception:
         pass
 
 
 def cancel_task_jobs(task_id: int, store: TimerStore) -> None:
-    """Cancel all APScheduler jobs for a task's pending triggers."""
-    triggers = store.get_triggers_for_task(task_id)
-    count = 0
-    for t in triggers:
-        if not t["fired"]:
-            cancel_job(t["id"])
-            count += 1
-    print(f"⏰ [timer] Cancelled {count} jobs for task {task_id}")
+    """Cancel every scheduler job owned by a task."""
+    for point in store.get_points_for_task(task_id):
+        cancel_point_job(int(point["id"]))
 
 
 def add_jobs_for_task(task_id: int, store: TimerStore) -> None:
-    """Register APScheduler jobs for all pending triggers of a task."""
-    triggers = store.get_triggers_for_task(task_id)
-    now = time.time()
-    count = 0
-    for t in triggers:
-        if not t["fired"] and t["trigger_at"] > now:
-            register_job(t, store)
-            count += 1
-    print(f"⏰ [timer] Added {count} jobs for task {task_id}")
+    """Register native jobs for all incomplete points owned by a task."""
+    for point in store.get_points_for_task(task_id):
+        if point["processed_occurrences"] < point["planned_occurrences"]:
+            register_point(point, store)
 
 
 def _random_response_trigger() -> float:
-    """Generate a random trigger time in [now+1h, now+3h].
-
-    No time-window restriction — auto_response runs 24h.
-    Returns a Unix timestamp (float).
-    """
-    tz = timezone(timedelta(hours=8))
-    now = datetime.now(tz)
-    delta_seconds = random.uniform(1 * 3600, 3 * 3600)
-    t = now + timedelta(seconds=delta_seconds)
-    return t.timestamp()
+    """Return a random timestamp between one and three hours from now."""
+    return (datetime.now(SHANGHAI) + timedelta(hours=random.uniform(1, 3))).timestamp()
 
 
-# ---------------------------------------------------------------------------
-# Auto Response — execution and lifecycle
-# ---------------------------------------------------------------------------
-
-async def _execute_auto_response(task: dict, store: TimerStore) -> None:
-    """Execute an auto_response timer: inject into graph, then reschedule.
-
-    Injects the prompt with user_id=0 (no @-mention) and reschedules
-    immediately (fire-and-forget).
-    """
+async def _execute_auto_response(task: dict[str, Any], store: TimerStore) -> None:
+    """Inject an internal auto-response and immediately schedule its successor."""
     if AUTO_RESPONSE_GROUP_ID <= 0:
-        print(
-            "❌ [auto_response] Skipped: "
-            "AUTO_RESPONSE_GROUP_ID is not configured"
-        )
+        print("[auto_response] Skipped: AUTO_RESPONSE_GROUP_ID is not configured")
         return
 
-    from ..prompts import get_auto_response_prompt
     from ..graph.nodes import inject_timer
 
-    prompt = task.get("prompt") or get_auto_response_prompt()
-
-    print("💬 [auto_response] Executing...")
-    inject_timer(
-        user_id=0,
-        group_id=AUTO_RESPONSE_GROUP_ID,
-        timer_prompt=prompt,
-        start_conversation_cb=_timer_start_conv_cb,
-    )
-
-    # Reschedule immediately — fire-and-forget pattern
-    reschedule_auto_response(store)
+    try:
+        inject_timer(
+            user_id=0,
+            group_id=AUTO_RESPONSE_GROUP_ID,
+            timer_prompt=task["prompt"],
+            start_conversation_cb=_timer_start_conv_cb,
+        )
+    finally:
+        reschedule_auto_response(store)
 
 
 def reschedule_auto_response(store: TimerStore) -> None:
-    """Delete the old auto_response task and create a new one with a random
-    trigger time in [now+1h, now+3h].
-
-    Registers the new APScheduler job for the random trigger time.
-    """
+    """Replace the internal task with one random future exact-time point."""
     if AUTO_RESPONSE_GROUP_ID <= 0:
-        print(
-            "❌ [auto_response] Reschedule skipped: "
-            "AUTO_RESPONSE_GROUP_ID is not configured"
-        )
         return
-
-    next_trigger = _random_response_trigger()
-    task_id = store.upsert_auto_response(next_trigger)
-
-    triggers = store.get_triggers_for_task(task_id)
-    for t in triggers:
-        if not t["fired"]:
-            register_job(t, store)
-
-    run_dt = datetime.fromtimestamp(next_trigger, tz=timezone(timedelta(hours=8)))
-    print(
-        f"💬 [auto_response] Rescheduled: task={task_id} "
-        f"next={run_dt.strftime('%Y-%m-%d %H:%M:%S')}"
-    )
+    task_id = store.upsert_auto_response(_random_response_trigger())
+    add_jobs_for_task(task_id, store)
 
 
 async def refresh_auto_response(store: TimerStore) -> None:
-    """Called on startup: ensure one auto_response task exists with a registered job.
-
-    If a pending auto_response task already exists (not yet triggered), re-register
-    its APScheduler job without changing the trigger time.
-    Otherwise, create a fresh one via reschedule_auto_response.
-    """
+    """Ensure startup owns exactly one future auto-response point."""
+    point = store.get_auto_response_point()
     if AUTO_RESPONSE_GROUP_ID <= 0:
-        pending = store.list_auto_response_triggers()
-        for trigger in pending:
-            cancel_job(trigger["id"])
-        assert store._conn is not None, "TimerStore not initialized"
-        store._conn.execute(
-            "DELETE FROM timer_tasks WHERE task_type = 'auto_response'"
-        )
-        store._conn.commit()
-        print(
-            "❌ [auto_response] Disabled: "
-            "AUTO_RESPONSE_GROUP_ID is not configured"
-        )
+        if point is not None:
+            cancel_point_job(int(point["id"]))
+        store.delete_auto_response_tasks()
         return
 
-    import time as time_mod
-
-    now = time_mod.time()
-
-    # Check for existing pending auto_response trigger
-    pending = store.list_auto_response_triggers()
-    future_pending = [t for t in pending if t["trigger_at"] > now]
-
-    if future_pending:
-        # Re-register jobs for existing pending triggers (lost on restart)
-        for t in future_pending:
-            register_job(t, store)
-        run_dt = datetime.fromtimestamp(
-            future_pending[0]["trigger_at"], tz=timezone(timedelta(hours=8))
-        )
-        print(
-            f"💬 [auto_response] Startup: existing task retained, "
-            f"next={run_dt.strftime('%Y-%m-%d %H:%M:%S')}"
-        )
-    else:
-        # No pending trigger — create fresh one
-        assert store._conn is not None, "TimerStore not initialized"
-        store._conn.execute(
-            "DELETE FROM timer_tasks WHERE task_type = 'auto_response'"
-        )
-        store._conn.commit()
-        reschedule_auto_response(store)
-        print("💬 [auto_response] Startup refresh complete (new task created)")
-
-
-
-
-# ---------------------------------------------------------------------------
-# Startup recovery
-# ---------------------------------------------------------------------------
-async def reload_all_triggers(store: TimerStore) -> None:
-    """Load all pending triggers from DB. Register future ones, compensate
-    missed ones within tolerance, expire old ones."""
     now = time.time()
+    if point is not None and float(point["exact_at"]) > now:
+        register_point(point, store)
+        return
+
+    if point is not None:
+        cancel_point_job(int(point["id"]))
+    store.delete_auto_response_tasks()
+    reschedule_auto_response(store)
+
+
+async def reload_all_schedules(
+    store: TimerStore, *, now: float | None = None
+) -> None:
+    """Recover incomplete points, compensating only the latest recent fire."""
+    current = time.time() if now is None else now
     tolerance = TIMER_TOLERANCE_MINUTES * 60
-    assert store._conn is not None, "TimerStore not initialized"
-    rows = store._conn.execute(
-        "SELECT * FROM timer_triggers WHERE fired = 0 ORDER BY trigger_at"
-    ).fetchall()
 
-    print(f"⏰ [timer] Recovery: found {len(rows)} unfired triggers in DB")
+    for stored_point in store.list_incomplete_points():
+        point_id = int(stored_point["id"])
+        task = store.get_task(int(stored_point["task_id"]))
+        if task is None:
+            continue
 
-    registered = 0
-    compensated = 0
-    expired = 0
-    for row in rows:
-        trigger = dict(row)
-        trigger_id = trigger["id"]
-        trigger_at = trigger["trigger_at"]
+        due: list[float] = []
+        index = int(stored_point["processed_occurrences"])
+        planned = int(stored_point["planned_occurrences"])
+        while index < planned:
+            scheduled_at = occurrence_at_index(task, stored_point, index)
+            if scheduled_at > current:
+                break
+            due.append(scheduled_at)
+            index += 1
 
-        if trigger_at > now:
-            job_id = register_job(trigger, store)
-            store._conn.execute(
-                "UPDATE timer_triggers SET job_id = ? WHERE id = ?",
-                (job_id, trigger_id),
+        compensate_at: float | None = None
+        if due and current - due[-1] <= tolerance:
+            compensate_at = due.pop()
+        for scheduled_at in due:
+            store.mark_occurrence_processed(point_id, scheduled_at)
+        if compensate_at is not None:
+            await _execute_point(point_id, store, scheduled_at=compensate_at)
+
+        point = store.get_point(point_id)
+        if (
+            point is not None
+            and point["processed_occurrences"] < point["planned_occurrences"]
+        ):
+            next_at = occurrence_at_index(
+                task, point, int(point["processed_occurrences"])
             )
-            registered += 1
-        elif now - trigger_at <= tolerance:
-            asyncio.ensure_future(_execute_timer(trigger, store))
-            compensated += 1
-        else:
-            store.mark_trigger_fired(trigger_id)
-            expired += 1
-    store._conn.commit()
-    print(
-        f"⏰ [timer] Recovery done: {registered} registered, "
-        f"{compensated} compensated, {expired} expired"
+            if next_at > current:
+                register_point(point, store)
+
+
+async def cleanup_finished_tasks(store: TimerStore) -> None:
+    """Cancel and delete completed normal tasks."""
+    for task_id in store.list_finished_task_ids():
+        cancel_task_jobs(task_id, store)
+    store.delete_finished_tasks()
+
+
+def register_cleanup_job(store: TimerStore) -> None:
+    """Register the daily 03:00:00 China Standard Time cleanup job."""
+    scheduler.add_job(
+        cleanup_finished_tasks,
+        CronTrigger(hour=3, minute=0, second=0, timezone=SHANGHAI),
+        id="timer_v2_cleanup",
+        args=[store],
+        replace_existing=True,
     )
 
 
-# ---------------------------------------------------------------------------
-# Timer execution
-# ---------------------------------------------------------------------------
-async def _execute_wrapper(trigger: dict, store: TimerStore) -> None:
-    """APScheduler job entry point."""
-    print(f"⏰ [timer] Job triggered: timer_{trigger['id']}")
-    await _execute_timer(trigger, store)
-
-
-async def _execute_timer(trigger: dict, store: TimerStore) -> None:
-    """Execute a timer trigger: lookup user, build context, run chat_agent,
-    deliver result."""
-    trigger_id = trigger["id"]
-    task_id = trigger["task_id"]
-
-    print(f"⏰ [timer] Executing trigger {trigger_id} (task {task_id})")
-
-    task = store.get_task(task_id)
+async def _execute_wrapper(point_id: int, store: TimerStore) -> None:
+    """APScheduler entry point that reconciles submitted run timestamps."""
+    point = store.get_point(point_id)
+    if point is None or point["processed_occurrences"] >= point["planned_occurrences"]:
+        _clear_point_runtime(point_id)
+        return
+    task = store.get_task(int(point["task_id"]))
     if task is None:
-        print(f"⏰ [timer] Task {task_id} not found, skipping")
+        _clear_point_runtime(point_id)
         return
 
-    if task.get("task_type") == "auto_create":
-        store.delete_task(task_id)
-        print(f"⏰ [timer] Removed legacy auto_create task {task_id}")
+    pending = _pending_run_times.get(point_id)
+    if pending is not None:
+        cutoff = time.time() - TIMER_TOLERANCE_MINUTES * 60
+        while pending and pending[0] < cutoff:
+            store.mark_occurrence_processed(point_id, pending.popleft())
+        if not pending:
+            _clear_point_runtime_if_complete(point_id, store)
+            return
+        scheduled_at = pending.popleft()
+    else:
+        scheduled_at = occurrence_at_index(
+            task, point, int(point["processed_occurrences"])
+        )
+
+    try:
+        await _execute_point(point_id, store, scheduled_at=scheduled_at)
+    finally:
+        _clear_point_runtime_if_complete(point_id, store)
+
+
+async def _execute_point(
+    point_id: int,
+    store: TimerStore,
+    *,
+    scheduled_at: float | None = None,
+) -> None:
+    """Execute one retained occurrence and advance durable progress."""
+    point = store.get_point(point_id)
+    if point is None or point["processed_occurrences"] >= point["planned_occurrences"]:
+        return
+    task = store.get_task(int(point["task_id"]))
+    if task is None:
+        return
+    if scheduled_at is None:
+        scheduled_at = occurrence_at_index(
+            task, point, int(point["processed_occurrences"])
+        )
+
+    if task["task_type"] == "auto_response":
+        if store.mark_occurrence_processed(point_id, scheduled_at):
+            await _execute_auto_response(task, store)
         return
 
-    # Auto-response tasks take a separate execution path
-    if task.get("task_type") == "auto_response":
-        # Mark fired before executing (fire-and-forget)
-        store.mark_trigger_fired(trigger_id)
-        await _execute_auto_response(task, store)
-        return
-
-    group_id = task["group_id"]
-    user_id = task["user_id"]
-    prompt = task["prompt"]
+    user_id = int(task["user_id"])
+    group_id = int(task["group_id"])
     user_name: str | None = None
-
-    # 1. Look up username — continue even if not found (send without @mention)
     try:
         from nonebot import get_bot
+
         from ..utils import get_group_member_name
 
         if user_id != 0:
             user_name = await get_group_member_name(get_bot(), group_id, user_id)
-        print(
-            f"⏰ [timer] User lookup OK: {user_id} "
-            f"({user_name or 'no specific user'}) in group {group_id}"
-        )
     except Exception:
-        print(f"⏰ [timer] Cannot get user info for {user_id} in group {group_id}, will send without @mention")
+        print(
+            f"[timer-v2] Cannot resolve user {user_id} in group {group_id}; "
+            "injecting without a display name"
+        )
 
-    # 2. Inject into the conversation graph (replaces standalone _run_timer_agent)
-    t_start = time.time()
     try:
         await _inject_timer_to_graph(
-            user_id, group_id, prompt, user_name=user_name
-        )
-        elapsed = time.time() - t_start
-        print(
-            f"⏰ [timer] Timer injected into graph OK: task={task_id} "
-            f"elapsed={elapsed:.1f}s"
+            user_id, group_id, str(task["prompt"]), user_name=user_name
         )
     except Exception:
-        elapsed = time.time() - t_start
-        print(f"❌ [timer] Timer injection FAILED: task={task_id} elapsed={elapsed:.1f}s")
+        print(f"[timer-v2] Timer injection failed for task {task['id']}")
         traceback.print_exc()
+    finally:
+        store.mark_occurrence_processed(point_id, scheduled_at)
 
-    # 4. Mark fired (delivery is handled by the graph's ai_node)
-    store.mark_trigger_fired(trigger_id)
 
-
-# Lazy reference to the timer start-conversation callback (set by chat.py)
 _timer_start_conv_cb: Any = None
 
 
 def set_timer_conv_callback(cb: Any) -> None:
-    """Set the callback used to start a conversation when a timer fires
-    and no conversation is active. Called by handlers/chat.py at import time."""
+    """Set the callback used when a timer starts an inactive conversation."""
     global _timer_start_conv_cb
     _timer_start_conv_cb = cb
 
@@ -345,13 +392,7 @@ async def _inject_timer_to_graph(
     task_prompt: str,
     user_name: str | None = None,
 ) -> None:
-    """Inject a timer prompt into the conversation graph.
-
-    Mirrors the agent_dispatch -> inject_agent_notification pattern.
-    Builds a timer prompt and injects it via inject_timer() in graph/nodes.py.
-    The existing LangGraph handles the response, and any QQ at mention is
-    emitted through explicit [CQ:at,qq=...] placeholders in model output.
-    """
+    """Inject a normal timer occurrence into the shared conversation graph."""
     from ..graph.nodes import inject_timer
 
     inject_timer(

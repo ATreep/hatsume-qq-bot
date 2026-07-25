@@ -1,279 +1,582 @@
-"""TimerStore: SQLite CRUD for timer tasks and triggers."""
+"""SQLite persistence for timer-v2 tasks and native schedule points."""
 
 from __future__ import annotations
 
 import sqlite3
 import time
-from datetime import datetime, timezone, timedelta
+import math
+from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
+from typing import Iterator
 
-from ..config import TIMER_MAX_FUTURE_DAYS
+from .schedule import (
+    SHANGHAI,
+    SchedulePlan,
+    _plan_from_epoch_times,
+    build_daily_plan,
+    build_monthly_plan,
+    build_weekly_plan,
+)
 
-# Default DB path in plugin data directory
 _DEFAULT_DB_PATH: str | None = None
 
 
 def _get_default_db_path() -> str:
+    """Return the repository-local timer-v2 database path."""
     global _DEFAULT_DB_PATH
     if _DEFAULT_DB_PATH is None:
-        try:
-            import nonebot_plugin_localstore as local_store
-            _DEFAULT_DB_PATH = str(
-                Path(local_store.get_plugin_data_dir()) / "timer_db" / "timer.db"
-            )
-        except Exception:
-            _DEFAULT_DB_PATH = str(
-                Path(__file__).resolve().parents[4] / "data" / "hatsume-plugin" / "timer_db" / "timer.db"
-            )
+        _DEFAULT_DB_PATH = str(
+            Path(__file__).resolve().parents[4]
+            / "data"
+            / "timer-v2-db"
+            / "timer.db"
+        )
     return _DEFAULT_DB_PATH
 
 
 class TimerStore:
-    """Manages timer tasks and triggers in SQLite."""
+    """Manage timer tasks, schedule points, progress, and migration markers."""
 
     def __init__(self, db_path: str | None = None):
         self._db_path = db_path or _get_default_db_path()
         self._conn: sqlite3.Connection | None = None
 
     def init_db(self) -> None:
-        """Create database schema if it doesn't exist."""
+        """Open the v2 database and create its idempotent schema."""
+        if self._conn is not None:
+            return
         path = self._db_path
         if path == ":memory:":
-            self._conn = sqlite3.connect(":memory:", check_same_thread=False)
+            conn = sqlite3.connect(":memory:", check_same_thread=False)
         else:
             Path(path).parent.mkdir(parents=True, exist_ok=True)
-            self._conn = sqlite3.connect(path, check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA foreign_keys=ON")
-        self._conn.executescript("""
+            conn = sqlite3.connect(path, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.executescript(
+            """
             CREATE TABLE IF NOT EXISTS timer_tasks (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                group_id    INTEGER NOT NULL,
-                user_id     INTEGER NOT NULL,
-                prompt      TEXT    NOT NULL,
-                created_at  REAL    NOT NULL,
-                updated_at  REAL    NOT NULL
+                id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+                group_id                INTEGER NOT NULL,
+                user_id                 INTEGER NOT NULL,
+                prompt                  TEXT NOT NULL,
+                task_type               TEXT NOT NULL DEFAULT 'normal',
+                schedule_type           TEXT NOT NULL,
+                start_at                REAL,
+                end_at                  REAL,
+                step                    INTEGER,
+                effective_until         REAL NOT NULL,
+                total_occurrences       INTEGER NOT NULL,
+                processed_occurrences   INTEGER NOT NULL DEFAULT 0,
+                truncated               INTEGER NOT NULL DEFAULT 0,
+                legacy_task_id          INTEGER UNIQUE,
+                created_at              REAL NOT NULL,
+                updated_at              REAL NOT NULL,
+                CHECK (task_type IN ('normal', 'auto_response')),
+                CHECK (schedule_type IN ('daily', 'weekly', 'monthly', 'at')),
+                CHECK (total_occurrences > 0),
+                CHECK (
+                    processed_occurrences >= 0
+                    AND processed_occurrences <= total_occurrences
+                )
             );
 
-            CREATE TABLE IF NOT EXISTS timer_triggers (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                task_id     INTEGER NOT NULL REFERENCES timer_tasks(id) ON DELETE CASCADE,
-                trigger_at  REAL    NOT NULL,
-                fired       INTEGER NOT NULL DEFAULT 0,
-                job_id      TEXT
+            CREATE TABLE IF NOT EXISTS timer_schedule_points (
+                id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id                 INTEGER NOT NULL
+                                            REFERENCES timer_tasks(id)
+                                            ON DELETE CASCADE,
+                period_value            INTEGER,
+                clock_time              TEXT,
+                exact_at                REAL,
+                first_fire_at           REAL,
+                last_fire_at            REAL,
+                planned_occurrences     INTEGER NOT NULL,
+                processed_occurrences   INTEGER NOT NULL DEFAULT 0,
+                last_processed_at       REAL,
+                job_id                  TEXT NOT NULL UNIQUE,
+                CHECK (planned_occurrences >= 0),
+                CHECK (
+                    (
+                        planned_occurrences = 0
+                        AND first_fire_at IS NULL
+                        AND last_fire_at IS NULL
+                    ) OR (
+                        planned_occurrences > 0
+                        AND first_fire_at IS NOT NULL
+                        AND last_fire_at IS NOT NULL
+                    )
+                ),
+                CHECK (
+                    processed_occurrences >= 0
+                    AND processed_occurrences <= planned_occurrences
+                )
             );
 
-            CREATE INDEX IF NOT EXISTS idx_triggers_pending
-                ON timer_triggers(trigger_at) WHERE fired = 0;
-        """)
-        # Auto-create timer support (safe migration)
+            CREATE TABLE IF NOT EXISTS timer_migrations (
+                name            TEXT PRIMARY KEY,
+                completed_at    REAL NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_timer_tasks_group
+                ON timer_tasks(group_id, created_at)
+                WHERE task_type = 'normal';
+
+            CREATE INDEX IF NOT EXISTS idx_timer_points_task
+                ON timer_schedule_points(task_id, first_fire_at);
+
+            CREATE INDEX IF NOT EXISTS idx_timer_points_progress
+                ON timer_schedule_points(processed_occurrences, planned_occurrences);
+            """
+        )
+        conn.commit()
+        self._conn = conn
+        print(f"[timer-v2] DB initialized at {path}")
+
+    def close(self) -> None:
+        """Close the store connection."""
+        if self._conn is not None:
+            self._conn.close()
+            self._conn = None
+
+    def _connection(self) -> sqlite3.Connection:
+        if self._conn is None:
+            raise RuntimeError("TimerStore not initialized")
+        return self._conn
+
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        """Run multiple store writes as one immediate transaction."""
+        conn = self._connection()
+        conn.execute("BEGIN IMMEDIATE")
         try:
-            self._conn.execute(
-                "ALTER TABLE timer_tasks ADD COLUMN task_type TEXT NOT NULL DEFAULT 'normal'"
-            )
-        except sqlite3.OperationalError:
-            pass  # Column already exists
-        self._conn.execute("DELETE FROM timer_tasks WHERE task_type = 'auto_create'")
-        self._conn.commit()
-        print(f"⏰ [timer] DB initialized at {path}")
+            yield
+        except BaseException:
+            conn.rollback()
+            raise
+        else:
+            conn.commit()
 
-    # ------------------------------------------------------------------
-    # CRUD: Tasks
-    # ------------------------------------------------------------------
+    def _insert_points(self, task_id: int, plan: SchedulePlan) -> None:
+        conn = self._connection()
+        for point in plan.points:
+            cursor = conn.execute(
+                "INSERT INTO timer_schedule_points "
+                "(task_id, period_value, clock_time, exact_at, first_fire_at, "
+                "last_fire_at, planned_occurrences, processed_occurrences, job_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, 0, '')",
+                (
+                    task_id,
+                    point.period_value,
+                    point.clock_time,
+                    point.exact_at,
+                    point.first_fire_at,
+                    point.last_fire_at,
+                    point.planned_count,
+                ),
+            )
+            point_id = cursor.lastrowid
+            if point_id is None:
+                raise RuntimeError("failed to create timer schedule point")
+            conn.execute(
+                "UPDATE timer_schedule_points SET job_id = ? WHERE id = ?",
+                (f"timer_v2_point_{point_id}", point_id),
+            )
 
     def create_task(
-        self, group_id: int, user_id: int, prompt: str,
-        trigger_times: list[float],
+        self,
+        group_id: int,
+        user_id: int,
+        prompt: str,
+        plan: SchedulePlan,
+        *,
+        task_type: str = "normal",
+        task_id: int | None = None,
+        legacy_task_id: int | None = None,
+        commit: bool = True,
     ) -> int:
-        """Create a task with its trigger times. Returns the new task ID."""
-        assert self._conn is not None, "TimerStore not initialized"
-        now = time.time()
-        unique_times = sorted(set(trigger_times))
-        cur = self._conn.execute(
-            "INSERT INTO timer_tasks (group_id, user_id, prompt, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (group_id, user_id, prompt, now, now),
-        )
-        task_id = cur.lastrowid
-        assert task_id is not None
-        for t in unique_times:
-            cur = self._conn.execute(
-                "INSERT INTO timer_triggers (task_id, trigger_at) VALUES (?, ?)",
-                (task_id, t),
-            )
-            trigger_id = cur.lastrowid
-            self._conn.execute(
-                "UPDATE timer_triggers SET job_id = ? WHERE id = ?",
-                (f"timer_{trigger_id}", trigger_id),
-            )
-        self._conn.commit()
-        print(
-            f"⏰ [timer] Task created: id={task_id} group={group_id} "
-            f"user={user_id} triggers={len(unique_times)} prompt={prompt[:50]} trigger_times={trigger_times}"
-        )
-        return task_id
-
-    def get_task(self, task_id: int) -> dict | None:
-        """Get a task by ID, or None."""
-        assert self._conn is not None, "TimerStore not initialized"
-        row = self._conn.execute(
-            "SELECT * FROM timer_tasks WHERE id = ?", (task_id,)
-        ).fetchone()
-        return dict(row) if row else None
-
-    def list_tasks_by_group(self, group_id: int) -> list[dict]:
-        """List all tasks for a group, ordered by creation time."""
-        assert self._conn is not None, "TimerStore not initialized"
-        rows = self._conn.execute(
-            "SELECT * FROM timer_tasks WHERE group_id = ? ORDER BY created_at",
-            (group_id,),
-        ).fetchall()
-        return [dict(r) for r in rows]
-
-    def update_task(
-        self, task_id: int, prompt: str, trigger_times: list[float],
-    ) -> None:
-        """Update a task's prompt and replace all its triggers."""
-        assert self._conn is not None, "TimerStore not initialized"
-        now = time.time()
-        self._conn.execute(
-            "UPDATE timer_tasks SET prompt = ?, updated_at = ? WHERE id = ?",
-            (prompt, now, task_id),
-        )
-        self._conn.execute(
-            "DELETE FROM timer_triggers WHERE task_id = ?", (task_id,)
-        )
-        unique_times = sorted(set(trigger_times))
-        for t in unique_times:
-            cur = self._conn.execute(
-                "INSERT INTO timer_triggers (task_id, trigger_at) VALUES (?, ?)",
-                (task_id, t),
-            )
-            trigger_id = cur.lastrowid
-            self._conn.execute(
-                "UPDATE timer_triggers SET job_id = ? WHERE id = ?",
-                (f"timer_{trigger_id}", trigger_id),
-            )
-        self._conn.commit()
-        print(
-            f"⏰ [timer] Task updated: id={task_id} "
-            f"prompt={prompt[:50]} triggers={len(unique_times)}"
-        )
-
-    def delete_task(self, task_id: int) -> None:
-        """Delete a task and its triggers (CASCADE)."""
-        assert self._conn is not None, "TimerStore not initialized"
-        self._conn.execute("DELETE FROM timer_tasks WHERE id = ?", (task_id,))
-        self._conn.commit()
-        print(f"⏰ [timer] Task deleted: id={task_id}")
-
-    # ------------------------------------------------------------------
-    # Auto-response special timer
-    # ------------------------------------------------------------------
-
-    def upsert_auto_response(
-        self, trigger_at: float, prompt: str | None = None,
-    ) -> int:
-        """Delete all old auto_response tasks and create a new one.
-
-        Guarantees at most one auto_response row in the database.
-        Returns the new task_id.
-        """
-        from ..prompts import get_auto_response_prompt
-
-        assert self._conn is not None, "TimerStore not initialized"
-        self._conn.execute(
-            "DELETE FROM timer_tasks WHERE task_type = 'auto_response'"
-        )
-        now = time.time()
-        cur = self._conn.execute(
-            "INSERT INTO timer_tasks "
-            "(group_id, user_id, prompt, created_at, updated_at, task_type) "
-            "VALUES (?, ?, ?, ?, ?, 'auto_response')",
-            (0, 0, prompt or get_auto_response_prompt(), now, now),
-        )
-        task_id = cur.lastrowid
-        assert task_id is not None
-        cur = self._conn.execute(
-            "INSERT INTO timer_triggers (task_id, trigger_at) VALUES (?, ?)",
-            (task_id, trigger_at),
-        )
-        trigger_id = cur.lastrowid
-        self._conn.execute(
-            "UPDATE timer_triggers SET job_id = ? WHERE id = ?",
-            (f"timer_{trigger_id}", trigger_id),
-        )
-        self._conn.commit()
-        run_dt = datetime.fromtimestamp(trigger_at, tz=timezone(timedelta(hours=8)))
-        ts_str = run_dt.strftime("%Y-%m-%d %H:%M:%S")
-        print(
-            f"💬 [auto_response] Task upserted: id={task_id} "
-            f"trigger_at={ts_str}"
-        )
-        return task_id
-
-    def list_auto_response_triggers(self) -> list[dict]:
-        """Get all unfired triggers for auto_response tasks."""
-        assert self._conn is not None, "TimerStore not initialized"
-        rows = self._conn.execute(
-            "SELECT tr.* FROM timer_triggers tr "
-            "JOIN timer_tasks t ON t.id = tr.task_id "
-            "WHERE t.task_type = 'auto_response' AND tr.fired = 0"
-        ).fetchall()
-        return [dict(r) for r in rows]
-
-    # ------------------------------------------------------------------
-    # CRUD: Triggers
-    # ------------------------------------------------------------------
-
-    def get_triggers_for_task(self, task_id: int) -> list[dict]:
-        """Get all triggers for a task, ordered by trigger_at."""
-        assert self._conn is not None, "TimerStore not initialized"
-        rows = self._conn.execute(
-            "SELECT * FROM timer_triggers WHERE task_id = ? ORDER BY trigger_at",
-            (task_id,),
-        ).fetchall()
-        return [dict(r) for r in rows]
-
-    def mark_trigger_fired(self, trigger_id: int) -> None:
-        """Mark a trigger as fired."""
-        assert self._conn is not None, "TimerStore not initialized"
-        self._conn.execute(
-            "UPDATE timer_triggers SET fired = 1 WHERE id = ?", (trigger_id,)
-        )
-        self._conn.commit()
-        print(f"⏰ [timer] Trigger fired: id={trigger_id}")
-
-    # ------------------------------------------------------------------
-    # Validation
-    # ------------------------------------------------------------------
-
-    def validate_trigger_times(
-        self, trigger_times: list[float], now: float | None = None,
-    ) -> list[str]:
-        """Validate trigger times. Returns errors."""
-        if now is None:
-            now = time.time()
-        errors: list[str] = []
-        max_future = now + TIMER_MAX_FUTURE_DAYS * 24 * 3600
-
-        seen: set[float] = set()
-        for t in trigger_times:
-            if t in seen:
-                continue
-            seen.add(t)
-            if t <= now:
-                errors.append(f"错误：触发时间 {t} 已过期，必须是当前时间之后。")
-            elif t > max_future:
-                errors.append(
-                    f"错误：触发时间 {t} 超过 {TIMER_MAX_FUTURE_DAYS} 天限制。"
+        """Persist a validated schedule plan and return its task ID."""
+        if commit:
+            with self.transaction():
+                return self.create_task(
+                    group_id,
+                    user_id,
+                    prompt,
+                    plan,
+                    task_type=task_type,
+                    task_id=task_id,
+                    legacy_task_id=legacy_task_id,
+                    commit=False,
                 )
 
-        return errors
+        conn = self._connection()
+        now = time.time()
+        values = (
+            group_id,
+            user_id,
+            prompt,
+            task_type,
+            plan.mode,
+            plan.start_at,
+            plan.end_at,
+            plan.step,
+            plan.effective_until,
+            plan.total_occurrences,
+            int(plan.truncated),
+            legacy_task_id,
+            now,
+            now,
+        )
+        if task_id is None:
+            cursor = conn.execute(
+                "INSERT INTO timer_tasks "
+                "(group_id, user_id, prompt, task_type, schedule_type, start_at, "
+                "end_at, step, effective_until, total_occurrences, truncated, "
+                "legacy_task_id, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                values,
+            )
+        else:
+            cursor = conn.execute(
+                "INSERT INTO timer_tasks "
+                "(id, group_id, user_id, prompt, task_type, schedule_type, start_at, "
+                "end_at, step, effective_until, total_occurrences, truncated, "
+                "legacy_task_id, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (task_id, *values),
+            )
+        inserted_id = cursor.lastrowid
+        if inserted_id is None:
+            raise RuntimeError("failed to create timer task")
+        self._insert_points(int(inserted_id), plan)
+        return int(inserted_id)
+
+    def get_task(self, task_id: int) -> dict | None:
+        row = self._connection().execute(
+            "SELECT * FROM timer_tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def list_tasks_by_group(self, group_id: int) -> list[dict]:
+        rows = self._connection().execute(
+            "SELECT * FROM timer_tasks "
+            "WHERE group_id = ? AND task_type = 'normal' "
+            "ORDER BY created_at, id",
+            (group_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_point(self, point_id: int) -> dict | None:
+        row = self._connection().execute(
+            "SELECT * FROM timer_schedule_points WHERE id = ?", (point_id,)
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def get_points_for_task(self, task_id: int) -> list[dict]:
+        rows = self._connection().execute(
+            "SELECT * FROM timer_schedule_points "
+            "WHERE task_id = ? ORDER BY first_fire_at, id",
+            (task_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_incomplete_points(self) -> list[dict]:
+        rows = self._connection().execute(
+            "SELECT p.*, t.schedule_type, t.step, t.task_type, t.group_id, "
+            "t.user_id, t.prompt, t.total_occurrences AS task_total_occurrences, "
+            "t.processed_occurrences AS task_processed_occurrences "
+            "FROM timer_schedule_points AS p "
+            "JOIN timer_tasks AS t ON t.id = p.task_id "
+            "WHERE p.processed_occurrences < p.planned_occurrences "
+            "ORDER BY p.first_fire_at, p.id"
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def replace_task_with_exact_plan(
+        self, task_id: int, prompt: str, plan: SchedulePlan
+    ) -> None:
+        """Replace an existing task's schedule while preserving its public ID."""
+        if plan.mode != "at":
+            raise ValueError("replacement plan must use exact-time mode")
+        conn = self._connection()
+        with self.transaction():
+            cursor = conn.execute(
+                "UPDATE timer_tasks SET prompt = ?, schedule_type = 'at', "
+                "start_at = NULL, end_at = NULL, step = NULL, effective_until = ?, "
+                "total_occurrences = ?, processed_occurrences = 0, truncated = ?, "
+                "updated_at = ? WHERE id = ?",
+                (
+                    prompt,
+                    plan.effective_until,
+                    plan.total_occurrences,
+                    int(plan.truncated),
+                    time.time(),
+                    task_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(task_id)
+            conn.execute(
+                "DELETE FROM timer_schedule_points WHERE task_id = ?", (task_id,)
+            )
+            self._insert_points(task_id, plan)
+
+    def expand_truncated_frequency_tasks(self) -> int:
+        """Remove the legacy task-wide cap without changing task progress."""
+        conn = self._connection()
+        tasks = conn.execute(
+            "SELECT * FROM timer_tasks WHERE schedule_type != 'at' "
+            "AND truncated = 1 ORDER BY id"
+        ).fetchall()
+        if not tasks:
+            return 0
+
+        with self.transaction():
+            for task_row in tasks:
+                task = dict(task_row)
+                points = self.get_points_for_task(int(task["id"]))
+                first_times = [
+                    float(point["first_fire_at"])
+                    for point in points
+                    if point["first_fire_at"] is not None
+                ]
+                if not first_times:
+                    raise RuntimeError(
+                        f"frequency task {task['id']} has no first occurrence"
+                    )
+                if (
+                    task["start_at"] is None
+                    or task["end_at"] is None
+                    or task["step"] is None
+                ):
+                    raise RuntimeError(
+                        f"frequency task {task['id']} has incomplete bounds"
+                    )
+
+                start_at = datetime.fromtimestamp(
+                    float(task["start_at"]), tz=SHANGHAI
+                ).isoformat()
+                end_at = datetime.fromtimestamp(
+                    float(task["end_at"]), tz=SHANGHAI
+                ).isoformat()
+                step = int(task["step"])
+                cutoff = min(first_times) - 1
+                mode = str(task["schedule_type"])
+                if mode == "daily":
+                    plan = build_daily_plan(
+                        start_at,
+                        end_at,
+                        [str(point["clock_time"]) for point in points],
+                        step,
+                        now=cutoff,
+                    )
+                elif mode == "weekly":
+                    plan = build_weekly_plan(
+                        start_at,
+                        end_at,
+                        [
+                            {
+                                "weekday": int(point["period_value"]),
+                                "time": str(point["clock_time"]),
+                            }
+                            for point in points
+                        ],
+                        step,
+                        now=cutoff,
+                    )
+                elif mode == "monthly":
+                    plan = build_monthly_plan(
+                        start_at,
+                        end_at,
+                        [
+                            {
+                                "day": int(point["period_value"]),
+                                "time": str(point["clock_time"]),
+                            }
+                            for point in points
+                        ],
+                        step,
+                        now=cutoff,
+                    )
+                else:
+                    raise RuntimeError(
+                        f"frequency task {task['id']} has unsupported mode {mode}"
+                    )
+
+                rebuilt = {
+                    (point.period_value, point.clock_time): point
+                    for point in plan.points
+                }
+                existing_keys = {
+                    (point["period_value"], point["clock_time"])
+                    for point in points
+                }
+                if set(rebuilt) != existing_keys:
+                    raise RuntimeError(
+                        f"frequency task {task['id']} point definitions changed"
+                    )
+
+                for point in points:
+                    rebuilt_point = rebuilt[
+                        (point["period_value"], point["clock_time"])
+                    ]
+                    old_first = point["first_fire_at"]
+                    if old_first is not None and (
+                        rebuilt_point.first_fire_at is None
+                        or not math.isclose(
+                            float(old_first),
+                            rebuilt_point.first_fire_at,
+                            rel_tol=0,
+                            abs_tol=0.001,
+                        )
+                    ):
+                        raise RuntimeError(
+                            f"frequency task {task['id']} first occurrence changed"
+                        )
+                    if rebuilt_point.planned_count < int(
+                        point["processed_occurrences"]
+                    ):
+                        raise RuntimeError(
+                            f"frequency task {task['id']} progress exceeds plan"
+                        )
+                    conn.execute(
+                        "UPDATE timer_schedule_points SET first_fire_at = ?, "
+                        "last_fire_at = ?, planned_occurrences = ? WHERE id = ?",
+                        (
+                            rebuilt_point.first_fire_at,
+                            rebuilt_point.last_fire_at,
+                            rebuilt_point.planned_count,
+                            point["id"],
+                        ),
+                    )
+
+                conn.execute(
+                    "UPDATE timer_tasks SET effective_until = ?, "
+                    "total_occurrences = ?, truncated = 0, updated_at = ? "
+                    "WHERE id = ?",
+                    (
+                        plan.effective_until,
+                        plan.total_occurrences,
+                        time.time(),
+                        task["id"],
+                    ),
+                )
+        return len(tasks)
+
+    def delete_task(self, task_id: int, *, commit: bool = True) -> None:
+        conn = self._connection()
+        conn.execute("DELETE FROM timer_tasks WHERE id = ?", (task_id,))
+        if commit:
+            conn.commit()
+
+    def mark_occurrence_processed(
+        self, point_id: int, scheduled_at: float
+    ) -> bool:
+        """Advance point and task progress exactly once for a scheduled instant."""
+        conn = self._connection()
+        with self.transaction():
+            row = conn.execute(
+                "SELECT task_id, planned_occurrences, processed_occurrences, "
+                "last_processed_at FROM timer_schedule_points WHERE id = ?",
+                (point_id,),
+            ).fetchone()
+            if row is None:
+                return False
+            last_processed = row["last_processed_at"]
+            if (
+                row["processed_occurrences"] >= row["planned_occurrences"]
+                or (last_processed is not None and last_processed >= scheduled_at)
+            ):
+                return False
+            conn.execute(
+                "UPDATE timer_schedule_points "
+                "SET processed_occurrences = processed_occurrences + 1, "
+                "last_processed_at = ? WHERE id = ?",
+                (scheduled_at, point_id),
+            )
+            conn.execute(
+                "UPDATE timer_tasks "
+                "SET processed_occurrences = processed_occurrences + 1, "
+                "updated_at = ? WHERE id = ?",
+                (time.time(), row["task_id"]),
+            )
+        return True
+
+    def list_finished_task_ids(self) -> list[int]:
+        rows = self._connection().execute(
+            "SELECT id FROM timer_tasks "
+            "WHERE task_type = 'normal' "
+            "AND processed_occurrences >= total_occurrences ORDER BY id"
+        ).fetchall()
+        return [int(row["id"]) for row in rows]
+
+    def delete_finished_tasks(self) -> list[int]:
+        task_ids = self.list_finished_task_ids()
+        if not task_ids:
+            return []
+        conn = self._connection()
+        placeholders = ",".join("?" for _ in task_ids)
+        conn.execute(
+            f"DELETE FROM timer_tasks WHERE id IN ({placeholders})", task_ids
+        )
+        conn.commit()
+        return task_ids
+
+    def upsert_auto_response(
+        self, trigger_at: float, prompt: str | None = None
+    ) -> int:
+        """Replace the internal auto-response task with one exact point."""
+        from ..prompts import get_auto_response_prompt
+
+        plan = _plan_from_epoch_times([trigger_at])
+        conn = self._connection()
+        with self.transaction():
+            conn.execute("DELETE FROM timer_tasks WHERE task_type = 'auto_response'")
+            task_id = self.create_task(
+                0,
+                0,
+                prompt or get_auto_response_prompt(),
+                plan,
+                task_type="auto_response",
+                commit=False,
+            )
+        return task_id
+
+    def get_auto_response_point(self) -> dict | None:
+        row = self._connection().execute(
+            "SELECT p.*, t.prompt, t.task_type, t.schedule_type, t.step "
+            "FROM timer_schedule_points AS p "
+            "JOIN timer_tasks AS t ON t.id = p.task_id "
+            "WHERE t.task_type = 'auto_response' "
+            "AND p.processed_occurrences < p.planned_occurrences "
+            "ORDER BY p.first_fire_at LIMIT 1"
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def delete_auto_response_tasks(self) -> None:
+        conn = self._connection()
+        conn.execute("DELETE FROM timer_tasks WHERE task_type = 'auto_response'")
+        conn.commit()
+
+    def has_migration(self, name: str) -> bool:
+        row = self._connection().execute(
+            "SELECT 1 FROM timer_migrations WHERE name = ?", (name,)
+        ).fetchone()
+        return row is not None
+
+    def record_migration(self, name: str, *, commit: bool = True) -> None:
+        conn = self._connection()
+        conn.execute(
+            "INSERT OR IGNORE INTO timer_migrations (name, completed_at) "
+            "VALUES (?, ?)",
+            (name, time.time()),
+        )
+        if commit:
+            conn.commit()
 
     def validate_prompt(self, prompt: str) -> str | None:
-        """Validate prompt. Returns error str or None if valid."""
         if not prompt or not prompt.strip():
             return "错误：任务内容不能为空。"
         if len(prompt) > 500:

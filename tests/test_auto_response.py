@@ -1,183 +1,257 @@
-"""Tests for auto-response timer scheduling and execution."""
+"""Tests for timer-v2 auto-response scheduling and execution."""
 
 from __future__ import annotations
 
-import asyncio
 import importlib.util
 import sys
 import types
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 PLUGIN_DIR = ROOT / "hatsume/plugins/hatsume-plugin"
+BASE_NAME = "hatsume.plugins.hatsume-plugin"
+SHANGHAI = timezone(timedelta(hours=8))
 
 
-def _ensure_package_hierarchy():
-    for name, path in [
+def _is_stubbed_namespace(name: str) -> bool:
+    return name == "hatsume" or name.startswith("hatsume.") or name in {
+        "nonebot",
+        "nonebot_plugin_apscheduler",
+    } or name.startswith(("nonebot.", "apscheduler.")) or name == "apscheduler"
+
+
+def _load_file(name: str, path: Path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_modules():
+    for name in list(sys.modules):
+        if name == "apscheduler" or name.startswith("apscheduler."):
+            del sys.modules[name]
+
+    for name, path in (
         ("hatsume", ROOT / "hatsume"),
         ("hatsume.plugins", ROOT / "hatsume/plugins"),
-        ("hatsume.plugins.hatsume-plugin", PLUGIN_DIR),
-    ]:
-        if name not in sys.modules:
-            mod = types.ModuleType(name)
-            mod.__path__ = [str(path)]
-            sys.modules[name] = mod
+        (BASE_NAME, PLUGIN_DIR),
+        (f"{BASE_NAME}.timer", PLUGIN_DIR / "timer"),
+        (f"{BASE_NAME}.graph", PLUGIN_DIR / "graph"),
+    ):
+        package = types.ModuleType(name)
+        package.__path__ = [str(path)]
+        sys.modules[name] = package
 
+    config = types.ModuleType(f"{BASE_NAME}.config")
+    config.TIMER_MAX_FREQUENCY_POINTS = 5
+    config.TIMER_MAX_EXACT_POINTS = 10
+    config.TIMER_TOLERANCE_MINUTES = 5
+    config.AUTO_RESPONSE_GROUP_ID = 123
+    sys.modules[config.__name__] = config
 
-def _load_module(short_name: str, **stub_attrs):
-    full_name = f"hatsume.plugins.hatsume-plugin.{short_name}"
-    spec = importlib.util.spec_from_file_location(
-        full_name, PLUGIN_DIR / f"{short_name}.py"
+    prompts = types.ModuleType(f"{BASE_NAME}.prompts")
+    prompts.get_auto_response_prompt = lambda: "auto response prompt"
+    sys.modules[prompts.__name__] = prompts
+
+    nodes = types.ModuleType(f"{BASE_NAME}.graph.nodes")
+    nodes.inject_timer = MagicMock()
+    sys.modules[nodes.__name__] = nodes
+
+    utils = types.ModuleType(f"{BASE_NAME}.utils")
+    utils.get_group_member_name = AsyncMock(return_value=None)
+    sys.modules[utils.__name__] = utils
+
+    scheduler = MagicMock()
+    apscheduler_plugin = types.ModuleType("nonebot_plugin_apscheduler")
+    apscheduler_plugin.scheduler = scheduler
+    sys.modules[apscheduler_plugin.__name__] = apscheduler_plugin
+
+    nonebot = types.ModuleType("nonebot")
+    nonebot.require = lambda name: apscheduler_plugin
+    nonebot.get_bot = lambda: object()
+    sys.modules[nonebot.__name__] = nonebot
+
+    _load_file(
+        f"{BASE_NAME}.timer.schedule", PLUGIN_DIR / "timer/schedule.py"
     )
-    if spec is None:
-        raise ImportError(f"Cannot load {full_name}")
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[full_name] = mod
-    for k, v in stub_attrs.items():
-        setattr(mod, k, v)
-    spec.loader.exec_module(mod)
-    return mod
-
-
-def _load_submodule(package_short: str, module_name: str, **stub_attrs):
-    full_name = f"hatsume.plugins.hatsume-plugin.{module_name}"
-    spec = importlib.util.spec_from_file_location(
-        full_name, PLUGIN_DIR / package_short / f"{module_name.split('.')[-1]}.py"
+    store = _load_file(f"{BASE_NAME}.timer.store", PLUGIN_DIR / "timer/store.py")
+    executor = _load_file(
+        f"{BASE_NAME}.timer.executor", PLUGIN_DIR / "timer/executor.py"
     )
-    if spec is None:
-        raise ImportError(f"Cannot load {full_name}")
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[full_name] = mod
-    for k, v in stub_attrs.items():
-        setattr(mod, k, v)
-    spec.loader.exec_module(mod)
-    return mod
+    executor.scheduler = scheduler
+    return store, executor, scheduler, nodes
 
 
-_ensure_package_hierarchy()
-
-# Stub utils.py before executor tries to import it
-_utils_mod = types.ModuleType("hatsume.plugins.hatsume-plugin.utils")
-_utils_mod.get_group_member_name = lambda bot, group_id, user_id: f"user_{user_id}"
-sys.modules["hatsume.plugins.hatsume-plugin.utils"] = _utils_mod
-
-# Stub nonebot before loading executor (which imports get_bot, require at module level)
-_nonebot_mod = types.ModuleType("nonebot")
-_nonebot_mod.get_bot = lambda: None
-_nonebot_mod.get_driver = lambda: None
-_nonebot_mod.require = lambda name: sys.modules.get(name, types.ModuleType(name))
-sys.modules["nonebot"] = _nonebot_mod
-
-# Stub nonebot_plugin_apscheduler (imported by executor with require())
-_apscheduler_mod = types.ModuleType("nonebot_plugin_apscheduler")
-_apscheduler_mod.scheduler = type("Scheduler", (), {"add_job": lambda *a, **kw: None, "remove_job": lambda *a, **kw: None})()
-sys.modules["nonebot_plugin_apscheduler"] = _apscheduler_mod
-
-# Stub apscheduler.triggers.date (imported by executor)
-_date_trigger_mod = types.ModuleType("apscheduler.triggers.date")
-_date_trigger_mod.DateTrigger = type("DateTrigger", (), {})
-_apscheduler_mod_pkg = types.ModuleType("apscheduler")
-_apscheduler_mod_pkg.triggers = types.ModuleType("apscheduler.triggers")
-_apscheduler_mod_pkg.triggers.date = _date_trigger_mod
-sys.modules["apscheduler"] = _apscheduler_mod_pkg
-sys.modules["apscheduler.triggers"] = _apscheduler_mod_pkg.triggers
-sys.modules["apscheduler.triggers.date"] = _date_trigger_mod
-
-_cfg = _load_module("config")
-_timer_init = _load_submodule("timer", "timer.__init__")
-_timer_store = _load_submodule("timer", "timer.store")
-sys.modules["hatsume.plugins.hatsume-plugin.timer.store"] = _timer_store
-_timer_executor = _load_submodule("timer", "timer.executor")
-
-_random_response_trigger = _timer_executor._random_response_trigger
+@pytest.fixture
+def modules():
+    previous = {
+        name: module
+        for name, module in sys.modules.items()
+        if _is_stubbed_namespace(name)
+    }
+    try:
+        yield _load_modules()
+    finally:
+        for name in list(sys.modules):
+            if _is_stubbed_namespace(name):
+                del sys.modules[name]
+        sys.modules.update(previous)
 
 
-class TestRandomResponseTrigger:
-    """Auto-response random trigger time generation."""
-
-    def test_returns_within_valid_horizon(self):
-        """_random_response_trigger returns a timestamp between 1h and 3h ahead."""
-        now = datetime.now(timezone(timedelta(hours=8)))
-        result_ts = _random_response_trigger()
-        result_dt = datetime.fromtimestamp(result_ts, tz=timezone(timedelta(hours=8)))
-
-        delta = result_dt - now
-        assert timedelta(hours=1) <= delta <= timedelta(hours=3)
-
-    def test_time_in_range(self):
-        """Repeated trigger generation preserves the 1h-3h contract."""
-        now = datetime.now(timezone(timedelta(hours=8)))
-        result_ts = _random_response_trigger()
-        result_dt = datetime.fromtimestamp(result_ts, tz=timezone(timedelta(hours=8)))
-        assert timedelta(hours=1) <= result_dt - now <= timedelta(hours=3)
+@pytest.fixture
+def store(tmp_path, modules):
+    store_module, _, _, _ = modules
+    instance = store_module.TimerStore(str(tmp_path / "timer.db"))
+    instance.init_db()
+    yield instance
+    instance.close()
 
 
-class TestAutoResponseTargetValidation:
-    """Auto-response never injects or reschedules with group ID zero."""
+def test_random_response_trigger_is_between_one_and_three_hours(modules):
+    _, executor, _, _ = modules
+    before = datetime.now(SHANGHAI)
 
-    def test_auto_response_execution_uses_configured_target(self, monkeypatch):
-        inject_timer = MagicMock()
-        nodes_name = "hatsume.plugins.hatsume-plugin.graph.nodes"
-        nodes = types.ModuleType(nodes_name)
-        nodes.inject_timer = inject_timer
-        reschedule = MagicMock()
-        monkeypatch.setitem(sys.modules, nodes_name, nodes)
-        monkeypatch.setattr(_timer_executor, "AUTO_RESPONSE_GROUP_ID", 123456)
-        monkeypatch.setattr(_timer_executor, "reschedule_auto_response", reschedule)
+    result = datetime.fromtimestamp(executor._random_response_trigger(), SHANGHAI)
 
-        asyncio.run(
-            _timer_executor._execute_auto_response(
-                {"prompt": "participate in chat"}, MagicMock()
-            )
-        )
+    assert timedelta(hours=1) <= result - before <= timedelta(hours=3)
 
-        inject_timer.assert_called_once_with(
-            user_id=0,
-            group_id=123456,
-            timer_prompt="participate in chat",
-            start_conversation_cb=_timer_executor._timer_start_conv_cb,
-        )
-        reschedule.assert_called_once()
 
-    def test_auto_response_execution_skips_unconfigured_target(self, monkeypatch):
-        reschedule = MagicMock()
-        monkeypatch.setattr(_timer_executor, "AUTO_RESPONSE_GROUP_ID", 0)
-        monkeypatch.setattr(_timer_executor, "reschedule_auto_response", reschedule)
+@pytest.mark.asyncio
+async def test_refresh_removes_internal_task_when_group_is_disabled(
+    modules, store, monkeypatch
+):
+    _, executor, scheduler, _ = modules
+    point_time = datetime.now(SHANGHAI).timestamp() + 3600
+    store.upsert_auto_response(point_time)
+    point = store.get_auto_response_point()
+    assert point is not None
+    monkeypatch.setattr(executor, "AUTO_RESPONSE_GROUP_ID", 0)
 
-        asyncio.run(
-            _timer_executor._execute_auto_response(
-                {"prompt": "participate in chat"}, MagicMock()
-            )
-        )
+    await executor.refresh_auto_response(store)
 
-        reschedule.assert_not_called()
+    scheduler.remove_job.assert_called_once_with(point["job_id"])
+    scheduler.add_job.assert_not_called()
+    assert store.get_auto_response_point() is None
 
-    def test_refresh_removes_pending_auto_response_when_disabled(self, monkeypatch):
-        conn = MagicMock()
-        store = types.SimpleNamespace(
-            _conn=conn,
-            list_auto_response_triggers=MagicMock(return_value=[{"id": 17}]),
-        )
-        cancel_job = MagicMock()
-        monkeypatch.setattr(_timer_executor, "AUTO_RESPONSE_GROUP_ID", 0)
-        monkeypatch.setattr(_timer_executor, "cancel_job", cancel_job)
 
-        asyncio.run(_timer_executor.refresh_auto_response(store))
+@pytest.mark.asyncio
+async def test_refresh_retains_and_registers_one_future_internal_point(
+    modules, store
+):
+    _, executor, scheduler, _ = modules
+    point_time = datetime.now(SHANGHAI).timestamp() + 3600
+    task_id = store.upsert_auto_response(point_time)
 
-        cancel_job.assert_called_once_with(17)
-        conn.execute.assert_called_once_with(
-            "DELETE FROM timer_tasks WHERE task_type = 'auto_response'"
-        )
-        conn.commit.assert_called_once_with()
+    await executor.refresh_auto_response(store)
 
-    def test_legacy_auto_create_task_is_deleted_without_injection(self, monkeypatch):
-        store = MagicMock()
-        store.get_task.return_value = {"id": 9, "task_type": "auto_create"}
-        monkeypatch.setattr(_timer_executor, "_execute_auto_response", MagicMock())
+    point = store.get_auto_response_point()
+    assert point is not None
+    assert point["task_id"] == task_id
+    assert point["exact_at"] == point_time
+    assert scheduler.add_job.call_count == 1
+    assert scheduler.add_job.call_args.kwargs["id"] == point["job_id"]
 
-        asyncio.run(_timer_executor._execute_timer({"id": 3, "task_id": 9}, store))
 
-        store.delete_task.assert_called_once_with(9)
-        store.mark_trigger_fired.assert_not_called()
+@pytest.mark.asyncio
+async def test_refresh_creates_one_future_internal_point_when_missing(
+    modules, store, monkeypatch
+):
+    _, executor, scheduler, _ = modules
+    point_time = datetime.now(SHANGHAI).timestamp() + 3600
+    monkeypatch.setattr(executor, "_random_response_trigger", lambda: point_time)
+
+    await executor.refresh_auto_response(store)
+
+    point = store.get_auto_response_point()
+    assert point is not None
+    assert point["exact_at"] == point_time
+    assert scheduler.add_job.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_auto_response_marks_before_injection_and_registers_successor(
+    modules, store, monkeypatch
+):
+    _, executor, scheduler, nodes = modules
+    trigger_at = datetime.now(SHANGHAI).timestamp() + 60
+    successor_at = trigger_at + 3600
+    store.upsert_auto_response(trigger_at, "participate in chat")
+    point = store.get_auto_response_point()
+    assert point is not None
+    progress_marked = False
+    original_mark = store.mark_occurrence_processed
+
+    def mark_processed(point_id, scheduled_at):
+        nonlocal progress_marked
+        progress_marked = original_mark(point_id, scheduled_at)
+        return progress_marked
+
+    def inject_timer(**kwargs):
+        assert progress_marked is True
+        assert kwargs["group_id"] == 123
+        assert kwargs["timer_prompt"] == "participate in chat"
+
+    monkeypatch.setattr(store, "mark_occurrence_processed", mark_processed)
+    monkeypatch.setattr(nodes, "inject_timer", inject_timer)
+    monkeypatch.setattr(executor, "_random_response_trigger", lambda: successor_at)
+    scheduler.reset_mock()
+
+    await executor._execute_point(point["id"], store, scheduled_at=trigger_at)
+
+    successor = store.get_auto_response_point()
+    assert successor is not None
+    assert successor["exact_at"] == successor_at
+    assert scheduler.add_job.call_count == 1
+    assert scheduler.add_job.call_args.kwargs["id"] == successor["job_id"]
+
+
+@pytest.mark.asyncio
+async def test_auto_response_registers_successor_when_injection_fails(
+    modules, store, monkeypatch
+):
+    _, executor, scheduler, nodes = modules
+    trigger_at = datetime.now(SHANGHAI).timestamp() + 60
+    successor_at = trigger_at + 3600
+    store.upsert_auto_response(trigger_at, "participate in chat")
+    point = store.get_auto_response_point()
+    assert point is not None
+    monkeypatch.setattr(
+        nodes,
+        "inject_timer",
+        MagicMock(side_effect=RuntimeError("injection failed")),
+    )
+    monkeypatch.setattr(executor, "_random_response_trigger", lambda: successor_at)
+    scheduler.reset_mock()
+
+    with pytest.raises(RuntimeError, match="injection failed"):
+        await executor._execute_point(point["id"], store, scheduled_at=trigger_at)
+
+    successor = store.get_auto_response_point()
+    assert successor is not None
+    assert successor["exact_at"] == successor_at
+    assert scheduler.add_job.call_count == 1
+    assert scheduler.add_job.call_args.kwargs["id"] == successor["job_id"]
+
+
+@pytest.mark.asyncio
+async def test_auto_response_never_injects_or_reschedules_when_disabled(
+    modules, store, monkeypatch
+):
+    _, executor, scheduler, nodes = modules
+    trigger_at = datetime.now(SHANGHAI).timestamp() + 60
+    store.upsert_auto_response(trigger_at)
+    point = store.get_auto_response_point()
+    assert point is not None
+    monkeypatch.setattr(executor, "AUTO_RESPONSE_GROUP_ID", 0)
+
+    await executor._execute_point(point["id"], store, scheduled_at=trigger_at)
+
+    nodes.inject_timer.assert_not_called()
+    scheduler.add_job.assert_not_called()

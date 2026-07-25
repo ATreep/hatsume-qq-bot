@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import importlib.util
 import sys
 import types
@@ -39,8 +38,10 @@ def _load_utils_module():
     if "nonebot.adapters" not in sys.modules:
         adapters_mod = types.ModuleType("nonebot.adapters")
         adapters_mod.__path__ = []
-        adapters_mod.Bot = type("Bot", (), {})
         sys.modules["nonebot.adapters"] = adapters_mod
+    adapters_mod = sys.modules["nonebot.adapters"]
+    if not hasattr(adapters_mod, "Bot"):
+        adapters_mod.Bot = type("Bot", (), {})
 
     spec = importlib.util.spec_from_file_location(
         "hatsume.plugins.hatsume-plugin.utils", UTILS_PATH
@@ -451,11 +452,10 @@ def _load_tools_module_for_membersearch():
         create_task=lambda *a, **kw: 1,
         list_tasks_by_group=lambda gid: [],
         get_task=lambda tid: None,
-        get_triggers_for_task=lambda tid: [],
-        validate_trigger_times=lambda times, now=None: [],
+        get_points_for_task=lambda tid: [],
         validate_prompt=lambda p: None,
         delete_task=lambda tid: None,
-        update_task=lambda tid, p, ts: None,
+        replace_task_with_exact_plan=lambda tid, p, plan: None,
     )
     sys.modules["hatsume.plugins.hatsume-plugin.timer"] = timer_mod
 
@@ -615,11 +615,10 @@ def _load_commands_for_membersearch(patch_search=None):
         create_task=lambda *a, **kw: 1,
         list_tasks_by_group=lambda gid: [],
         get_task=lambda tid: None,
-        get_triggers_for_task=lambda tid: [],
-        validate_trigger_times=lambda times, now=None: [],
+        get_points_for_task=lambda tid: [],
         validate_prompt=lambda p: None,
         delete_task=lambda tid: None,
-        update_task=lambda tid, p, ts: None,
+        replace_task_with_exact_plan=lambda tid, p, plan: None,
     )
     sys.modules["hatsume.plugins.hatsume-plugin.timer"] = timer_mod
 

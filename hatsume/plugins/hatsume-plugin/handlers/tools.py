@@ -176,11 +176,10 @@ async def handle_generate_video(matcher, args: Message) -> None:
 
 async def handle_timer(bot, event, matcher, args: Message) -> None:
     """Handle /timer command: list, delete, update."""
-    from datetime import datetime, timedelta, timezone
-
-    from ..graph.tools import set_current_group_id
+    from ..graph.tools import get_timer_overview, set_current_group_id
     from ..timer import get_store
     from ..timer.executor import add_jobs_for_task, cancel_task_jobs
+    from ..timer.schedule import ScheduleValidationError, build_at_plan
 
     set_current_group_id(event.group_id)
     store = get_store()
@@ -190,11 +189,12 @@ async def handle_timer(bot, event, matcher, args: Message) -> None:
     HELP = (
         "/timer 命令用法：\n\n"
         "/timer list                    列出当前群的所有定时任务\n"
+        "/timer list <群号>             管理员查看指定群的定时任务\n"
         "/timer delete <id>             删除指定 ID 的定时任务\n"
         "/timer update <id> <内容> @ <时间1>, <时间2>, ..."
         "  更新定时任务的内容和触发时间\n\n"
         "时间格式：ISO 8601 带时区，如 2026-06-08T08:00:00+08:00\n"
-        "多个时间用逗号分隔"
+        "多个时间用逗号分隔，最多 10 个"
     )
 
     if not parts:
@@ -203,48 +203,31 @@ async def handle_timer(bot, event, matcher, args: Message) -> None:
     sub = parts[0].lower()
 
     if sub == "list":
-        tasks = store.list_tasks_by_group(event.group_id)
-        if not tasks:
-            await matcher.finish("当前群没有定时任务。")
-        tz_shanghai = timezone(timedelta(hours=8))
+        if len(parts) > 2:
+            await matcher.finish(f"群号必须是正整数。\n\n{HELP}")
+            return
+        if len(parts) == 1:
+            await matcher.finish(await get_timer_overview())
+            return
 
-        # Look up user names (cache per user_id for tasks sharing the same owner)
-        from ..utils import get_group_member_name
-
-        user_names: dict[int, str] = {}
         try:
-            for task in tasks:
-                uid = task["user_id"]
-                if uid not in user_names:
-                    user_names[uid] = await get_group_member_name(
-                        bot, event.group_id, uid
-                    )
-        except Exception:
-            pass
+            target_group_id = int(parts[1])
+        except ValueError:
+            await matcher.finish(f"群号必须是正整数。\n\n{HELP}")
+            return
+        if target_group_id <= 0:
+            await matcher.finish(f"群号必须是正整数。\n\n{HELP}")
+            return
 
-        lines = ["当前群的定时任务："]
-        for task in tasks:
-            tid = task["id"]
-            uid = task["user_id"]
-            prompt = task["prompt"][:50]
-            owner = user_names.get(uid, str(uid))
-            triggers = store.get_triggers_for_task(tid)
-            trigger_strs = []
-            for t in triggers:
-                ts = datetime.fromtimestamp(t["trigger_at"], tz=tz_shanghai).strftime(
-                    "%m/%d %H:%M"
-                )
-                status = "✓" if t["fired"] else "○"
-                trigger_strs.append(f"{status} {ts}")
-            if uid == 0:
-                lines.append(
-                    f"\n[{tid}]: {prompt}\n" + "  ".join(trigger_strs)
-                )
-            else:
-                lines.append(
-                f"\n[{tid}] @{owner}({uid}): {prompt}\n" + "  ".join(trigger_strs)
-            )
-        await matcher.finish("\n".join(lines))
+        if target_group_id != event.group_id:
+            from ..config import ADMIN_QQ_ID
+
+            if str(event.get_user_id()) != str(ADMIN_QQ_ID):
+                await matcher.finish("只有管理员可以查看其他群的定时任务。")
+                return
+
+        await matcher.finish(await get_timer_overview(target_group_id))
+        return
 
     elif sub == "delete":
         if len(parts) < 2:
@@ -264,7 +247,6 @@ async def handle_timer(bot, event, matcher, args: Message) -> None:
         if task is None:
             await matcher.finish(f"任务 ID {task_id} 不存在。")
             return
-
         if task["group_id"] != event.group_id:
             await matcher.finish(f"任务 ID {task_id} 不属于当前群。")
             return
@@ -291,6 +273,9 @@ async def handle_timer(bot, event, matcher, args: Message) -> None:
         if task is None:
             await matcher.finish(f"任务 ID {task_id} 不存在。")
             return
+        if task["group_id"] != event.group_id:
+            await matcher.finish(f"任务 ID {task_id} 不属于当前群。")
+            return
 
         rest = " ".join(parts[2:])
         if "@" not in rest:
@@ -300,30 +285,20 @@ async def handle_timer(bot, event, matcher, args: Message) -> None:
         if not new_prompt:
             await matcher.finish("任务内容不能为空。")
 
-        trigger_times: list[float] = []
-        for ts in times_str.split(","):
-            ts = ts.strip()
-            if ts:
-                try:
-                    dt = datetime.fromisoformat(ts)
-                    trigger_times.append(dt.timestamp())
-                except ValueError:
-                    await matcher.finish(
-                        f"无效的时间格式：{ts}\n请使用 ISO 8601 格式。\n\n{HELP}"
-                    )
-
+        trigger_times = [value.strip() for value in times_str.split(",") if value.strip()]
         if not trigger_times:
             await matcher.finish("请至少提供一个触发时间。")
-
-        errors = store.validate_trigger_times(trigger_times)
-        if errors:
-            await matcher.finish("\n".join(errors))
         prompt_err = store.validate_prompt(new_prompt)
         if prompt_err:
             await matcher.finish(prompt_err)
+        try:
+            plan = build_at_plan(trigger_times)
+        except ScheduleValidationError as exc:
+            await matcher.finish(str(exc))
+            return
 
         cancel_task_jobs(task_id, store)
-        store.update_task(task_id, new_prompt, trigger_times)
+        store.replace_task_with_exact_plan(task_id, new_prompt, plan)
         add_jobs_for_task(task_id, store)
 
         await matcher.finish(f"✅ 定时任务（ID: {task_id}）已更新。")

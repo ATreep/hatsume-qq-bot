@@ -16,6 +16,23 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 PLUGIN_BASE = ROOT / "hatsume/plugins/hatsume-plugin"
 
+_ISOLATED_PREFIXES = (
+    "hatsume",
+    "langchain",
+    "langchain_core",
+    "langchain_openai",
+    "openai",
+    "nonebot",
+    "volcenginesdkarkruntime",
+    "PIL",
+    "requests",
+    "pydantic",
+    "pydantic_settings",
+    "dotenv",
+    "tenacity",
+    "jsonpatch",
+)
+
 
 # ---------------------------------------------------------------------------
 # Module loading helpers
@@ -23,26 +40,22 @@ PLUGIN_BASE = ROOT / "hatsume/plugins/hatsume-plugin"
 
 def _cleanup():
     for name in list(sys.modules):
-        if any(
-            name.startswith(p)
-            for p in (
-                "hatsume",
-                "langchain",
-                "langchain_core",
-                "langchain_openai",
-                "openai",
-                "nonebot",
-                "volcenginesdkarkruntime",
-                "PIL",
-                "requests",
-                "pydantic",
-                "pydantic_settings",
-                "dotenv",
-                "tenacity",
-                "jsonpatch",
-            )
-        ):
+        if any(name.startswith(prefix) for prefix in _ISOLATED_PREFIXES):
             del sys.modules[name]
+
+
+@pytest.fixture
+def isolated_models():
+    previous = {
+        name: module
+        for name, module in sys.modules.items()
+        if any(name.startswith(prefix) for prefix in _ISOLATED_PREFIXES)
+    }
+    try:
+        yield _setup()
+    finally:
+        _cleanup()
+        sys.modules.update(previous)
 
 
 def _setup():
@@ -93,8 +106,8 @@ class TestThoughtSignatureRoundTrip:
     """Verify thought_signature survives convert_dict → convert_msg round-trip."""
 
     @pytest.fixture(autouse=True)
-    def _setup(self):
-        self.models = _setup()
+    def _setup(self, isolated_models):
+        self.models = isolated_models
 
     def test_patch_applied(self):
         """Monkey-patch replaces both conversion functions."""
@@ -186,8 +199,8 @@ class TestAdvanceModelSelection:
     """Verify runtime model selection still uses the standard provider factory."""
 
     @pytest.fixture(autouse=True)
-    def _setup(self):
-        self.models = _setup()
+    def _setup(self, isolated_models):
+        self.models = isolated_models
 
     def test_runtime_model_name_is_forwarded_to_standard_factory(self):
         captured_calls: list[tuple[str, str | None]] = []
