@@ -16,7 +16,6 @@ from nonebot.adapters.onebot.v11 import GroupMessageEvent, Message, MessageEvent
 from PIL import Image
 
 from ..config import (
-    CONTEXT_QUEUE_LEN,
     IMAGE_MAX_PIXELS,
     IMAGE_MAX_SIZE_BYTES,
     MESSAGE_MAX_LENGTH,
@@ -371,7 +370,6 @@ async def start_new_conversation(
     conv_state.end_requested = False
 
     configure_tools_fn(
-        conv_state.retrieved_mem_keys,
         user_id,
         answer_fn=ai_callback,
         is_video_rate_limited=conv_state.is_video_rate_limited,
@@ -617,27 +615,13 @@ async def user_chat_handle(bot: Bot, event: GroupMessageEvent, user_chat_matcher
         session_id=event.get_session_id(),
     )
 
-    if not conv_state.is_chatting:
-        try:
-            idle_messages, idle_source_entry = await get_human_message(bot, event)
-            conv_state.idle_queue.extend(idle_messages)
-            conv_state.idle_source_queue.append(idle_source_entry)
-        except Exception:
-            await user_chat_matcher.finish()
-
-        if len(conv_state.idle_queue) >= CONTEXT_QUEUE_LEN:
-            print("idle queue full, flushing to auxiliary")
-            conv_state.flush_idle_to_auxiliary()
-        return
-
     session_id = event.get_session_id()
-    if session_id in conv_state.chat_peers:
-        print("Detected chat peers.")
-    else:
+    if session_id not in conv_state.chat_peers:
         auxiliary_messages, auxiliary_source_entry = await get_human_message(bot, event)
         append_auxiliary_message(auxiliary_messages, [auxiliary_source_entry])
         print("Collected this auxiliary message.")
         return
+    print("Detected chat peers.")
 
     pending_messages, pending_source_entry = await get_human_message(bot, event)
     conv_state.pending_queue.extend(pending_messages)

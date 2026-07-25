@@ -663,8 +663,7 @@ def test_finish_conversation_node_calls_cleanup_persistent_container():
 
 def test_finish_conversation_node_saves_to_auxiliary_queue():
     """finish_conversation_node saves the conversation transcript to the
-    module-level auxiliary_messages_queue via append_auxiliary_message,
-    and clears module-level _retrieved_mem_keys."""
+    module-level auxiliary_messages_queue via append_auxiliary_message."""
     nodes = _load_nodes_module()
 
     # Ensure module-level queues are clean
@@ -691,9 +690,6 @@ def test_finish_conversation_node_saves_to_auxiliary_queue():
     # The queue may be compacted (CONTEXT_QUEUE_LEN=0 triggers compaction immediately).
     assert len(nodes.auxiliary_messages_queue) >= 1
     assert "历史聊天记录总结" in nodes.auxiliary_messages_queue[0]["text"]
-
-    # _retrieved_mem_keys should be cleared (append_auxiliary_message clears it on compaction)
-    assert len(nodes._retrieved_mem_keys) == 0
 
     # is_graph_running should be reset
     assert mock_state.is_graph_running is False
@@ -981,14 +977,14 @@ def test_human_node_does_not_merge_or_clear_auxiliary_queue():
 
 
 # -----------------------------------------------------------------------
-# Feature: ai_node consumes and merges the auxiliary queue
+# Feature: ai_node snapshots and merges the auxiliary queue
 # -----------------------------------------------------------------------
 
 
 def test_ai_node_merges_auxiliary_queue_for_chat_agent_only():
     """ai_node should merge auxiliary_messages_queue with the
     latest human message when invoking chat_agent, without mutating
-    state["messages"][-1], and clear the module-level auxiliary queues."""
+    state["messages"][-1] or clearing the module-level auxiliary queues."""
     nodes = _load_nodes_module()
 
     nodes.auxiliary_messages_queue.clear()
@@ -1026,21 +1022,27 @@ def test_ai_node_merges_auxiliary_queue_for_chat_agent_only():
 
     try:
         asyncio.run(nodes.ai_node({"messages": [human_msg]}))
+        asyncio.run(nodes.ai_node({"messages": [human_msg]}))
 
-        sent_last_msg = captured_invocations[0]["messages"][-1]
-        assert sent_last_msg.content == [
-            {"type": "text", "text": "## 背景聊天记录："},
-            {"type": "text", "text": "aux part"},
-            {"type": "text", "text": "## 当前聊天记录："},
-            {"type": "text", "text": "current turn"},
-        ]
+        assert len(captured_invocations) == 2
+        for invocation in captured_invocations:
+            sent_last_msg = invocation["messages"][-1]
+            assert sent_last_msg.content == [
+                {"type": "text", "text": "## 背景聊天记录："},
+                {"type": "text", "text": "aux part"},
+                {"type": "text", "text": "## 当前聊天记录："},
+                {"type": "text", "text": "current turn"},
+            ]
 
         # The original state message must be untouched (no permanent mutation)
         assert human_msg.content == [{"type": "text", "text": "current turn"}]
 
-        # Module-level aux queue must be cleared after consumption
-        assert nodes.auxiliary_messages_queue == []
-        assert nodes.auxiliary_source_queue == []
+        assert nodes.auxiliary_messages_queue == [
+            {"type": "text", "text": "aux part"}
+        ]
+        assert nodes.auxiliary_source_queue == [
+            {"source_id": "aux-1", "text": "aux source text", "people": []}
+        ]
     finally:
         nodes.create_agent = original_create_agent
 
@@ -1379,10 +1381,11 @@ def test_ai_node_queries_backward_with_even_split():
     text_parts = [{"type": "text", "text": f"part-{i}"} for i in range(n_parts)]
 
     query_calls: list[tuple[str, int | None]] = []
+    captured_invocations: list[dict] = []
 
     def mock_query_memory(text: str, **kw) -> str:
         query_calls.append((text, kw.get("max_results")))
-        return f"memory-for-{text}"
+        return "shared-memory"
 
     original_query_memory = nodes.query_memory
     nodes.query_memory = mock_query_memory
@@ -1392,7 +1395,8 @@ def test_ai_node_queries_backward_with_even_split():
     class _FakeAgent:
         def with_retry(self, **kw):
             return self
-        async def ainvoke(self, *a, **kw):
+        async def ainvoke(self, payload, *a, **kw):
+            captured_invocations.append(payload)
             return {"messages": [types.SimpleNamespace(content="ok", type="ai")]}
 
     nodes.create_agent = lambda *a, **kw: _FakeAgent()
@@ -1417,6 +1421,8 @@ def test_ai_node_queries_backward_with_even_split():
         # Each gets max_results = 50 // 5 = 10
         for text, max_res in query_calls:
             assert max_res == 10, f"Expected max_results=10 for {text}, got {max_res}"
+        memory_prompt = captured_invocations[0]["messages"][0].content
+        assert memory_prompt.count("shared-memory") == 5
     finally:
         nodes.query_memory = original_query_memory
         nodes.create_agent = original_create_agent
@@ -1755,20 +1761,14 @@ def test_face_tag_stripped_from_user_text_preserved_in_aimessage():
 
 
 # -----------------------------------------------------------------------
-# Bug 5: _retrieved_mem_keys should be cleared on auxiliary compaction
+# Auxiliary queue compaction and fallback
 # -----------------------------------------------------------------------
 
 
-def test_append_auxiliary_message_clears_retrieved_mem_keys_on_compaction():
-    """When auxiliary_messages_queue exceeds 80 and compaction runs,
-    _retrieved_mem_keys must be cleared so the compacted summary
-    can trigger fresh memory retrieval."""
+def test_append_auxiliary_message_compacts_when_queue_exceeds_limit():
+    """Queue overflow should compact retained auxiliary context to a summary."""
     nodes = _load_nodes_module()
-
-    # Pre-populate _retrieved_mem_keys to simulate prior retrieval
-    nodes._retrieved_mem_keys.add("key-a")
-    nodes._retrieved_mem_keys.add("key-b")
-    assert len(nodes._retrieved_mem_keys) == 2
+    nodes.CONTEXT_QUEUE_LEN = 80
 
     # Pre-populate auxiliary queue to be just under the threshold
     nodes.auxiliary_messages_queue.clear()
@@ -1793,31 +1793,26 @@ def test_append_auxiliary_message_clears_retrieved_mem_keys_on_compaction():
         assert len(nodes.auxiliary_messages_queue) == 1
         assert "历史聊天记录总结" in nodes.auxiliary_messages_queue[0]["text"]
 
-        # _retrieved_mem_keys should be cleared
-        assert len(nodes._retrieved_mem_keys) == 0, (
-            "_retrieved_mem_keys should be cleared after compaction"
-        )
+        assert nodes.auxiliary_source_queue == []
     finally:
         nodes.get_mini_model = original_model
-        nodes._retrieved_mem_keys.clear()
         nodes.auxiliary_messages_queue.clear()
         nodes.auxiliary_source_queue.clear()
 
 
-def test_append_auxiliary_message_clears_retrieved_mem_keys_on_compaction_failure():
-    """When compaction fails and truncation occurs,
-    _retrieved_mem_keys must still be cleared."""
+def test_append_auxiliary_message_compaction_failure_keeps_configured_tail():
+    """Failed compaction should retain the newest CONTEXT_QUEUE_LEN messages."""
     nodes = _load_nodes_module()
-
-    # Pre-populate _retrieved_mem_keys
-    nodes._retrieved_mem_keys.add("stale-key")
-    assert len(nodes._retrieved_mem_keys) == 1
+    nodes.CONTEXT_QUEUE_LEN = 3
 
     # Pre-populate auxiliary queue to threshold
     nodes.auxiliary_messages_queue.clear()
     nodes.auxiliary_source_queue.clear()
-    for i in range(79):
+    for i in range(3):
         nodes.auxiliary_messages_queue.append({"type": "text", "text": f"msg-{i}"})
+    nodes.auxiliary_source_queue.append(
+        {"source_id": "old", "text": "old source", "people": []}
+    )
 
     # Stub both models to raise an exception (forcing the failure path)
     # The compaction code randomly picks mini (2/3) or lite (1/3), so both must fail.
@@ -1833,20 +1828,18 @@ def test_append_auxiliary_message_clears_retrieved_mem_keys_on_compaction_failur
 
     try:
         nodes.append_auxiliary_message([
-            {"type": "text", "text": "msg-79"},
-            {"type": "text", "text": "msg-80"},
+            {"type": "text", "text": "msg-3"},
+            {"type": "text", "text": "msg-4"},
         ])
 
-        # On failure, queue should be truncated to last 50
-        assert len(nodes.auxiliary_messages_queue) == 50
-
-        # _retrieved_mem_keys should still be cleared
-        assert len(nodes._retrieved_mem_keys) == 0, (
-            "_retrieved_mem_keys should be cleared even on compaction failure"
-        )
+        assert nodes.auxiliary_messages_queue == [
+            {"type": "text", "text": "msg-2"},
+            {"type": "text", "text": "msg-3"},
+            {"type": "text", "text": "msg-4"},
+        ]
+        assert nodes.auxiliary_source_queue == []
     finally:
         nodes.get_mini_model = original_mini
         nodes.get_lite_model = original_lite
-        nodes._retrieved_mem_keys.clear()
         nodes.auxiliary_messages_queue.clear()
         nodes.auxiliary_source_queue.clear()

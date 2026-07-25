@@ -45,7 +45,6 @@ class ConversationState:
     # Graph state
     is_graph_running: bool = False
     _graph_task: Any = None  # asyncio.Task | None — set in start_new_conversation
-    retrieved_mem_keys: set[str] = field(default_factory=set)
     face_cooling_count: int = 0
     current_query_user_id: int | None = None
 
@@ -93,8 +92,3 @@ class ConversationState:
         self.pending_queue.clear()
         self.pending_source_queue.clear()
         return messages, sources
-
-    def reset_memory_context(self) -> None:
-        self.transcript.clear()
-        self.source_map.clear()
-        self.retrieved_mem_keys.clear()

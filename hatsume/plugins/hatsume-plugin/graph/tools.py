@@ -90,7 +90,6 @@ def tool(*args: Any, **kwargs: Any) -> Any:
 # Deferred references — set by the graph layer before use
 # ---------------------------------------------------------------------------
 _ai_answer: Any = None
-_retrieved_mem_keys: set[str] = set()
 _current_memory_query_user_id: int | None = None
 _end_conversation_callback: Callable[[], None] | None = None
 _generate_video_used: bool = False
@@ -154,7 +153,6 @@ def set_current_group_id(group_id: int | None) -> None:
 
 
 def configure_tool_callbacks(
-    retrieved_keys: set[str],
     query_user_id: int | None,
     answer_fn: Any = None,
     is_video_rate_limited: Callable[[], bool] | None = None,
@@ -163,12 +161,11 @@ def configure_tool_callbacks(
     update_generate_image_time: Callable[[], None] | None = None,
     end_conversation_fn: Callable[[], None] | None = None,
 ) -> None:
-    global _ai_answer, _retrieved_mem_keys, _current_memory_query_user_id
+    global _ai_answer, _current_memory_query_user_id
     global _is_video_rate_limited, _update_video_time
     global _is_generate_image_rate_limited, _update_generate_image_time
     global _end_conversation_callback
     _ai_answer = answer_fn
-    _retrieved_mem_keys = retrieved_keys
     _current_memory_query_user_id = query_user_id
     _end_conversation_callback = end_conversation_fn
     if is_video_rate_limited is not None:
@@ -209,8 +206,6 @@ def query_memory(query: str, user_ids: list[int] | None = None, max_results: int
     results = query_mems(
         str(query), user_ids=user_ids, max_limit=max_results
     )
-    results = [(c, t) for c, t in results if c not in _retrieved_mem_keys]
-    _retrieved_mem_keys.update(c for c, _ in results)
 
     if len(results) > 0:
         formatted = []

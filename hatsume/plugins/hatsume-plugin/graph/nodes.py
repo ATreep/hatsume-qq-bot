@@ -63,7 +63,6 @@ REPLY_DIRECTIVE_PATTERN = re.compile(r"\[reply:\s*([^\]\r\n]*)\]")
 # ---------------------------------------------------------------------------
 auxiliary_messages_queue: list[dict] = []
 auxiliary_source_queue: list[dict] = []
-_retrieved_mem_keys: set[str] = set()
 _face_cooling_count: int = 0
 _current_memory_query_user_id: int | None = None
 
@@ -372,22 +371,18 @@ def append_auxiliary_message(
                 {"type": "text", "text": "### 历史聊天记录总结：" + summary}
             )
             auxiliary_source_queue.clear()
-            _retrieved_mem_keys.clear()
         except Exception:
             print("❌ Failed to summarize auxiliary messages")
             traceback.print_exc()
-            del auxiliary_messages_queue[: len(auxiliary_messages_queue) - 50]
+            overflow = len(auxiliary_messages_queue) - CONTEXT_QUEUE_LEN
+            if overflow > 0:
+                del auxiliary_messages_queue[:overflow]
             auxiliary_source_queue.clear()
-            _retrieved_mem_keys.clear()
 
 
-def _consume_auxiliary_queue() -> tuple[list[dict], list[dict]]:
-    """Snapshot and clear the module-level auxiliary queues."""
-    aux_queue = auxiliary_messages_queue.copy()
-    aux_sources = auxiliary_source_queue.copy()
-    auxiliary_messages_queue.clear()
-    auxiliary_source_queue.clear()
-    return aux_queue, aux_sources
+def _snapshot_auxiliary_queue() -> tuple[list[dict], list[dict]]:
+    """Return a non-destructive snapshot of the auxiliary queues."""
+    return auxiliary_messages_queue.copy(), auxiliary_source_queue.copy()
 
 
 
@@ -423,10 +418,6 @@ def _set_current_query_user_id(uid: int | None) -> None:
 
 def set_current_query_user_id(uid: int | None) -> None:
     _set_current_query_user_id(uid)
-
-
-def get_retrieved_keys() -> set[str]:
-    return _retrieved_mem_keys
 
 
 # ===========================================================================
@@ -538,7 +529,7 @@ async def ai_node(state: MessagesState) -> dict:
 
     print("Start building historical recording from auxiliary queue...")
 
-    aux_queue, aux_sources = _consume_auxiliary_queue()
+    aux_queue, aux_sources = _snapshot_auxiliary_queue()
     if aux_queue:
         last_human_content = state["messages"][-1].content
         if isinstance(last_human_content, str):
@@ -777,7 +768,6 @@ async def finish_conversation_node(state: MessagesState) -> dict:
 
     _set_graph_running(False)
     _clear_human_queue()
-    _retrieved_mem_keys.clear()
     if _state is not None:
         _state.end_requested = False
 

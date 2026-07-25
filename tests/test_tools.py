@@ -820,7 +820,7 @@ class TestGenerateImageRateLimit:
 
         def update_time():
             return None
-        tools.configure_tool_callbacks(set(), None, answer_fn=None)
+        tools.configure_tool_callbacks(None, answer_fn=None)
         # Set the new callbacks
         tools._is_generate_image_rate_limited = rate_limited
         tools._update_generate_image_time = update_time
@@ -845,7 +845,7 @@ class TestGenerateImageRateLimit:
         import random as _random
         _orig_random = _random.random
         _random.random = lambda: 0.0
-        tools.configure_tool_callbacks(set(), None, answer_fn=None)
+        tools.configure_tool_callbacks(None, answer_fn=None)
         tools._is_generate_image_rate_limited = rate_limited
         tools._update_generate_image_time = update_time
 
@@ -897,7 +897,7 @@ class TestGenerateImageRateLimit:
         original_random = random.random
         random.random = lambda: 0.0
 
-        tools.configure_tool_callbacks(set(), None, answer_fn=None)
+        tools.configure_tool_callbacks(None, answer_fn=None)
         tools._is_generate_image_rate_limited = rate_limited
         tools._update_generate_image_time = update_time
 
@@ -1724,7 +1724,6 @@ async def test_generate_video_returns_url_without_sending():
     models_mod.generate_video_for = AsyncMock(return_value="https://example.com/out.mp4")
     update_called = []
     tools.configure_tool_callbacks(
-        set(),
         None,
         answer_fn=AsyncMock(),
         is_video_rate_limited=lambda: False,
@@ -1777,8 +1776,6 @@ class TestQueryMemoryTimestamps:
         tools.get_mem_list = mem_store.get_mem_list
         tools.query_mems = mem_retrieval.query_mems
 
-        tools._retrieved_mem_keys.clear()
-
         result = tools.query_memory("cats")
 
         assert "- (" in result
@@ -1794,9 +1791,8 @@ class TestQueryMemoryTimestamps:
         tools.get_mem_list = mem_store.get_mem_list
         tools.query_mems = mem_retrieval.query_mems
 
-    def test_query_memory_dedup_uses_content_only(self):
-        """_retrieved_mem_keys should track content strings, not formatted strings,
-        so dedup works correctly across multiple calls."""
+    def test_query_memory_allows_repeated_results_across_calls(self):
+        """Each query should return every result supplied by query_mems."""
         tools = _load_tools_module()
 
 
@@ -1815,21 +1811,14 @@ class TestQueryMemoryTimestamps:
         tools.get_mem_list = mem_store.get_mem_list
         tools.query_mems = mem_retrieval.query_mems
 
-        tools._retrieved_mem_keys.clear()
-
         result1 = tools.query_memory("query1")
         assert "memory-A" in result1
         assert "memory-B" in result1
 
         result2 = tools.query_memory("query2")
-        assert "memory-A" not in result2
+        assert "memory-A" in result2
         assert "memory-C" in result2
-
-        assert "memory-A" in tools._retrieved_mem_keys
-        assert "memory-B" in tools._retrieved_mem_keys
-        assert "memory-C" in tools._retrieved_mem_keys
-        for key in tools._retrieved_mem_keys:
-            assert "- (" not in key, f"Dedup key should be content only, got: {key}"
+        assert not hasattr(tools, "_retrieved_mem_keys")
 
         # Restore
         mem_store.get_mem_list = lambda: []
@@ -1857,9 +1846,8 @@ class TestQueryMemoryTimestamps:
         mem_store.get_mem_list = lambda: []
         tools.get_mem_list = mem_store.get_mem_list
 
-    def test_query_memory_all_deduped_returns_empty(self):
-        """When all returned memories are already in _retrieved_mem_keys,
-        query_memory returns empty string."""
+    def test_query_memory_returns_same_memory_on_every_call(self):
+        """A memory returned previously remains eligible for later queries."""
         tools = _load_tools_module()
 
 
@@ -1873,11 +1861,10 @@ class TestQueryMemoryTimestamps:
         tools.get_mem_list = mem_store.get_mem_list
         tools.query_mems = mem_retrieval.query_mems
 
-        tools._retrieved_mem_keys.clear()
-        tools._retrieved_mem_keys.add("already-seen")
-
-        result = tools.query_memory("query")
-        assert result == ""
+        first = tools.query_memory("query")
+        second = tools.query_memory("query")
+        assert "already-seen" in first
+        assert "already-seen" in second
 
         # Restore
         mem_store.get_mem_list = lambda: []
@@ -1914,7 +1901,6 @@ def test_end_conversation_calls_configured_callback():
     tools = _load_tools_module()
     callback = MagicMock()
     tools.configure_tool_callbacks(
-        set(),
         query_user_id=None,
         end_conversation_fn=callback,
     )
@@ -1977,7 +1963,7 @@ def test_create_character_proxy_uses_explicit_user_id_and_valid_duration(
     utils = sys.modules["hatsume.plugins.hatsume-plugin.utils"]
     utils.get_group_member_name = AsyncMock(return_value="Target")
     tools.set_current_group_id(456)
-    tools.configure_tool_callbacks(set(), query_user_id=111)
+    tools.configure_tool_callbacks(query_user_id=111)
 
     result = asyncio.run(
         tools.create_character_proxy(proxied_user_id=222, **duration_args)

@@ -218,6 +218,7 @@ def _load_conversation_module():
         tools_mod.configure_agent_notification_callback = MagicMock()
         tools_mod.configure_tool_callbacks = MagicMock()
         sys.modules[tools_name] = tools_mod
+    sys.modules[tools_name].set_current_group_id = MagicMock()
 
     # Stub nonebot.adapters (imported by chat.py)
     if "nonebot" not in sys.modules:
@@ -359,6 +360,38 @@ def test_get_human_message_passes_forward_event_message_id():
     asyncio.run(dialogue.get_human_message(MagicMock(), event))
 
     assert dialogue.build_forward_json.call_args.kwargs["message_id"] == 654
+
+
+def test_non_peer_messages_always_enter_auxiliary_queue():
+    dialogue = _load_conversation_module()
+    normalized = [{"type": "text", "text": "non-peer"}]
+    source = {"source_id": "m1", "text": "non-peer", "people": []}
+    dialogue.get_human_message = AsyncMock(return_value=(normalized, source))
+    dialogue.append_auxiliary_message.reset_mock()
+
+    character_proxy_name = "hatsume.plugins.hatsume-plugin.character_proxy"
+    character_proxy = types.ModuleType(character_proxy_name)
+    character_proxy.activate_character_proxy_peer = MagicMock()
+    sys.modules[character_proxy_name] = character_proxy
+
+    event = types.SimpleNamespace(
+        group_id=7,
+        user_id=42,
+        original_message=[],
+        get_session_id=lambda: "group_7_42",
+    )
+    matcher = types.SimpleNamespace(finish=AsyncMock())
+
+    for is_chatting in (False, True):
+        dialogue.conv_state.is_chatting = is_chatting
+        dialogue.conv_state.chat_peers = {"group_7_other"} if is_chatting else set()
+        asyncio.run(dialogue.user_chat_handle(MagicMock(), event, matcher))
+
+    assert dialogue.append_auxiliary_message.call_count == 2
+    dialogue.append_auxiliary_message.assert_called_with(normalized, [source])
+    assert dialogue.conv_state.idle_queue == []
+    assert dialogue.conv_state.pending_queue == []
+    assert dialogue.conv_state.human_queue == []
 
 
 def test_handle_ai_message_prepends_reply_segment():

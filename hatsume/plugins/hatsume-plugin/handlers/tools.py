@@ -418,7 +418,8 @@ async def handle_clear(matcher) -> None:
     _conv_state.human_source_queue.clear()
 
     # Reset memory recording context
-    _conv_state.reset_memory_context()
+    _conv_state.transcript.clear()
+    _conv_state.source_map.clear()
 
     # Reset runtime flags
     _conv_state.is_graph_running = False
