@@ -81,6 +81,25 @@ class TestMessageToJson:
         assert result["reply_to"] is not None
         assert result["reply_to"]["user"]["name"] == "张三"
 
+    def test_message_with_message_id(self):
+        result = self.utils.message_to_json(
+            user_name="张三",
+            user_id=123456,
+            content="可回复消息",
+            msg_time="2026/07/25 12:00:00",
+            message_id=987654,
+        )
+        assert result["message_id"] == 987654
+
+    def test_message_without_message_id_omits_field(self):
+        result = self.utils.message_to_json(
+            user_name="张三",
+            user_id=123456,
+            content="合成消息",
+            msg_time="",
+        )
+        assert "message_id" not in result
+
     def test_message_with_depth(self):
         result = self.utils.message_to_json(
             user_name="王五", user_id=333,
@@ -135,3 +154,13 @@ class TestBuildForwardJson:
         json_str = json.dumps(result, ensure_ascii=False)
         parsed = json.loads(json_str)
         assert parsed["type"] == "forward"
+
+    def test_top_level_forward_with_message_id(self):
+        result = self.utils.build_forward_json(
+            "转发者", 111, [], "2026/07/25 12:01:00", message_id=987655
+        )
+        assert result["message_id"] == 987655
+
+    def test_forward_without_message_id_omits_field(self):
+        result = self.utils.build_forward_json("转发者", 111, [], "")
+        assert "message_id" not in result

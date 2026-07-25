@@ -216,15 +216,25 @@ async def get_human_message(bot: Bot, event: MessageEvent) -> tuple[list[dict], 
                     source_people.append(person)
 
     msg_time = get_date()
+    message_id = int(event.message_id)
 
     # Build JSON message text
     if forward_messages is not None:
         msg_json = build_forward_json(
-            user_name, event.user_id, forward_messages, msg_time,
+            user_name,
+            event.user_id,
+            forward_messages,
+            msg_time,
+            message_id=message_id,
         )
     else:
         msg_json = message_to_json(
-            user_name, event.user_id, plain_message, msg_time, reply_to=reply_to,
+            user_name,
+            event.user_id,
+            plain_message,
+            msg_time,
+            reply_to=reply_to,
+            message_id=message_id,
         )
 
     rendered_text = json.dumps(msg_json, ensure_ascii=False)
@@ -295,15 +305,16 @@ def _start_conv_for_trigger(
     bot = get_bot()
     set_current_group_id(group_id)
 
-    async def _send_to_group(msg):
+    async def _send_to_group(msg, reply_to_message_id=None):
         if msg == "[CONVERSATION END]":
             conv_state.end_conversation()
             return
         try:
-            segments, force_message = await _build_ai_response_segments(msg, group_id)
-            await bot.send_group_msg(
-                group_id=group_id,
-                message=_message_payload_for_segments(segments, force_message),
+            await _send_group_ai_message(
+                bot,
+                group_id,
+                msg,
+                reply_to_message_id=reply_to_message_id,
             )
         except Exception as e:
             print(f"❌ _send_to_group failed: group={group_id} err={e}")
@@ -456,40 +467,84 @@ async def _build_text_response_segments(
 async def _build_ai_response_segments(
     msg: str | Message | MessageSegment,
     group_id: int | None,
+    reply_to_message_id: int | None = None,
 ) -> tuple[list[Any], bool]:
     if isinstance(msg, str):
-        return await _build_text_response_segments(msg, group_id)
-
-    if _is_text_segment(msg):
-        return await _build_text_response_segments(str(msg.data.get("text", "")), group_id)
-
-    if _segment_type(msg):
-        return [msg], False
-
-    try:
-        raw_segments = list(msg)  # type: ignore[arg-type]
-    except TypeError:
-        return [msg], False
-
-    output: list[Any] = []
-    force_message = False
-    for seg in raw_segments:
-        if _is_text_segment(seg):
-            built, force = await _build_text_response_segments(
-                str(seg.data.get("text", "")), group_id,
-            )
-            output.extend(built)
-            force_message = force_message or force
+        segments, force_message = await _build_text_response_segments(msg, group_id)
+    elif _is_text_segment(msg):
+        segments, force_message = await _build_text_response_segments(
+            str(msg.data.get("text", "")),
+            group_id,
+        )
+    elif _segment_type(msg):
+        segments, force_message = [msg], False
+    else:
+        try:
+            raw_segments = list(msg)  # type: ignore[arg-type]
+        except TypeError:
+            segments, force_message = [msg], False
         else:
-            output.append(seg)
-    return output, force_message
+            segments = []
+            force_message = False
+            for seg in raw_segments:
+                if _is_text_segment(seg):
+                    built, force = await _build_text_response_segments(
+                        str(seg.data.get("text", "")),
+                        group_id,
+                    )
+                    segments.extend(built)
+                    force_message = force_message or force
+                else:
+                    segments.append(seg)
+
+    if reply_to_message_id is not None and segments:
+        return [MessageSegment.reply(reply_to_message_id), *segments], True
+    return segments, force_message
+
+
+async def _send_group_ai_message(
+    bot: Bot,
+    group_id: int,
+    msg: str | Message | MessageSegment,
+    reply_to_message_id: int | None = None,
+) -> None:
+    """Send one AI response directly to a group with reply fallback."""
+    segments, force_message = await _build_ai_response_segments(
+        msg,
+        group_id,
+        reply_to_message_id=reply_to_message_id,
+    )
+    try:
+        await bot.send_group_msg(
+            group_id=group_id,
+            message=_message_payload_for_segments(segments, force_message),
+        )
+    except Exception:
+        if reply_to_message_id is None:
+            raise
+        print(
+            "Reply target rejected; retrying without reply segment: "
+            f"{reply_to_message_id}"
+        )
+        fallback_segments, fallback_force = await _build_ai_response_segments(
+            msg,
+            group_id,
+        )
+        await bot.send_group_msg(
+            group_id=group_id,
+            message=_message_payload_for_segments(
+                fallback_segments,
+                fallback_force,
+            )
+        )
 
 
 async def handle_ai_message(
     msg: str | Message | MessageSegment,
     matcher,
     group_id: int | None = None,
-    retry: int = 0
+    retry: int = 0,
+    reply_to_message_id: int | None = None,
 ) -> None:
     """Send AI response to the chat. Retries up to 5 times."""
     if retry >= 5:
@@ -504,7 +559,11 @@ async def handle_ai_message(
         print("Current conversation ends")
         return
 
-    segments, force_message = await _build_ai_response_segments(msg, group_id)
+    segments, force_message = await _build_ai_response_segments(
+        msg,
+        group_id,
+        reply_to_message_id=reply_to_message_id,
+    )
     if not segments:
         await matcher.send("（电波受到干扰...想要发出的内容丢失了...）")
         return
@@ -517,6 +576,19 @@ async def handle_ai_message(
                 await matcher.send(seg)
     except Exception as e:
         print("Send error: ", e)
+        if reply_to_message_id is not None:
+            print(
+                "Reply target rejected; retrying without reply segment: "
+                f"{reply_to_message_id}"
+            )
+            await handle_ai_message(
+                msg,
+                matcher,
+                group_id=group_id,
+                retry=retry,
+                reply_to_message_id=None,
+            )
+            return
         await asyncio.sleep(3)
         print(f"Retry sending message, {retry=}")
         await handle_ai_message(msg, matcher, group_id=group_id, retry=retry + 1)
@@ -595,8 +667,13 @@ async def user_chat_handle(bot: Bot, event: GroupMessageEvent, user_chat_matcher
 
             from ..graph.tools import configure_tool_callbacks as configure_tools
 
-            async def ai_cb(msg):
-                await handle_ai_message(msg, user_chat_matcher, group_id=event.group_id)
+            async def ai_cb(msg, reply_to_message_id=None):
+                await handle_ai_message(
+                    msg,
+                    user_chat_matcher,
+                    group_id=event.group_id,
+                    reply_to_message_id=reply_to_message_id,
+                )
 
             conv_state.ai_answer = ai_cb
             await start_new_conversation(

@@ -128,10 +128,15 @@ role_sys_prompt = f"""
 用户消息以 JSON 输入，通过 `type` 字段区分类型：
 
 ## 普通消息 (type: "message")
-字段：`time`(YYYY/MM/DD HH:mm:ss)、`user`(id+name)、`content`(文本或多模态数组)、`reply_to`(被回复消息，可为null)
+字段：`message_id`(真实QQ消息ID，仅顶层收到的消息出现)、`time`(YYYY/MM/DD HH:mm:ss)、`user`(id+name)、`content`(文本或多模态数组)、`reply_to`(被回复消息，可为null；其中不含message_id)
 
 ## 合并转发 (type: "forward")
-字段：`time`、`user`(转发者)、`messages`(子消息数组)、`depth`(嵌套层级，仅嵌套时出现)
+字段：`message_id`(仅顶层收到的合并转发出现)、`time`、`user`(转发者)、`messages`(子消息数组，子消息不含message_id)、`depth`(嵌套层级，仅嵌套时出现)
+
+# 回复某条消息
+如果需要原生回复某条可见的顶层用户消息，在回复开头插入且只插入一次：[reply: <message_id>]
+只能使用当前输入历史中真实出现的顶层 `message_id`，不要编造，也不要使用 `reply_to` 或合并转发子消息中的内容作为 ID。
+不需要原生回复时，不要输出该标记。
 
 # 提及某人
 用户通过 @XXX 提及某人，XXX 为昵称。

@@ -311,3 +311,187 @@ def test_handle_ai_message_puts_cq_at_segments_before_rendered_image():
     payload = matcher.send.await_args.args[0]
     assert [seg.type for seg in payload] == ["at", "image"]
     assert payload[0].data["qq"] == 123456
+
+
+def _make_received_event(dialogue, *, message_id: int, segments: list):
+    class _GroupEvent:
+        group_id = 7
+        user_id = 42
+        reply = None
+
+        def __init__(self):
+            self.message_id = message_id
+            self.original_message = dialogue.Message(segments)
+
+    dialogue.GroupMessageEvent = _GroupEvent
+    return _GroupEvent()
+
+
+def test_get_human_message_passes_normal_event_message_id():
+    dialogue = _load_conversation_module()
+    dialogue.message_to_json.reset_mock()
+    dialogue.message_to_json.return_value = {"type": "message"}
+    dialogue.has_forward_segment = MagicMock(return_value=None)
+    event = _make_received_event(
+        dialogue,
+        message_id=321,
+        segments=[types.SimpleNamespace(type="text", data={"text": "hello"})],
+    )
+
+    _, source = asyncio.run(dialogue.get_human_message(MagicMock(), event))
+
+    assert dialogue.message_to_json.call_args.kwargs["message_id"] == 321
+    assert source["source_id"] == "m321"
+
+
+def test_get_human_message_passes_forward_event_message_id():
+    dialogue = _load_conversation_module()
+    dialogue.build_forward_json.reset_mock()
+    dialogue.build_forward_json.return_value = {"type": "forward"}
+    dialogue.has_forward_segment = MagicMock(return_value="forward-1")
+    dialogue.resolve_forward_content = AsyncMock(return_value=[])
+    event = _make_received_event(
+        dialogue,
+        message_id=654,
+        segments=[types.SimpleNamespace(type="forward", data={"id": "forward-1"})],
+    )
+
+    asyncio.run(dialogue.get_human_message(MagicMock(), event))
+
+    assert dialogue.build_forward_json.call_args.kwargs["message_id"] == 654
+
+
+def test_handle_ai_message_prepends_reply_segment():
+    dialogue = _load_conversation_module()
+    text_seg = types.SimpleNamespace(type="text", data={"text": "answer"})
+    dialogue.auto_convert_text = AsyncMock(return_value=[text_seg])
+    dialogue.MessageSegment.reply = MagicMock(
+        side_effect=lambda message_id: types.SimpleNamespace(
+            type="reply", data={"id": message_id}
+        )
+    )
+    matcher = types.SimpleNamespace(send=AsyncMock())
+
+    asyncio.run(
+        dialogue.handle_ai_message(
+            "answer", matcher, reply_to_message_id=321
+        )
+    )
+
+    payload = matcher.send.await_args.args[0]
+    assert [seg.type for seg in payload] == ["reply", "text"]
+    assert payload[0].data["id"] == 321
+
+
+def test_handle_ai_message_reply_failure_falls_back_to_plain_send():
+    dialogue = _load_conversation_module()
+    text_seg = types.SimpleNamespace(type="text", data={"text": "answer"})
+    dialogue.auto_convert_text = AsyncMock(return_value=[text_seg])
+    dialogue.MessageSegment.reply = MagicMock(
+        side_effect=lambda message_id: types.SimpleNamespace(
+            type="reply", data={"id": message_id}
+        )
+    )
+    matcher = types.SimpleNamespace(
+        send=AsyncMock(side_effect=[RuntimeError("reply rejected"), None])
+    )
+
+    asyncio.run(
+        dialogue.handle_ai_message(
+            "answer", matcher, reply_to_message_id=321
+        )
+    )
+
+    assert matcher.send.await_count == 2
+    first_payload = matcher.send.await_args_list[0].args[0]
+    assert first_payload[0].type == "reply"
+    assert matcher.send.await_args_list[1].args[0] is text_seg
+
+
+def test_reply_segment_stays_first_with_cq_at_output():
+    dialogue = _load_conversation_module()
+    dialogue.auto_convert_text = AsyncMock(
+        return_value=[types.SimpleNamespace(type="text", data={"text": "hi @Treep"})]
+    )
+    dialogue.render_cq_at_placeholders = AsyncMock(
+        return_value=("hi @Treep", [123456])
+    )
+    dialogue.MessageSegment.text = MagicMock(
+        side_effect=lambda text: types.SimpleNamespace(
+            type="text", data={"text": text}
+        )
+    )
+    dialogue.MessageSegment.at = MagicMock(
+        side_effect=lambda uid: types.SimpleNamespace(type="at", data={"qq": uid})
+    )
+    dialogue.MessageSegment.reply = MagicMock(
+        side_effect=lambda message_id: types.SimpleNamespace(
+            type="reply", data={"id": message_id}
+        )
+    )
+    matcher = types.SimpleNamespace(send=AsyncMock())
+
+    asyncio.run(
+        dialogue.handle_ai_message(
+            "hi [CQ:at,qq=123456]",
+            matcher,
+            group_id=7,
+            reply_to_message_id=321,
+        )
+    )
+
+    payload = matcher.send.await_args.args[0]
+    assert [seg.type for seg in payload] == ["reply", "text", "at"]
+
+
+def test_reply_segment_stays_first_with_rendered_image_output():
+    dialogue = _load_conversation_module()
+    image_seg = types.SimpleNamespace(type="image", data={"file": "img"})
+    dialogue.auto_convert_text = AsyncMock(return_value=[image_seg])
+    dialogue.MessageSegment.reply = MagicMock(
+        side_effect=lambda message_id: types.SimpleNamespace(
+            type="reply", data={"id": message_id}
+        )
+    )
+    matcher = types.SimpleNamespace(send=AsyncMock())
+
+    asyncio.run(
+        dialogue.handle_ai_message(
+            "# rendered reply",
+            matcher,
+            group_id=7,
+            reply_to_message_id=321,
+        )
+    )
+
+    payload = matcher.send.await_args.args[0]
+    assert [seg.type for seg in payload] == ["reply", "image"]
+
+
+def test_direct_group_reply_failure_falls_back_to_plain_send(capsys):
+    dialogue = _load_conversation_module()
+    text_seg = types.SimpleNamespace(type="text", data={"text": "answer"})
+    dialogue.auto_convert_text = AsyncMock(return_value=[text_seg])
+    dialogue.MessageSegment.reply = MagicMock(
+        side_effect=lambda message_id: types.SimpleNamespace(
+            type="reply", data={"id": message_id}
+        )
+    )
+    bot = types.SimpleNamespace(
+        send_group_msg=AsyncMock(side_effect=[RuntimeError("reply rejected"), None])
+    )
+
+    asyncio.run(
+        dialogue._send_group_ai_message(
+            bot,
+            7,
+            "answer",
+            reply_to_message_id=321,
+        )
+    )
+
+    assert bot.send_group_msg.await_count == 2
+    first_payload = bot.send_group_msg.await_args_list[0].kwargs["message"]
+    assert first_payload[0].type == "reply"
+    assert bot.send_group_msg.await_args_list[1].kwargs["message"] is text_seg
+    assert "Reply target rejected" in capsys.readouterr().out

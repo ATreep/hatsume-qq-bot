@@ -139,6 +139,7 @@ handlers/dialogue.py 的 get_human_message() 把 OneBot 事件转换为统一 JS
 ~~~json
 {
   "type": "message",
+  "message_id": 123456,
   "time": "2026/07/16 12:00:00",
   "user": {"id": 123, "name": "群友"},
   "content": "消息内容",
@@ -146,10 +147,11 @@ handlers/dialogue.py 的 get_human_message() 把 OneBot 事件转换为统一 JS
 }
 ~~~
 
-5. 合并转发生成 type=forward 和递归 messages 数组。
-6. 当前消息与回复中的图片会同步下载。达到 9 MiB 或 3600 万像素限制的图片会被拒绝，其余图片转为 data URI 交给多模态模型。
-7. 普通文本最多保留 2000 字，被回复内容最多保留 200 字。
-8. 返回的 source_entry 包含 source_id、序列化文本和 people，用于记忆归因。
+5. `message_id` 只出现在真实收到的顶层普通消息或顶层合并转发中。合并转发内部节点、`reply_to`、AI 历史和系统合成消息不包含该字段；顶层合并转发仍可作为一个整体被回复。
+6. 合并转发生成 type=forward 和递归 messages 数组。
+7. 当前消息与回复中的图片会同步下载。达到 9 MiB 或 3600 万像素限制的图片会被拒绝，其余图片转为 data URI 交给多模态模型。
+8. 普通文本最多保留 2000 字，被回复内容最多保留 200 字。
+9. 返回的 source_entry 包含 source_id、序列化文本和 people，用于记忆归因；`source_id` 与模型可见的 `message_id` 职责独立。
 
 ### 3.3 合并转发
 
@@ -221,7 +223,7 @@ stateDiagram-v2
 - chat_end_detect_node 在早期轮次或最后消息包含“初芽”时直接继续；其他情况随机选择轻量或迷你模型判断，也保留随机直接继续分支。
 - 图历史超过 60 条 LangGraph 消息时，删除最早的一对 Human/AI 消息。
 - ai_node 自动检索记忆，注入 Skill 列表、运行中 Agent 状态、当前群定时任务概览、可选表情提示和调用时的本地日期时间，再用 CHAT_TOOLS 创建 LangChain Agent。主调用最多重试五次，递归上限为 60。
-- ai_node 临时把辅助上下文放在当前 Human 内容之前。发送前移除 memory 与 face 标签，但返回图历史的是原始 AI 文本。
+- ai_node 临时把辅助上下文放在当前 Human 内容之前。发送前移除 reply、memory 与 face 标签；图历史会移除 reply 控制标记，但保留现有 face 与 memory 标签历史语义。
 - chat_agent 调用 end_conversation 后，ConversationState 立即关闭聊天并清空 chat_peers；ai_node 抑制该轮文本和表情发送，human_node 随即路由到 finish。下一次主动提及通过 activate_chat() 解除结束标记。
 - finish_conversation_node 清理图运行标记和 Human 队列，重置 Skill 单轮去重，把 Human/AI/Tool 历史规范化后放回辅助队列，最后发送 [CONVERSATION END]。
 
@@ -229,9 +231,25 @@ stateDiagram-v2
 
 - AI 文本经 mask_secret_keys() 脱敏。
 - 普通短文本直接发送；超过 LONG_MSG_THRESHOLD=500 或包含代码块、标题、公式、粗体等特征时由 md_to_image.py 渲染。
+- chat_agent 可在回复开头输出一个 `[reply: <message_id>]`。ai_node 只接受本次实际传入 Agent 的 HumanMessage 顶层 JSON 中存在的 ID；未知、格式错误、重复或非开头标记会被移除并降级为普通消息。
+- 合法目标由发送层转换为首个 `MessageSegment.reply()`，并与文本、at 或渲染图片组成同一条 QQ 消息。若 OneBot 拒绝该引用，程序立即用相同正文重试一次普通发送，再进入原有重试策略。
 - AI 输出中的 `[CQ:at,qq=123456]` 占位符由发送层转换为 QQ at 消息段；图片化发送时先发送 at 段再发送图片，图片内显示为 @用户名。
 - 发送失败最多尝试五次，每次间隔三秒。
 - [hatsumeface:情绪] 会从运行数据 faces/ 中选择同前缀图片并单独发送。
+
+~~~mermaid
+flowchart LR
+    Input[顶层人类消息 message_id] --> AgentInput[chat_agent 输入]
+    AgentInput --> Allowlist[从本次 HumanMessage 顶层 JSON 提取合法 ID]
+    AgentInput --> Output[Agent 输出可选 reply 标记]
+    Output --> Validate{唯一、位于开头、ID 合法?}
+    Validate -- 是 --> ReplySeg[MessageSegment.reply + 主回复]
+    Validate -- 否 --> Plain[移除标记并普通发送]
+    ReplySeg --> OneBot[OneBot V11]
+    ReplySeg -. 发送失败 .-> Plain
+~~~
+
+Agent/Timer 从 handlers/dialogue.py 启动的新对话复用同一直接群发送 helper。graph/nodes.py 的 `_start_direct_conv()` 继续通过既有的 lazy import 调用该 helper，避免新增另一套回复拼装逻辑；该导入只在 fallback 启动路径运行。
 
 ### 3.7 当前清理边界
 

@@ -32,6 +32,54 @@ from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_google_genai import ChatGoogleGenerativeAI
 from volcenginesdkarkruntime import Ark
 
+# Preserve provider-specific response fields across LangChain message
+# conversions. Both DeepSeek-compatible reasoning and Gemini-compatible tool
+# calls require these fields to be sent back on later turns.
+import langchain_core.messages as _lc_messages
+import langchain_openai.chat_models.base as _openai_base
+
+_orig_convert_dict = _openai_base._convert_dict_to_message
+_orig_convert_msg = _openai_base._convert_message_to_dict
+
+
+def _patched_convert_dict(_dict):
+    msg = _orig_convert_dict(_dict)
+    if isinstance(msg, _lc_messages.AIMessage):
+        reasoning_content = _dict.get("reasoning_content")
+        if reasoning_content:
+            msg.additional_kwargs["reasoning_content"] = reasoning_content
+
+        thought_signatures = {
+            tool_call["id"]: tool_call["thought_signature"]
+            for tool_call in (_dict.get("tool_calls") or [])
+            if tool_call.get("id") and tool_call.get("thought_signature")
+        }
+        if thought_signatures:
+            msg.additional_kwargs["thought_signatures"] = thought_signatures
+    return msg
+
+
+def _patched_convert_msg(message, **kwargs):
+    result = _orig_convert_msg(message, **kwargs)
+    if isinstance(message, _lc_messages.AIMessage):
+        if "reasoning_content" in message.additional_kwargs:
+            result["reasoning_content"] = message.additional_kwargs[
+                "reasoning_content"
+            ]
+
+        thought_signatures = message.additional_kwargs.get(
+            "thought_signatures", {}
+        )
+        for tool_call in result.get("tool_calls", []):
+            thought_signature = thought_signatures.get(tool_call.get("id", ""))
+            if thought_signature:
+                tool_call["thought_signature"] = thought_signature
+    return result
+
+
+_openai_base._convert_dict_to_message = _patched_convert_dict
+_openai_base._convert_message_to_dict = _patched_convert_msg
+
 ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh"]
 
 
@@ -61,6 +109,17 @@ def get_openai_api_model(
         reasoning_effort=reasoning_effort,
     )
 
+
+def get_standard_api_model(
+    model_name: str,
+    reasoning_effort: ReasoningEffort = "medium",
+) -> ChatOpenAI:
+    """Create the standard OpenAI-compatible chat model."""
+    return get_openai_api_model(
+        model_name,
+        reasoning_effort=reasoning_effort,
+    )
+
 def get_google_api_model(
     model_name: str,
     reasoning_effort: ReasoningEffort = "medium",
@@ -75,22 +134,22 @@ def get_google_api_model(
 
 def get_advance_model(
     thinking: bool = True,
-    reasoning_effort: ReasoningEffort = "high",
+    reasoning_effort: ReasoningEffort = "xhigh",
 ) -> BaseChatModel:
     model_name = _config.ADVANCE_MODEL_NAME
     print(f"⚡ Using {model_name} for advance model")
-    return get_openai_api_model(
+    return get_standard_api_model(
         model_name,
         reasoning_effort=reasoning_effort if thinking else "none",
     )
 
 
 def get_lite_model() -> BaseChatModel:
-    return get_openai_api_model(LITE_MODEL_NAME)
+    return get_standard_api_model(LITE_MODEL_NAME)
 
 
 def get_mini_model() -> BaseChatModel:
-    return get_openai_api_model(LITE_MODEL_NAME)
+    return get_standard_api_model(LITE_MODEL_NAME)
 
 
 def get_code_model() -> BaseChatModel:

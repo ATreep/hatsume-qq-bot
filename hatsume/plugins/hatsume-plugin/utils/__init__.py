@@ -88,6 +88,7 @@ def message_to_json(
     msg_time: str,
     reply_to: dict | None = None,
     depth: int | None = None,
+    message_id: int | None = None,
 ) -> dict:
     """Build a single message dict in the unified JSON format for LLM input."""
     msg: dict = {
@@ -97,6 +98,8 @@ def message_to_json(
         "content": content,
         "reply_to": reply_to,
     }
+    if message_id is not None:
+        msg["message_id"] = int(message_id)
     if depth is not None:
         msg["depth"] = depth
     return msg
@@ -107,14 +110,18 @@ def build_forward_json(
     forwarder_id: int,
     messages: list[dict],
     msg_time: str,
+    message_id: int | None = None,
 ) -> dict:
     """Build a forward message dict for LLM input."""
-    return {
+    result = {
         "type": "forward",
         "time": msg_time,
         "user": {"id": forwarder_id, "name": forwarder_name},
         "messages": messages,
     }
+    if message_id is not None:
+        result["message_id"] = int(message_id)
+    return result
 
 
 # ---------------------------------------------------------------------------

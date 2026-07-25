@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import json
 import random
 import sys
 import types
@@ -130,6 +131,9 @@ def _load_nodes_module():
     v11_mod.MessageSegment = types.SimpleNamespace(
         text=lambda s: types.SimpleNamespace(type="text", data={"text": s}),
         image=lambda *a, **kw: types.SimpleNamespace(type="image", data={}),
+        reply=lambda message_id: types.SimpleNamespace(
+            type="reply", data={"id": message_id}
+        ),
     )
     sys.modules["nonebot.adapters.onebot.v11"] = v11_mod
 
@@ -382,6 +386,70 @@ def _load_nodes_module():
     return nodes_mod
 
 
+def _normalized_text(message_id: int, content: str = "hello") -> dict:
+    return {
+        "type": "text",
+        "text": json.dumps(
+            {
+                "type": "message",
+                "message_id": message_id,
+                "time": "",
+                "user": {"id": 1, "name": "user"},
+                "content": content,
+                "reply_to": None,
+            },
+            ensure_ascii=False,
+        ),
+    }
+
+
+def test_extract_replyable_ids_uses_only_top_level_human_json():
+    nodes = _load_nodes_module()
+    nested = json.dumps(
+        {
+            "type": "forward",
+            "message_id": 20,
+            "messages": [{"type": "message", "message_id": 999}],
+        }
+    )
+    messages = [
+        types.SimpleNamespace(
+            type="human",
+            content=[_normalized_text(10), {"type": "text", "text": nested}],
+        ),
+        types.SimpleNamespace(
+            type="ai",
+            content=json.dumps({"type": "message", "message_id": 30}),
+        ),
+        types.SimpleNamespace(type="human", content="not complete json"),
+    ]
+
+    assert nodes._extract_replyable_message_ids(messages) == {10, 20}
+
+
+def test_parse_reply_directive_accepts_one_visible_leading_target():
+    nodes = _load_nodes_module()
+    cleaned, target = nodes._parse_reply_directive(
+        "  [reply: -42] focused answer", {-42}
+    )
+    assert cleaned == "focused answer"
+    assert target == -42
+
+
+def test_parse_reply_directive_downgrades_invalid_variants():
+    nodes = _load_nodes_module()
+    cases = [
+        ("[reply: 99] unknown", {42}, "unknown"),
+        ("[reply: nope] malformed", {42}, "malformed"),
+        ("prefix [reply: 42] non-leading", {42}, "prefix  non-leading"),
+        ("[reply: 42][reply: 42] duplicate", {42}, "duplicate"),
+    ]
+    for text, allowed, expected in cases:
+        cleaned, target = nodes._parse_reply_directive(text, allowed)
+        assert cleaned == expected
+        assert target is None
+
+
 # -----------------------------------------------------------------------
 # Bug 1: human_node reference mutation (.copy() fix)
 # -----------------------------------------------------------------------
@@ -625,6 +693,40 @@ def test_finish_conversation_node_saves_to_auxiliary_queue():
 
     # is_graph_running should be reset
     assert mock_state.is_graph_running is False
+
+
+def test_finish_preserves_each_batched_human_json_message():
+    nodes = _load_nodes_module()
+    nodes.CONTEXT_QUEUE_LEN = 100
+    nodes.auxiliary_messages_queue.clear()
+    nodes.auxiliary_source_queue.clear()
+    mock_state = types.SimpleNamespace(
+        human_queue=[],
+        human_source_queue=[],
+        is_graph_running=True,
+        current_query_user_id=None,
+        end_requested=False,
+        ai_answer=None,
+    )
+    nodes.bind_state(mock_state)
+
+    first = _normalized_text(101, "first")["text"]
+    second = _normalized_text(102, "second")["text"]
+    messages = [
+        MockMessage(
+            [
+                {"type": "text", "text": first},
+                {"type": "text", "text": second},
+            ],
+            "human",
+        )
+    ]
+
+    asyncio.run(nodes.finish_conversation_node({"messages": messages}))
+
+    saved = [entry["text"] for entry in nodes.auxiliary_messages_queue]
+    assert saved == [first, second]
+    assert [json.loads(text)["message_id"] for text in saved] == [101, 102]
 
 
 # -----------------------------------------------------------------------
@@ -983,6 +1085,186 @@ def test_ai_node_skips_merge_when_auxiliary_queue_empty():
         assert mock_state.auxiliary_queue == []
     finally:
         nodes.create_agent = original_create_agent
+
+
+def test_ai_node_sends_valid_reply_target_and_cleans_history():
+    nodes = _load_nodes_module()
+    nodes.auxiliary_messages_queue.clear()
+    nodes.auxiliary_source_queue.clear()
+    sent: list[tuple[object, int | None]] = []
+
+    async def answer(msg, reply_to_message_id=None):
+        sent.append((msg, reply_to_message_id))
+
+    mock_state = types.SimpleNamespace(
+        human_queue=[],
+        human_source_queue=[],
+        is_graph_running=True,
+        current_query_user_id=None,
+        end_requested=False,
+        ai_answer=answer,
+    )
+    nodes.bind_state(mock_state)
+
+    class _FakeAgent:
+        def with_retry(self, **kw):
+            return self
+
+        async def ainvoke(self, *a, **kw):
+            return {
+                "messages": [
+                    types.SimpleNamespace(
+                        content="[reply: 4321]focused answer", type="ai"
+                    )
+                ]
+            }
+
+    original_create_agent = nodes.create_agent
+    nodes.create_agent = lambda *a, **kw: _FakeAgent()
+    human_msg = types.SimpleNamespace(
+        type="human",
+        content=[_normalized_text(4321, "target message")],
+    )
+    try:
+        result = asyncio.run(nodes.ai_node({"messages": [human_msg]}))
+    finally:
+        nodes.create_agent = original_create_agent
+
+    assert sent == [("focused answer", 4321)]
+    assert result["messages"][0].content == "focused answer"
+
+
+def test_ai_node_invalid_reply_target_uses_ordinary_send():
+    nodes = _load_nodes_module()
+    nodes.auxiliary_messages_queue.clear()
+    nodes.auxiliary_source_queue.clear()
+    sent: list[tuple[object, int | None]] = []
+
+    async def answer(msg, reply_to_message_id=None):
+        sent.append((msg, reply_to_message_id))
+
+    mock_state = types.SimpleNamespace(
+        human_queue=[],
+        human_source_queue=[],
+        is_graph_running=True,
+        current_query_user_id=None,
+        end_requested=False,
+        ai_answer=answer,
+    )
+    nodes.bind_state(mock_state)
+
+    class _FakeAgent:
+        def with_retry(self, **kw):
+            return self
+
+        async def ainvoke(self, *a, **kw):
+            return {
+                "messages": [
+                    types.SimpleNamespace(
+                        content="[reply: 9999]ordinary answer", type="ai"
+                    )
+                ]
+            }
+
+    original_create_agent = nodes.create_agent
+    nodes.create_agent = lambda *a, **kw: _FakeAgent()
+    human_msg = types.SimpleNamespace(type="human", content=[_normalized_text(4321)])
+    try:
+        result = asyncio.run(nodes.ai_node({"messages": [human_msg]}))
+    finally:
+        nodes.create_agent = original_create_agent
+
+    assert sent[0][1] is None
+    assert sent[0][0].data["text"] == "ordinary answer"
+    assert result["messages"][0].content == "ordinary answer"
+
+
+def test_ai_node_can_reply_to_auxiliary_top_level_message_id():
+    nodes = _load_nodes_module()
+    nodes.auxiliary_messages_queue.clear()
+    nodes.auxiliary_messages_queue.append(_normalized_text(111, "history target"))
+    nodes.auxiliary_source_queue.clear()
+    sent: list[tuple[object, int | None]] = []
+
+    async def answer(msg, reply_to_message_id=None):
+        sent.append((msg, reply_to_message_id))
+
+    mock_state = types.SimpleNamespace(
+        human_queue=[],
+        human_source_queue=[],
+        is_graph_running=True,
+        current_query_user_id=None,
+        end_requested=False,
+        ai_answer=answer,
+    )
+    nodes.bind_state(mock_state)
+
+    class _FakeAgent:
+        def with_retry(self, **kw):
+            return self
+
+        async def ainvoke(self, *a, **kw):
+            return {
+                "messages": [
+                    types.SimpleNamespace(
+                        content="[reply: 111]history answer", type="ai"
+                    )
+                ]
+            }
+
+    original_create_agent = nodes.create_agent
+    nodes.create_agent = lambda *a, **kw: _FakeAgent()
+    current = types.SimpleNamespace(
+        type="human",
+        content=[_normalized_text(222, "current message")],
+    )
+    try:
+        asyncio.run(nodes.ai_node({"messages": [current]}))
+    finally:
+        nodes.create_agent = original_create_agent
+
+    assert sent == [("history answer", 111)]
+
+
+def test_ai_node_does_not_send_empty_reply_directive():
+    nodes = _load_nodes_module()
+    nodes.auxiliary_messages_queue.clear()
+    nodes.auxiliary_source_queue.clear()
+    answer = AsyncMock()
+    mock_state = types.SimpleNamespace(
+        human_queue=[],
+        human_source_queue=[],
+        is_graph_running=True,
+        current_query_user_id=None,
+        end_requested=False,
+        ai_answer=answer,
+    )
+    nodes.bind_state(mock_state)
+
+    class _FakeAgent:
+        def with_retry(self, **kw):
+            return self
+
+        async def ainvoke(self, *a, **kw):
+            return {
+                "messages": [
+                    types.SimpleNamespace(content="[reply: 4321]", type="ai")
+                ]
+            }
+
+    original_create_agent = nodes.create_agent
+    nodes.create_agent = lambda *a, **kw: _FakeAgent()
+    human_msg = types.SimpleNamespace(
+        type="human",
+        content=[_normalized_text(4321)],
+    )
+    try:
+        result = asyncio.run(nodes.ai_node({"messages": [human_msg]}))
+    finally:
+        nodes.create_agent = original_create_agent
+
+    answer.assert_not_awaited()
+    assert result["messages"][0].content == ""
 
 
 def test_ai_node_suppresses_reply_after_end_conversation_tool():

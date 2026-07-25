@@ -99,6 +99,26 @@ md_to_image_mod.__package__ = "hatsume.plugins.hatsume_plugin.utils"
 sys.modules["hatsume.plugins.hatsume_plugin.utils.md_to_image"] = md_to_image_mod
 spec.loader.exec_module(md_to_image_mod)
 
+
+async def _empty_css():
+    return ""
+
+
+async def _no_katex():
+    return None
+
+
+async def _no_face():
+    return None
+
+
+# Keep these tests independent from installed htmlrender assets and runtime
+# face data. The behavior under test starts at Markdown conversion and the
+# stubbed render_html boundary.
+md_to_image_mod._get_css = _empty_css
+md_to_image_mod._get_katex = _no_katex
+md_to_image_mod._get_random_face_b64 = _no_face
+
 _extract_links = md_to_image_mod._extract_links
 _format_links = md_to_image_mod._format_links
 auto_convert_text = md_to_image_mod.auto_convert_text

@@ -78,6 +78,14 @@ class TestRolePromptDoesNotContainFormatInstruction:
         assert "16岁" in role
 
 
+def test_role_prompt_documents_native_reply_directive():
+    prompts = _load_prompts()
+    role = prompts.role_sys_prompt
+    assert "message_id" in role
+    assert "[reply: <message_id>]" in role
+    assert "回复开头" in role
+
+
 class TestLLMJsonParsing:
     """T024-T025: Test JSON output parsing logic (pure function tests)."""
 

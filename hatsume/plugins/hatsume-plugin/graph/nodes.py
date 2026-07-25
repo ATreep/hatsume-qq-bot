@@ -56,6 +56,7 @@ from ..config import CONTEXT_QUEUE_LEN
 FACE_TAG_PATTERN = re.compile(r"\[hatsumeface:(.*?)\]")
 MEMORY_RECORD_PATTERN = re.compile(r"\[memoryrecord:\s*(.+?)\]", re.DOTALL)
 MEMORY_KEYMAN_PATTERN = re.compile(r"\[memorykeyman:\s*(.+?)\]")
+REPLY_DIRECTIVE_PATTERN = re.compile(r"\[reply:\s*([^\]\r\n]*)\]")
 
 # ---------------------------------------------------------------------------
 # In-memory state (shared with tools.py via configure_tool_callbacks)
@@ -142,6 +143,62 @@ def extract_user_ids_from_content(content: Any) -> list[int]:
 
     _walk(content)
     return user_ids
+
+
+def _extract_replyable_message_ids(messages: list[Any]) -> set[int]:
+    """Collect top-level OneBot message IDs from human JSON shown to chat_agent."""
+    replyable_ids: set[int] = set()
+    for message in messages:
+        if getattr(message, "type", None) != "human":
+            continue
+
+        content = getattr(message, "content", "")
+        text_parts: list[str] = []
+        if isinstance(content, str):
+            text_parts.append(content)
+        elif isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "text":
+                    text_parts.append(str(part.get("text", "")))
+                elif isinstance(part, str):
+                    text_parts.append(part)
+
+        for text in text_parts:
+            try:
+                normalized = json.loads(text)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not isinstance(normalized, dict):
+                continue
+            if normalized.get("type") not in {"message", "forward"}:
+                continue
+            message_id = normalized.get("message_id")
+            if isinstance(message_id, int) and not isinstance(message_id, bool):
+                replyable_ids.add(message_id)
+    return replyable_ids
+
+
+def _parse_reply_directive(
+    text: str,
+    replyable_ids: set[int],
+) -> tuple[str, int | None]:
+    """Strip reply tags and return one valid leading target when available."""
+    matches = list(REPLY_DIRECTIVE_PATTERN.finditer(text))
+    cleaned = REPLY_DIRECTIVE_PATTERN.sub("", text).strip()
+    if len(matches) != 1:
+        return cleaned, None
+
+    match = matches[0]
+    if text[: match.start()].strip():
+        return cleaned, None
+
+    try:
+        target = int(match.group(1).strip())
+    except ValueError:
+        return cleaned, None
+    if target not in replyable_ids:
+        return cleaned, None
+    return cleaned, target
 
 
 # ---------------------------------------------------------------------------
@@ -243,19 +300,26 @@ def _start_direct_conv(user_id: int, group_id: int, notify_msg: str) -> None:
     Sends messages to the target group via bot.send_group_msg().
     """
     from nonebot import get_bot
-    from ..handlers.dialogue import conv_state, start_new_conversation
-    from ..utils import mask_secret_keys
+    from ..handlers.dialogue import (
+        _send_group_ai_message,
+        conv_state,
+        start_new_conversation,
+    )
     from .tools import configure_tool_callbacks as configure_tools
 
     bot = get_bot()
 
-    async def _send_to_group(msg):
+    async def _send_to_group(msg, reply_to_message_id=None):
         if msg == "[CONVERSATION END]":
             conv_state.end_conversation()
             return
-        text = mask_secret_keys(str(msg))
         try:
-            await bot.send_group_msg(group_id=group_id, message=text)
+            await _send_group_ai_message(
+                bot,
+                group_id,
+                msg,
+                reply_to_message_id=reply_to_message_id,
+            )
         except Exception as e:
             print(f"❌ _send_to_group failed: group={group_id} err={e}")
 
@@ -500,11 +564,13 @@ async def ai_node(state: MessagesState) -> dict:
                 HumanMessage(build_memory_context_prompt(memory_summary))
             ]
         )
+        agent_messages = state["messages"][:-1] + mem_msg + [last_human_msg]
+        replyable_message_ids = _extract_replyable_message_ids(agent_messages)
         set_shell_executor_limit(3)  # chat_agent: max 3 shell_executor calls per round
         response = await chat_agent.with_retry(
             stop_after_attempt=5
         ).ainvoke(
-            {"messages": state["messages"][:-1] + mem_msg + [last_human_msg]}, # type: ignore
+            {"messages": agent_messages},  # type: ignore
             {"recursion_limit": 60},
         )
         ai_text = response["messages"][-1].content
@@ -522,13 +588,18 @@ async def ai_node(state: MessagesState) -> dict:
         traceback.print_exc()
         return {}
 
+    ai_text_history, reply_to_message_id = _parse_reply_directive(
+        str(ai_text),
+        replyable_message_ids,
+    )
+
     # ── Extract face tag from ai_text ──
     face_emotion: str | None = None
-    ai_text_clean = str(ai_text)
-    match = FACE_TAG_PATTERN.search(ai_text)
+    ai_text_clean = ai_text_history
+    match = FACE_TAG_PATTERN.search(ai_text_history)
     if match:
         face_emotion = match.group(1).strip()
-        ai_text_clean = FACE_TAG_PATTERN.sub("", ai_text).strip()
+        ai_text_clean = FACE_TAG_PATTERN.sub("", ai_text_history).strip()
         print(f"[face] Detected face tag: {face_emotion}")
 
     # ── Extract memory record from ai_text ──
@@ -545,7 +616,12 @@ async def ai_node(state: MessagesState) -> dict:
     elif ai_text_clean:
         _ai_answer = _get_ai_answer()
         if _ai_answer:
-            if CQ_AT_PATTERN.search(ai_text_clean):
+            if reply_to_message_id is not None:
+                await _ai_answer(
+                    ai_text_clean,
+                    reply_to_message_id=reply_to_message_id,
+                )
+            elif CQ_AT_PATTERN.search(ai_text_clean):
                 await _ai_answer(ai_text_clean)
             else:
                 for seg in await auto_convert_text(ai_text_clean):
@@ -589,7 +665,7 @@ async def ai_node(state: MessagesState) -> dict:
         await _ai_answer_cb(face_msg)
 
     print(f"Elapsed time of ai_node: t_writing_mem={t_mem_end - t_mem_start}s, t_chat_agent={t_mem_start - t_start}s")
-    return {"messages": [AIMessage(ai_text)]}
+    return {"messages": [AIMessage(ai_text_history)]}
 
 
 # ---------------------------------------------------------------------------
@@ -737,6 +813,37 @@ async def finish_conversation_node(state: MessagesState) -> dict:
                     pass
             continue
 
+        if msg.type == "human":
+            content = msg.content
+            if isinstance(content, list):
+                human_texts: list[str] = []
+                for part in content:
+                    if isinstance(part, dict) and part.get("type") == "text":
+                        human_texts.append(str(part.get("text", "")))
+                    elif isinstance(part, str):
+                        human_texts.append(part)
+            else:
+                human_texts = [str(content)]
+
+            for text in human_texts:
+                if not text.strip():
+                    continue
+                try:
+                    normalized = json.loads(text)
+                except (json.JSONDecodeError, TypeError):
+                    normalized = None
+                if isinstance(normalized, dict):
+                    conv_messages.append({"type": "text", "text": text})
+                    continue
+                fallback = message_to_json("用户", 0, text, _now_str)
+                conv_messages.append(
+                    {
+                        "type": "text",
+                        "text": json.dumps(fallback, ensure_ascii=False),
+                    }
+                )
+            continue
+
         # Flatten list content (multimodal messages) to plain text
         content = msg.content
         if isinstance(content, list):
@@ -753,19 +860,7 @@ async def finish_conversation_node(state: MessagesState) -> dict:
         if not text.strip():
             continue
 
-        if msg.type == "human":
-            # Human messages from pipeline are already JSON; use as-is if valid
-            try:
-                json.loads(text)
-                conv_messages.append({"type": "text", "text": text})
-            except (json.JSONDecodeError, TypeError):
-                # Fallback: wrap plain text in message JSON format
-                obj = message_to_json("用户", 0, text, _now_str)
-                conv_messages.append({
-                    "type": "text",
-                    "text": json.dumps(obj, ensure_ascii=False),
-                })
-        elif msg.type == "ai":
+        if msg.type == "ai":
             obj = message_to_json(_BOT_NAME, _BOT_ID, text, _now_str)
             conv_messages.append({
                 "type": "text",
