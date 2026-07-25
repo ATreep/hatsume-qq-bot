@@ -79,6 +79,17 @@ def _stub_external_deps():
     v11_mod.Message = type("Message", (), {})
     sys.modules["nonebot.adapters.onebot.v11"] = v11_mod
 
+    # langchain_core
+    langchain_core = types.ModuleType("langchain_core")
+    langchain_core.__path__ = []
+    language_models = types.ModuleType("langchain_core.language_models")
+    language_models.BaseChatModel = type("BaseChatModel", (), {})
+    messages = types.ModuleType("langchain_core.messages")
+    messages.AIMessage = type("AIMessage", (), {})
+    sys.modules["langchain_core"] = langchain_core
+    sys.modules["langchain_core.language_models"] = language_models
+    sys.modules["langchain_core.messages"] = messages
+
     # langchain_openai
     langchain_openai = types.ModuleType("langchain_openai")
 
@@ -96,7 +107,21 @@ def _stub_external_deps():
             self.kwargs = kwargs
 
     langchain_openai.OpenAIEmbeddings = MockOpenAIEmbeddings
+    langchain_openai.__path__ = []
     sys.modules["langchain_openai"] = langchain_openai
+
+    chat_models = types.ModuleType("langchain_openai.chat_models")
+    chat_models.__path__ = []
+    chat_models_base = types.ModuleType("langchain_openai.chat_models.base")
+    chat_models_base._convert_dict_to_message = lambda value: value
+    chat_models_base._convert_message_to_dict = lambda value, **kwargs: value
+    sys.modules["langchain_openai.chat_models"] = chat_models
+    sys.modules["langchain_openai.chat_models.base"] = chat_models_base
+
+    # langchain_google_genai
+    langchain_google_genai = types.ModuleType("langchain_google_genai")
+    langchain_google_genai.ChatGoogleGenerativeAI = MockChatOpenAI
+    sys.modules["langchain_google_genai"] = langchain_google_genai
 
     # volcenginesdkarkruntime
     volc_mod = types.ModuleType("volcenginesdkarkruntime")
@@ -207,3 +232,13 @@ class TestIsOmni:
         cfg.PROVIDER = "ali"
         cfg.is_omni = True
         assert cfg.is_omni is True
+
+
+class TestEmbeddingModel:
+    def test_siliconflow_endpoint_includes_v1(self):
+        _full_setup()
+        models = _load_models_module()
+
+        embedding = models.get_embedding_model()
+
+        assert embedding.kwargs["base_url"] == "https://api.siliconflow.cn/v1"

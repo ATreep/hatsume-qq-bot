@@ -168,7 +168,7 @@ def choose_video_model() -> Literal["1.0", "1.5"]:
 
 def get_embedding_model() -> OpenAIEmbeddings:
     return OpenAIEmbeddings(
-        base_url=get_base_url("sf"),
+        base_url=get_base_url("sf") + "/v1",
         model=EMBEDDING_MODEL,
         api_key=get_api_key("sf"),
         chunk_size=32,
