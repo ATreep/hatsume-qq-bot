@@ -23,6 +23,7 @@ def _is_stubbed_namespace(name: str) -> bool:
     return name == "hatsume" or name.startswith("hatsume.") or name in {
         "nonebot",
         "nonebot_plugin_apscheduler",
+        "nonebot_plugin_localstore",
     } or name.startswith(("nonebot.", "apscheduler.")) or name == "apscheduler"
 
 
@@ -79,6 +80,10 @@ def _load_modules():
     nonebot.require = lambda name: apscheduler_plugin
     nonebot.get_bot = lambda: object()
     sys.modules[nonebot.__name__] = nonebot
+
+    localstore = types.ModuleType("nonebot_plugin_localstore")
+    localstore.get_plugin_data_file = lambda filename: ROOT / "data" / filename
+    sys.modules[localstore.__name__] = localstore
 
     schedule = _load_file(
         f"{BASE_NAME}.timer.schedule", PLUGIN_DIR / "timer/schedule.py"
@@ -387,7 +392,7 @@ async def test_recovery_expires_old_compensates_recent_and_registers_future(
 ):
     schedule, _, executor, _ = modules
     now = datetime(2026, 8, 1, 12, 0, tzinfo=SHANGHAI).timestamp()
-    plan = schedule._plan_from_epoch_times(
+    plan = schedule._build_internal_at_plan(
         [now - 600, now - 60, now + 600]
     )
     task_id = store.create_task(1, 2, "prompt", plan)
@@ -413,7 +418,7 @@ async def test_repeated_recovery_does_not_reinject_processed_occurrence(
     schedule, _, executor, _ = modules
     now = datetime(2026, 8, 1, 12, 0, tzinfo=SHANGHAI).timestamp()
     task_id = store.create_task(
-        1, 2, "prompt", schedule._plan_from_epoch_times([now - 60])
+        1, 2, "prompt", schedule._build_internal_at_plan([now - 60])
     )
     inject = AsyncMock()
     monkeypatch.setattr(executor, "_inject_timer_to_graph", inject)

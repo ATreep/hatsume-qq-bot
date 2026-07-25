@@ -102,11 +102,12 @@ hatsume/plugins/hatsume-plugin/
 
 ### Timers
 
-1. `timer_tasks` 保存任务，`timer_triggers` 保存具体触发时间；删除任务必须级联删除触发器。
+1. `timer_tasks` 保存任务，`timer_schedule_points` 保存规则时间点与进度；删除任务必须级联删除时间点。
 2. 数据库记录与 APScheduler 作业必须同步：创建/更新后注册，删除/更新前取消。
 3. 启动恢复必须区分未来、容忍窗口内漏触发和过期触发。
 4. 普通 Timer 与 auto-response 最终都通过图注入，不另建独立聊天 Agent。
-5. `auto_response` 启动时自动保证存在；legacy `auto_create` 记录必须清理，不得注入或重新排期。
+5. `auto_response` 启动时自动保证只有一个未来 exact point；目标群只来自 `AUTO_RESPONSE_GROUP_ID`。
+6. 活动数据库必须通过 `nonebot_plugin_localstore` 定位到插件数据目录，schema 只包含当前 `timer_tasks` 与 `timer_schedule_points`，不得加入旧路径或旧 schema 兼容逻辑。
 
 ## Extension Rules
 
@@ -140,6 +141,7 @@ hatsume/plugins/hatsume-plugin/
 不要为完成代码任务而重写以下运行时文件，也不得将它们提交到 Hatsume 主仓库：
 
 - `data/hatsume-plugin/*.db*`
+- `data/hatsume-plugin/timer-v2-db/*.db*`
 - `data/hatsume-plugin/timer_db/*.db*`
 - `data/hatsume-plugin/likes.json`
 - `data/hatsume-plugin/skills/`

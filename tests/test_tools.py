@@ -627,9 +627,6 @@ class TestTimerListing:
         tools = _load_tools_module()
         start_at = datetime.fromisoformat("2026-07-25T00:00:00+08:00").timestamp()
         end_at = datetime.fromisoformat("2026-12-31T23:59:59+08:00").timestamp()
-        effective_until = datetime.fromisoformat(
-            "2026-11-30T09:00:00+08:00"
-        ).timestamp()
         tasks = [
             {
                 "id": 1,
@@ -642,8 +639,6 @@ class TestTimerListing:
                 "step": 2,
                 "total_occurrences": 20,
                 "processed_occurrences": 1,
-                "effective_until": effective_until,
-                "truncated": 1,
             }
         ]
         points = {
@@ -713,8 +708,6 @@ class TestTimerListing:
                 "step": 1,
                 "total_occurrences": 1,
                 "processed_occurrences": 0,
-                "effective_until": retained_at,
-                "truncated": 0,
             }
         ]
         points = {
@@ -774,7 +767,6 @@ class TestTimerListing:
                 "step": None,
                 "total_occurrences": 2,
                 "processed_occurrences": 1,
-                "truncated": 0,
             },
         ]
         points = {

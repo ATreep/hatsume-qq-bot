@@ -44,9 +44,7 @@ class SchedulePlan:
     start_at: float | None
     end_at: float | None
     step: int | None
-    effective_until: float
     total_occurrences: int
-    truncated: bool
     points: tuple[SchedulePointPlan, ...]
 
 
@@ -264,17 +262,12 @@ def _allocate(
             )
         )
 
-    effective_until = max(
-        summary[1] for summary in summaries if summary[1] is not None
-    )
     return SchedulePlan(
         mode=mode,
         start_at=start.timestamp() if start is not None else None,
         end_at=end.timestamp() if end is not None else None,
         step=step,
-        effective_until=effective_until,
         total_occurrences=total_occurrences,
-        truncated=False,
         points=tuple(points),
     )
 
@@ -397,7 +390,7 @@ def build_at_plan(
 
 
 def flatten_occurrences(plan: SchedulePlan) -> list[float]:
-    """Materialize a plan's occurrences on demand for tests and migration."""
+    """Materialize a plan's occurrences on demand for diagnostics and tests."""
     task = {
         "schedule_type": plan.mode,
         "step": plan.step,
@@ -492,196 +485,20 @@ def occurrence_at_index(
         offset += step
 
 
-def _plan_from_epoch_times(times: Iterable[float]) -> SchedulePlan:
-    """Build an exact plan from trusted migration timestamps."""
-    unique_times = sorted(set(times))
-    retained = unique_times[:TIMER_MAX_EXACT_POINTS]
-    if not retained:
-        raise ScheduleValidationError("错误：没有可迁移的触发时间。")
+def _build_internal_at_plan(times: Iterable[float]) -> SchedulePlan:
+    """Build an exact plan from trusted internal timestamps."""
+    unique_times = sorted(set(float(timestamp) for timestamp in times))
+    if not unique_times:
+        raise ScheduleValidationError("错误：至少需要一个时间点。")
     points = tuple(
         SchedulePointPlan(None, None, timestamp, timestamp, timestamp, 1)
-        for timestamp in retained
+        for timestamp in unique_times
     )
     return SchedulePlan(
         mode="at",
         start_at=None,
         end_at=None,
         step=None,
-        effective_until=retained[-1],
-        total_occurrences=len(retained),
-        truncated=len(unique_times) > TIMER_MAX_EXACT_POINTS,
+        total_occurrences=len(unique_times),
         points=points,
     )
-
-
-def _gcd_gaps(values: Sequence[int]) -> int:
-    gaps = [right - left for left, right in zip(values, values[1:]) if right > left]
-    if not gaps:
-        return 1
-    result = gaps[0]
-    for gap in gaps[1:]:
-        result = math.gcd(result, gap)
-    return max(result, 1)
-
-
-def _clock_text(value: datetime) -> str:
-    return value.strftime("%H:%M:%S")
-
-
-def _matches_retained(plan: SchedulePlan, expected: Sequence[float]) -> bool:
-    return flatten_occurrences(plan) == list(expected)
-
-
-def _daily_legacy_candidate(
-    local_times: Sequence[datetime], source: Sequence[float]
-) -> SchedulePlan | None:
-    clocks = sorted({_clock_text(value) for value in local_times})[
-        :TIMER_MAX_FREQUENCY_POINTS
-    ]
-    dates = sorted({value.date().toordinal() for value in local_times})
-    step = _gcd_gaps(dates)
-    expected = [
-        timestamp
-        for timestamp, local in zip(source, local_times)
-        if _clock_text(local) in clocks
-    ]
-    try:
-        plan = build_daily_plan(
-            local_times[0].isoformat(),
-            local_times[-1].isoformat(),
-            clocks,
-            step,
-            now=float("-inf"),
-        )
-    except ScheduleValidationError:
-        return None
-    return plan if _matches_retained(plan, expected) else None
-
-
-def _weekly_legacy_candidate(
-    local_times: Sequence[datetime], source: Sequence[float]
-) -> SchedulePlan | None:
-    point_keys = sorted(
-        {(value.isoweekday(), _clock_text(value)) for value in local_times}
-    )[:TIMER_MAX_FREQUENCY_POINTS]
-    first_week = local_times[0].date() - timedelta(
-        days=local_times[0].isoweekday() - 1
-    )
-    week_offsets = sorted(
-        {
-            ((value.date() - timedelta(days=value.isoweekday() - 1)) - first_week).days
-            // 7
-            for value in local_times
-        }
-    )
-    step = _gcd_gaps(week_offsets)
-    expected = [
-        timestamp
-        for timestamp, local in zip(source, local_times)
-        if (local.isoweekday(), _clock_text(local)) in point_keys
-    ]
-    try:
-        plan = build_weekly_plan(
-            local_times[0].isoformat(),
-            local_times[-1].isoformat(),
-            [
-                {"weekday": weekday, "time": clock}
-                for weekday, clock in point_keys
-            ],
-            step,
-            now=float("-inf"),
-        )
-    except ScheduleValidationError:
-        return None
-    return plan if _matches_retained(plan, expected) else None
-
-
-def _monthly_legacy_candidate(
-    local_times: Sequence[datetime], source: Sequence[float]
-) -> SchedulePlan | None:
-    point_keys = sorted({(value.day, _clock_text(value)) for value in local_times})[
-        :TIMER_MAX_FREQUENCY_POINTS
-    ]
-    first_month = local_times[0].year * 12 + local_times[0].month
-    month_offsets = sorted(
-        {
-            value.year * 12 + value.month - first_month
-            for value in local_times
-        }
-    )
-    step = _gcd_gaps(month_offsets)
-    expected = [
-        timestamp
-        for timestamp, local in zip(source, local_times)
-        if (local.day, _clock_text(local)) in point_keys
-    ]
-    try:
-        plan = build_monthly_plan(
-            local_times[0].isoformat(),
-            local_times[-1].isoformat(),
-            [{"day": day, "time": clock} for day, clock in point_keys],
-            step,
-            now=float("-inf"),
-        )
-    except ScheduleValidationError:
-        return None
-    return plan if _matches_retained(plan, expected) else None
-
-
-def infer_legacy_plan(prompt: str, trigger_times: Sequence[float]) -> SchedulePlan:
-    """Infer a bounded v2 schedule from an unfinished legacy task."""
-    source = sorted(set(float(value) for value in trigger_times))
-    if not source:
-        raise ScheduleValidationError("错误：没有可迁移的触发时间。")
-    local_times = [datetime.fromtimestamp(value, tz=SHANGHAI) for value in source]
-
-    candidates = {
-        "daily": _daily_legacy_candidate(local_times, source),
-        "weekly": _weekly_legacy_candidate(local_times, source),
-        "monthly": _monthly_legacy_candidate(local_times, source),
-    }
-    lowered = prompt.casefold()
-    hinted_mode: ScheduleMode | None = None
-    if re.search(r"每\s*月|每个月|monthly|月.{0,4}(号|日)", lowered):
-        hinted_mode = "monthly"
-    elif re.search(r"每.{0,3}(周|星期)|weekly|周[一二三四五六日天]|星期[一二三四五六日天]", lowered):
-        hinted_mode = "weekly"
-    elif re.search(r"每天|每日|天天|当天|每.{0,3}天|daily", lowered):
-        hinted_mode = "daily"
-    if hinted_mode is not None:
-        hinted_candidate = candidates[hinted_mode]
-        if hinted_candidate is not None:
-            return hinted_candidate
-
-    distinct_months = {(value.year, value.month) for value in local_times}
-    monthly_points = {(value.day, _clock_text(value)) for value in local_times}
-    if (
-        candidates["monthly"] is not None
-        and len(distinct_months) >= 2
-        and len(source) > len(monthly_points)
-    ):
-        return candidates["monthly"]
-
-    distinct_weeks = {
-        value.date() - timedelta(days=value.isoweekday() - 1)
-        for value in local_times
-    }
-    weekly_points = {
-        (value.isoweekday(), _clock_text(value)) for value in local_times
-    }
-    if (
-        candidates["weekly"] is not None
-        and len(distinct_weeks) >= 2
-        and len(source) > len(weekly_points)
-    ):
-        return candidates["weekly"]
-
-    distinct_dates = {value.date() for value in local_times}
-    daily_points = {_clock_text(value) for value in local_times}
-    if (
-        candidates["daily"] is not None
-        and len(distinct_dates) >= 2
-        and len(source) > len(daily_points)
-    ):
-        return candidates["daily"]
-    return _plan_from_epoch_times(source)

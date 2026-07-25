@@ -5,7 +5,6 @@ from __future__ import annotations
 import importlib.util
 import sys
 import types
-from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -13,25 +12,6 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 TIMER_DIR = ROOT / "hatsume/plugins/hatsume-plugin/timer"
 BASE_NAME = "hatsume.plugins.hatsume-plugin"
-MIGRATION_MODULE = f"{BASE_NAME}.timer.migration"
-
-
-@contextmanager
-def _forbid_migration_import():
-    class RejectMigrationImport:
-        @staticmethod
-        def find_spec(fullname, path=None, target=None):
-            if fullname == MIGRATION_MODULE:
-                raise AssertionError("Bot startup imported timer.migration")
-            return None
-
-    finder = RejectMigrationImport()
-    sys.modules.pop(MIGRATION_MODULE, None)
-    sys.meta_path.insert(0, finder)
-    try:
-        yield
-    finally:
-        sys.meta_path.remove(finder)
 
 
 def _load_timer_init(store_type):
@@ -75,9 +55,8 @@ def test_get_store_initializes_only_v2_storage():
 
     timer = _load_timer_init(Store)
 
-    with _forbid_migration_import():
-        first = timer.get_store()
-        second = timer.get_store()
+    first = timer.get_store()
+    second = timer.get_store()
 
     assert first is second
     assert calls == ["construct", "init"]
@@ -105,17 +84,15 @@ def test_get_store_closes_failed_v2_initialization_and_retries(capsys):
 
     timer = _load_timer_init(Store)
 
-    with _forbid_migration_import():
-        with pytest.raises(RuntimeError, match="v2 initialization failed"):
-            timer.get_store()
-        output = capsys.readouterr().out
-        recovered = timer.get_store()
+    with pytest.raises(RuntimeError, match="v2 initialization failed"):
+        timer.get_store()
+    output = capsys.readouterr().out
+    recovered = timer.get_store()
 
     assert attempts == 2
     assert stores == [stores[0], recovered]
     assert stores[0].closed is True
     assert "/private/timer-v2-db/timer.db" in output
-    assert "legacy" not in output.lower()
 
 
 @pytest.mark.asyncio

@@ -21,6 +21,7 @@ def _is_stubbed_namespace(name: str) -> bool:
     return name == "hatsume" or name.startswith("hatsume.") or name in {
         "nonebot",
         "nonebot_plugin_apscheduler",
+        "nonebot_plugin_localstore",
     } or name.startswith(("nonebot.", "apscheduler.")) or name == "apscheduler"
 
 
@@ -77,6 +78,10 @@ def _load_modules():
     nonebot.require = lambda name: apscheduler_plugin
     nonebot.get_bot = lambda: object()
     sys.modules[nonebot.__name__] = nonebot
+
+    localstore = types.ModuleType("nonebot_plugin_localstore")
+    localstore.get_plugin_data_file = lambda filename: ROOT / "data" / filename
+    sys.modules[localstore.__name__] = localstore
 
     _load_file(
         f"{BASE_NAME}.timer.schedule", PLUGIN_DIR / "timer/schedule.py"

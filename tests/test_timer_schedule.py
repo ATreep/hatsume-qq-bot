@@ -75,7 +75,6 @@ def test_daily_step_and_inclusive_bounds(schedule):
     ]
     assert plan.mode == "daily"
     assert plan.step == 2
-    assert plan.truncated is False
 
 
 def test_weekly_range_ending_before_now_reports_no_future_trigger(schedule):
@@ -308,8 +307,6 @@ def test_frequency_keeps_all_occurrences_beyond_fifty(schedule):
     occurrences = schedule.flatten_occurrences(plan)
     assert len(occurrences) == 732
     assert plan.total_occurrences == 732
-    assert plan.truncated is False
-    assert plan.effective_until == _timestamp("2027-07-25T18:00:00+08:00")
     assert [point.planned_count for point in plan.points] == [366, 366]
 
 
@@ -350,104 +347,3 @@ def test_frequency_rejects_range_with_no_future_occurrence(schedule):
             step=1,
             now=_timestamp("2026-07-26T00:00:00+08:00"),
         )
-
-
-def _epoch_series(values: list[str]) -> list[float]:
-    return [_timestamp(value) for value in values]
-
-
-@pytest.mark.parametrize(
-    ("prompt", "values", "mode", "step"),
-    [
-        (
-            "每两天提醒喝水",
-            [
-                "2026-08-01T09:00:00+08:00",
-                "2026-08-01T18:00:00+08:00",
-                "2026-08-03T09:00:00+08:00",
-                "2026-08-03T18:00:00+08:00",
-            ],
-            "daily",
-            2,
-        ),
-        (
-            "每两周周一检查更新",
-            [
-                "2026-08-03T20:00:00+08:00",
-                "2026-08-17T20:00:00+08:00",
-                "2026-08-31T20:00:00+08:00",
-            ],
-            "weekly",
-            2,
-        ),
-        (
-            "每月十五号提醒",
-            [
-                "2026-08-15T08:00:00+08:00",
-                "2026-09-15T08:00:00+08:00",
-                "2026-10-15T08:00:00+08:00",
-            ],
-            "monthly",
-            1,
-        ),
-        (
-            "三个不规则日期提醒",
-            [
-                "2026-08-01T08:00:00+08:00",
-                "2026-08-03T11:00:00+08:00",
-                "2026-08-08T19:30:00+08:00",
-            ],
-            "at",
-            None,
-        ),
-    ],
-)
-def test_classifies_legacy_prompt_and_cadence(
-    schedule, prompt, values, mode, step
-):
-    plan = schedule.infer_legacy_plan(prompt, _epoch_series(values))
-
-    assert plan.mode == mode
-    assert plan.step == step
-
-
-def test_legacy_prompt_resolves_seven_day_daily_weekly_ambiguity(schedule):
-    times = _epoch_series(
-        [
-            "2026-08-03T09:00:00+08:00",
-            "2026-08-10T09:00:00+08:00",
-            "2026-08-17T09:00:00+08:00",
-        ]
-    )
-
-    assert schedule.infer_legacy_plan("每周一提醒", times).mode == "weekly"
-    assert schedule.infer_legacy_plan("每七天提醒", times).mode == "daily"
-
-
-def test_legacy_daily_trims_period_points_without_capping_occurrences(schedule):
-    values: list[str] = []
-    for day in range(1, 20):
-        values.extend(
-            f"2026-08-{day:02d}T{hour:02d}:00:00+08:00"
-            for hour in (8, 10, 12, 14, 16, 18)
-        )
-
-    plan = schedule.infer_legacy_plan("每天六次提醒", _epoch_series(values))
-
-    assert plan.mode == "daily"
-    assert len(plan.points) == 5
-    assert plan.total_occurrences == 95
-    assert plan.truncated is False
-
-
-def test_legacy_exact_fallback_keeps_earliest_ten(schedule):
-    values = [
-        f"2026-08-{day:02d}T{(day * 3) % 24:02d}:{day:02d}:00+08:00"
-        for day in range(1, 13)
-    ]
-
-    plan = schedule.infer_legacy_plan("不规则提醒", _epoch_series(values))
-
-    assert plan.mode == "at"
-    assert plan.total_occurrences == 10
-    assert plan.truncated is True

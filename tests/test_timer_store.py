@@ -6,7 +6,6 @@ import importlib.util
 import sqlite3
 import sys
 import types
-from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
@@ -46,6 +45,12 @@ def _load_timer_modules():
     prompts = types.ModuleType(f"{BASE_NAME}.prompts")
     prompts.get_auto_response_prompt = lambda: "auto response prompt"
     sys.modules[prompts.__name__] = prompts
+
+    localstore = types.ModuleType("nonebot_plugin_localstore")
+    localstore.get_plugin_data_file = (
+        lambda filename: ROOT / "data" / "hatsume-plugin" / filename
+    )
+    sys.modules[localstore.__name__] = localstore
 
     schedule = _load_file(
         f"{BASE_NAME}.timer.schedule", PLUGIN_DIR / "timer/schedule.py"
@@ -99,8 +104,9 @@ def _columns(store, table: str) -> set[str]:
 
 def test_default_path_uses_timer_v2_directory(modules):
     _, store_module = modules
-    assert Path(store_module._get_default_db_path()).parts[-3:] == (
+    assert Path(store_module._get_default_db_path()).parts[-4:] == (
         "data",
+        "hatsume-plugin",
         "timer-v2-db",
         "timer.db",
     )
@@ -114,19 +120,28 @@ def test_v2_schema_and_indexes(store):
             "SELECT name FROM sqlite_master WHERE type='table'"
         )
     }
-    assert {"timer_tasks", "timer_schedule_points", "timer_migrations"} <= tables
-    assert {
+    assert tables - {"sqlite_sequence"} == {
+        "timer_tasks",
+        "timer_schedule_points",
+    }
+    assert _columns(store, "timer_tasks") == {
+        "id",
+        "group_id",
+        "user_id",
+        "prompt",
+        "task_type",
         "schedule_type",
         "start_at",
         "end_at",
         "step",
-        "effective_until",
         "total_occurrences",
         "processed_occurrences",
-        "truncated",
-        "legacy_task_id",
-    } <= _columns(store, "timer_tasks")
-    assert {
+        "created_at",
+        "updated_at",
+    }
+    assert _columns(store, "timer_schedule_points") == {
+        "id",
+        "task_id",
         "period_value",
         "clock_time",
         "exact_at",
@@ -136,7 +151,39 @@ def test_v2_schema_and_indexes(store):
         "processed_occurrences",
         "last_processed_at",
         "job_id",
-    } <= _columns(store, "timer_schedule_points")
+    }
+
+
+def test_incompatible_schema_is_rejected(tmp_path, modules):
+    _, store_module = modules
+    path = tmp_path / "timer.db"
+    connection = sqlite3.connect(path)
+    connection.executescript(
+        """
+        CREATE TABLE timer_tasks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            group_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            prompt TEXT NOT NULL,
+            task_type TEXT NOT NULL DEFAULT 'normal',
+            schedule_type TEXT NOT NULL,
+            start_at REAL,
+            end_at REAL,
+            step INTEGER,
+            total_occurrences INTEGER NOT NULL,
+            processed_occurrences INTEGER NOT NULL DEFAULT 0,
+            truncated INTEGER NOT NULL DEFAULT 0,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL
+        );
+        """
+    )
+    connection.close()
+
+    instance = store_module.TimerStore(str(path))
+    with pytest.raises(RuntimeError, match="incompatible timer database schema"):
+        instance.init_db()
+    assert instance._conn is None
 
 
 def test_repeated_initialization_keeps_existing_data(tmp_path, modules, daily_plan):
@@ -272,83 +319,6 @@ def test_replace_with_exact_plan_replaces_points_atomically(store, daily_plan, a
     assert all(store.get_point(point_id) is None for point_id in old_point_ids)
 
 
-def _capped_daily_plan(schedule):
-    full = schedule.build_daily_plan(
-        "2026-08-01T00:00:00+08:00",
-        "2026-10-31T23:59:59+08:00",
-        ["09:00:00", "18:00:00"],
-        now=0,
-    )
-    capped_points = tuple(
-        replace(
-            point,
-            last_fire_at=point.first_fire_at + 24 * 86400,
-            planned_count=25,
-        )
-        for point in full.points
-    )
-    return replace(
-        full,
-        effective_until=max(point.last_fire_at for point in capped_points),
-        total_occurrences=50,
-        truncated=True,
-        points=capped_points,
-    )
-
-
-def test_expand_truncated_frequency_tasks_preserves_ids_and_progress(
-    store, modules
-):
-    schedule, _ = modules
-    task_id = store.create_task(1, 2, "uncap", _capped_daily_plan(schedule))
-    before_points = store.get_points_for_task(task_id)
-    store.mark_occurrence_processed(
-        before_points[0]["id"], before_points[0]["first_fire_at"]
-    )
-
-    assert store.expand_truncated_frequency_tasks() == 1
-
-    task = store.get_task(task_id)
-    points = store.get_points_for_task(task_id)
-    assert task["total_occurrences"] == 184
-    assert task["processed_occurrences"] == 1
-    assert task["truncated"] == 0
-    assert [point["id"] for point in points] == [
-        point["id"] for point in before_points
-    ]
-    assert [point["processed_occurrences"] for point in points] == [1, 0]
-    assert [point["first_fire_at"] for point in points] == [
-        point["first_fire_at"] for point in before_points
-    ]
-    assert [point["planned_occurrences"] for point in points] == [92, 92]
-    assert store.expand_truncated_frequency_tasks() == 0
-
-
-def test_expand_truncated_frequency_tasks_rolls_back_on_first_fire_mismatch(
-    store, modules
-):
-    schedule, _ = modules
-    task_id = store.create_task(1, 2, "uncap", _capped_daily_plan(schedule))
-    point = store.get_points_for_task(task_id)[1]
-    store._connection().execute(
-        "UPDATE timer_schedule_points SET first_fire_at = first_fire_at + 1 "
-        "WHERE id = ?",
-        (point["id"],),
-    )
-    store._connection().commit()
-
-    with pytest.raises(RuntimeError, match="first occurrence"):
-        store.expand_truncated_frequency_tasks()
-
-    task = store.get_task(task_id)
-    assert task["total_occurrences"] == 50
-    assert task["truncated"] == 1
-    assert [
-        point["planned_occurrences"]
-        for point in store.get_points_for_task(task_id)
-    ] == [25, 25]
-
-
 def test_transaction_rolls_back_all_uncommitted_inserts(store, daily_plan):
     with pytest.raises(RuntimeError):
         with store.transaction():
@@ -389,13 +359,6 @@ def test_upsert_auto_response_keeps_one_internal_task(store):
     point = store.get_auto_response_point()
     assert point["task_id"] == second_id
     assert point["prompt"] == "custom"
-
-
-def test_migration_marker_is_idempotent(store):
-    assert store.has_migration("legacy_timer_v1") is False
-    store.record_migration("legacy_timer_v1")
-    store.record_migration("legacy_timer_v1")
-    assert store.has_migration("legacy_timer_v1") is True
 
 
 def test_validate_prompt_contract(store):

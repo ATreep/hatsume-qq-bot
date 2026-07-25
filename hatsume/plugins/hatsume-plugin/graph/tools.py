@@ -998,25 +998,13 @@ async def get_timer_overview(group_id: int | None = None) -> str:
                 for point in points
             )
         )
-        cap_note = (
-            "；已按上限截断"
-            if task["schedule_type"] == "at" and task["truncated"]
-            else ""
-        )
-        retained_until = (
-            "\n  实际保留至："
-            + _format_timer_timestamp(float(task["effective_until"]))
-            if task["schedule_type"] == "at" and task["truncated"]
-            else ""
-        )
         summary = (
             f"- 任务 ID：{tid}\n"
             f"  提醒用户：{owner}\n"
             f"  任务提示词：{prompt}\n"
             f"{details}\n"
             f"  计划触发：{task['total_occurrences']} 次；"
-            f"已处理：{task['processed_occurrences']} 次{cap_note}"
-            f"{retained_until}\n"
+            f"已处理：{task['processed_occurrences']} 次\n"
             f"  下一次触发：{next_text}"
         )
         target = (
