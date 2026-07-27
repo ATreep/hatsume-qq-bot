@@ -210,7 +210,7 @@ class TestRandomAcgPhoto:
         assert callable(tools.random_acg_photo)
 
     def test_success_returns_sandbox_path(self):
-        """On success, returns a sandbox path matching the expected timestamp pattern."""
+        """On success, the sandbox path has a timestamp and random suffix."""
         tools = _load_tools_module()
 
         mock_subprocess = MagicMock()
@@ -227,11 +227,21 @@ class TestRandomAcgPhoto:
             patch("os.path.isfile", return_value=True),
             patch("shutil.rmtree"),
             patch("os.makedirs"),
+            patch("datetime.datetime") as mock_datetime,
+            patch.object(tools.random, "randint", return_value=42) as mock_randint,
         ):
+            mock_datetime.now.return_value.strftime.return_value = "260727_143025"
             result = asyncio.run(tools.random_acg_photo())
 
-            assert result.startswith("/tmp/apple_photo_export_")
-            assert result.endswith(".jpg")
+            assert result == "/tmp/apple_photo_export_260727_143025_000042.jpg"
+            cp_command = mock_subprocess.run.call_args_list[1].args[0]
+            assert cp_command == [
+                "docker",
+                "cp",
+                "/tmp/hatsume_acg_export/IMG_1234.jpg",
+                "hatsume-space-kali:/tmp/apple_photo_export_260727_143025_000042.jpg",
+            ]
+            mock_randint.assert_called_once_with(0, 999999)
             assert mock_ensure.called
 
     def test_empty_album_returns_error(self):
