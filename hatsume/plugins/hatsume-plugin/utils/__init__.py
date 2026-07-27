@@ -11,7 +11,7 @@ from nonebot.adapters import Bot
 from .security import mask_secret_keys as mask_secret_keys
 
 
-CQ_AT_PATTERN = re.compile(r"\[CQ:at,qq=(\d+)\]")
+CQ_AT_PATTERN = re.compile(r"\[[ \t]*CQ:at,qq=(\d+)\]")
 
 
 async def get_group_member_name(bot: Bot, group_id: int | None, user_id: int) -> str:

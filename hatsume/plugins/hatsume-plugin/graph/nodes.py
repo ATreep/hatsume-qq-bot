@@ -53,10 +53,12 @@ from ..config import CONTEXT_QUEUE_LEN
 # ---------------------------------------------------------------------------
 # Patterns
 # ---------------------------------------------------------------------------
-FACE_TAG_PATTERN = re.compile(r"\[hatsumeface:(.*?)\]")
-MEMORY_RECORD_PATTERN = re.compile(r"\[memoryrecord:\s*(.+?)\]", re.DOTALL)
-MEMORY_KEYMAN_PATTERN = re.compile(r"\[memorykeyman:\s*(.+?)\]")
-REPLY_DIRECTIVE_PATTERN = re.compile(r"\[reply:\s*([^\]\r\n]*)\]")
+FACE_TAG_PATTERN = re.compile(r"\[[ \t]*hatsumeface:(.*?)\]")
+MEMORY_RECORD_PATTERN = re.compile(
+    r"\[[ \t]*memoryrecord:\s*(.+?)\]", re.DOTALL
+)
+MEMORY_KEYMAN_PATTERN = re.compile(r"\[[ \t]*memorykeyman:\s*(.+?)\]")
+REPLY_DIRECTIVE_PATTERN = re.compile(r"\[[ \t]*reply:\s*([^\]\r\n]*)\]")
 
 # ---------------------------------------------------------------------------
 # In-memory state (shared with tools.py via configure_tool_callbacks)

@@ -431,10 +431,30 @@ def test_extract_replyable_ids_uses_only_top_level_human_json():
     assert nodes._extract_replyable_message_ids(messages) == {10, 20}
 
 
+def test_extract_memory_records_accepts_space_after_opening_bracket():
+    nodes = _load_nodes_module()
+
+    record, cleaned = nodes._extract_memory_records(
+        "回答[ memoryrecord: 记忆内容][\tmemorykeyman: 123, 456]"
+    )
+
+    assert record == {"content": "记忆内容", "qq_numbers": [123, 456]}
+    assert cleaned == "回答"
+
+
+def test_special_tag_patterns_reject_newline_after_opening_bracket():
+    nodes = _load_nodes_module()
+
+    assert nodes.FACE_TAG_PATTERN.search("[\nhatsumeface:害羞]") is None
+    assert nodes.MEMORY_RECORD_PATTERN.search("[\nmemoryrecord:内容]") is None
+    assert nodes.MEMORY_KEYMAN_PATTERN.search("[\nmemorykeyman:123]") is None
+    assert nodes.REPLY_DIRECTIVE_PATTERN.search("[\nreply:42]") is None
+
+
 def test_parse_reply_directive_accepts_one_visible_leading_target():
     nodes = _load_nodes_module()
     cleaned, target = nodes._parse_reply_directive(
-        "  [reply: -42] focused answer", {-42}
+        "  [ reply: -42] focused answer", {-42}
     )
     assert cleaned == "focused answer"
     assert target == -42
@@ -1714,7 +1734,7 @@ def test_face_tag_stripped_from_user_text_preserved_in_aimessage():
     nodes.bind_state(mock_state)
 
     # AI response includes a face tag
-    ai_response = "今天天气真好呀，心情不错呢[hatsumeface:开心]"
+    ai_response = "今天天气真好呀，心情不错呢[ hatsumeface:开心]"
 
     class _FakeAgent:
         def with_retry(self, **kw):
@@ -1741,7 +1761,7 @@ def test_face_tag_stripped_from_user_text_preserved_in_aimessage():
 
         # AIMessage should preserve the face tag
         aimessage = result["messages"][0]
-        assert "[hatsumeface:开心]" in aimessage.content, (
+        assert "[ hatsumeface:开心]" in aimessage.content, (
             "AIMessage should preserve the face tag for graph state history"
         )
 
@@ -1749,7 +1769,7 @@ def test_face_tag_stripped_from_user_text_preserved_in_aimessage():
         assert len(sent_messages) >= 1, "at least the text message should be sent"
         text_msg = sent_messages[0]
         assert text_msg.type == "text"
-        assert "[hatsumeface:" not in text_msg.data["text"], (
+        assert "[ hatsumeface:" not in text_msg.data["text"], (
             "Sent text should not contain face tag"
         )
         assert "今天天气真好呀" in text_msg.data["text"], (
