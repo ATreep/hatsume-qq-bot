@@ -474,9 +474,10 @@ async def random_acg_photo() -> str:
     # Ensure sandbox container is running
     await ensure_container_running()
 
-    # Generate timestamped sandbox path and docker cp
+    # Generate a timestamped, randomized sandbox path and docker cp
     timestamp = datetime.now().strftime("%y%m%d_%H%M%S")
-    sandbox_name = f"apple_photo_export_{timestamp}{ext}"
+    random_suffix = f"{random.randint(0, 999999):06d}"
+    sandbox_name = f"apple_photo_export_{timestamp}_{random_suffix}{ext}"
     sandbox_path = f"/tmp/{sandbox_name}"
 
     cp_result = subprocess.run(

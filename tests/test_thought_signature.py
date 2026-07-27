@@ -214,7 +214,7 @@ class TestAdvanceModelSelection:
         self.models.get_standard_api_model = _capture
 
         assert self.models.get_advance_model() is sentinel
-        assert captured_calls == [("target-model:v2", "xhigh")]
+        assert captured_calls == [("target-model:v2", "high")]
 
     def test_reasoning_effort_is_configurable_and_disabled_with_thinking(self):
         captured_efforts: list[str | None] = []

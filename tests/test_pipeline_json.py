@@ -100,6 +100,14 @@ class TestMessageToJson:
         )
         assert "message_id" not in result
 
+    def test_cq_at_accepts_space_after_opening_bracket(self):
+        text = "hi [ CQ:at,qq=123456] [\tCQ:at,qq=789012]"
+
+        assert self.utils.extract_cq_at_user_ids(text) == [123456, 789012]
+
+    def test_cq_at_rejects_newline_after_opening_bracket(self):
+        assert self.utils.extract_cq_at_user_ids("[\nCQ:at,qq=123456]") == []
+
     def test_message_with_depth(self):
         result = self.utils.message_to_json(
             user_name="王五", user_id=333,
