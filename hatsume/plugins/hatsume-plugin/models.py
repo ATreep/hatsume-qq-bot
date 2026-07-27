@@ -134,7 +134,7 @@ def get_google_api_model(
 
 def get_advance_model(
     thinking: bool = True,
-    reasoning_effort: ReasoningEffort = "xhigh",
+    reasoning_effort: ReasoningEffort = "high",
 ) -> BaseChatModel:
     model_name = _config.ADVANCE_MODEL_NAME
     print(f"⚡ Using {model_name} for advance model")
@@ -224,7 +224,7 @@ async def generate_image_for_volc(
 ) -> str:
     """Generate image via Seedream. Returns HTTP URL."""
     images = await _resolve_image_srcs(images)
-    client = Ark(base_url=get_base_url("volc_plan"), api_key=get_api_key("volc_plan")())
+    client = Ark(base_url=get_base_url("volc_plan") + "/v3", api_key=get_api_key("volc_plan")())
 
     model_name = SEEDREAM_5_0_LITE
 
@@ -267,7 +267,7 @@ def generate_image_for_kege(
     }
 
     resp = _requests.post(
-        f"{base_url}/images/generations",
+        f"{base_url}/v1/images/generations",
         headers={
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",

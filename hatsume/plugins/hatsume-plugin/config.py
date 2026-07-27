@@ -128,8 +128,8 @@ def get_api_key(
 # ---------------------------------------------------------------------------
 # Behavioral constants
 # ---------------------------------------------------------------------------
-USER_INPUT_CONFIRM_DURING_TIME: int = 10
-CONTEXT_QUEUE_LEN: int = 50
+USER_INPUT_CONFIRM_DURING_TIME: int = 7
+CONTEXT_QUEUE_LEN: int = 70
 CONTEXT_QUEUE_OVERLAP_LEN: int = 7
 VIDEO_RATE_LIMIT_SECONDS: int = 60
 GENERATE_IMAGE_RATE_LIMIT_SECONDS: int = 60
@@ -148,7 +148,7 @@ AUTO_RESPONSE_GROUP_ID: int = _get_int_env("AUTO_RESPONSE_GROUP_ID")
 # ---------------------------------------------------------------------------
 # Memory constants
 # ---------------------------------------------------------------------------
-MAX_MEMORY_LIMIT: int = 50
+MAX_MEMORY_LIMIT: int = 70
 SCORE_THRESHOLD: float = 0.1
 EMBEDDING_SIMILARITY_THRESHOLD: float = 0.4
 EMBEDDING_WEIGHT: float = 0.5
