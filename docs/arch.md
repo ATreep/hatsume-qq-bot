@@ -58,6 +58,7 @@ flowchart LR
 | 定时任务管理 | /timer 或聊天工具 | 按群显示完整频率规则或全部指定时刻，支持删除；命令更新兼容为最多 10 个指定时刻 | handlers/tools.py、graph/tools.py |
 | 定时任务恢复与清理 | Bot 连接完成、每日 03:00 | 恢复原生 point 作业、补偿五分钟内漏触发，并清理已完成普通任务 | `timer/__init__.py`、timer/executor.py |
 | 自动回复 | auto_response 记录或 /autoresponse | 固定群主动参与话题，每 1 至 3 小时重新排期 | timer/、prompts.py |
+| 新成员欢迎 | `AUTO_RESPONSE_GROUP_ID` 的 OneBot `group_increase` 事件 | 激活新成员 peer，并向现有图注入欢迎任务或在无对话时启动新图 | `__init__.py`、handlers/dialogue.py |
 | Skill 加载 | /skills、skill_loader | 扫描 Markdown 与 YAML frontmatter，按需加载并进行单轮去重 | skills/ |
 | Skill 增删 | skill_create、skill_download、skill_remove | 运行时创建、下载、删除 Skill 并清理缓存 | graph/tools.py、skills/manager.py |
 | 群成员搜索 | /membersearch 或 membersearch | 昵称和群名片子串优先，再按字符重叠排序；缓存五分钟 | handlers/tools.py、`utils/__init__.py` |
@@ -98,6 +99,7 @@ flowchart LR
 | /autoresponse [提示词\|prod] | 管理员 | 一次性调试自动回复，不写数据库 | handlers/tools.py |
 | 赞我、互赞、点赞 | 所有人 | 尝试点赞至当日接口上限 | handlers/social.py |
 | 戳一戳机器人 | 所有人 | 从 macOS Photos 的 ACG 相册发送随机图片 | handlers/tools.py |
+| 新成员加入 `AUTO_RESPONSE_GROUP_ID` | 新成员 | 获取群名片与头像，要求机器人 at 欢迎、自我介绍并说明其他能力 | handlers/dialogue.py |
 
 图片生成只作为对话内工具提供，没有独立的 /img matcher。
 
@@ -109,7 +111,7 @@ sequenceDiagram
     participant E as 插件入口
     participant H as Handler
     QQ->>E: 群消息或 Notice
-    E->>E: priority 10 命令与戳一戳
+    E->>E: priority 10 命令、戳一戳与新成员 Notice
     E->>E: priority 20 to_me + keyword
     E->>E: priority 30 to_me 或 keyword
     E->>E: priority 100 catch-all message
@@ -185,7 +187,7 @@ handlers/dialogue.py 在模块级创建唯一 conv_state = ConversationState()�
 |---|---|---|---|
 | idle_queue / idle_source_queue | ConversationState | 当前普通消息入口不再写入；保留给既有显式 flush 接口 | flush_idle_to_auxiliary() 返回快照并保留配置的 overlap |
 | pending_queue / pending_source_queue | ConversationState | 活跃 peer 在十秒输入确认期发送消息 | flush_pending() 一次取出并清空 |
-| human_queue / human_source_queue | ConversationState | pending 刷新、Agent 通知、Timer 通知 | human_node 轮询取出并清空，最长等待五分钟 |
+| human_queue / human_source_queue | ConversationState | pending 刷新、Agent 通知、Timer 通知、新成员欢迎任务 | human_node 轮询取出并清空，最长等待五分钟 |
 | auxiliary_messages_queue / auxiliary_source_queue | graph/nodes.py | 所有非 peer 消息、显式空闲 flush、完成后的对话历史 | ai_node 每轮读取非破坏性快照；超过 CONTEXT_QUEUE_LEN 时尝试摘要，失败则保留配置数量的最新消息 |
 
 ConversationState 还保存 chat_peers、图任务、生成限流时间和回复回调。graph/nodes.py 另有模块级辅助队列、表情冷却和若干状态；graph/tools.py 另有当前群号、工具回调与每轮调用计数。因此当前系统并不支持完全隔离的多群并发对话。
@@ -262,6 +264,13 @@ Agent/Timer 从 handlers/dialogue.py 启动的新对话复用同一直接群发�
 - 清空 transcript、source_map，并重置部分运行标记。
 
 /clear 不清空 graph/nodes.py 的模块级辅助队列，因此非 peer 消息和已结束对话的辅助上下文仍可进入后续 ai_node 轮次。辅助队列只在写入后超过 CONTEXT_QUEUE_LEN 时被压缩或在压缩失败后裁剪。
+
+### 3.8 新成员欢迎
+
+- 插件入口用 `is_type(GroupIncreaseNoticeEvent)` 精确匹配 OneBot `group_increase`；仅当群号等于正数 `AUTO_RESPONSE_GROUP_ID` 且加入者不是 Bot 自身时处理。
+- handler 通过 OneBot 查询新成员群名片，失败时沿用 QQ 号，并用 `get_qq_avatar_url()` 生成头像 URL。系统 Prompt 包含用户名、QQ 号与头像，要求 at 欢迎、简短自我介绍并说明聊天以外的能力。
+- 新成员 session 总会通过 `ConversationState.activate_chat()` 加入 `chat_peers`。已有活跃对话或仍在收尾的图时，Prompt 以 `group_increase` 系统触发标记直接进入 `human_queue`，不启动第二个图；没有对话时复用 `_start_conv_for_trigger()` 启动现有 LangGraph 流程。
+- 该系统触发标记由 `human_node` 消费并移除，同时让 `chat_end_detect_node` 跳过结束判断。欢迎回复继续使用统一的直接群发送、Markdown、at 与重试逻辑。
 
 ## 4. 记忆保存与检索
 
@@ -584,7 +593,7 @@ graph/tools.py、graph/agents.py、graph/nodes.py 与 handlers/dialogue.py 之�
 
 | Python 模块 | 职责说明 |
 |---|---|
-| `hatsume/plugins/hatsume-plugin/__init__.py` | 唯一插件入口；初始化记忆；Bot 连接后恢复 Timer；修补 @ 检测；注册命令、聊天 matcher 和戳一戳事件。 |
+| `hatsume/plugins/hatsume-plugin/__init__.py` | 唯一插件入口；初始化记忆；Bot 连接后恢复 Timer；修补 @ 检测；注册命令、聊天 matcher、戳一戳与新成员事件。 |
 | hatsume/plugins/hatsume-plugin/config.py | 加载 .env.prod；定义机器人身份、模型和供应商配置读取器，以及队列、限流、图片、记忆、Timer、Docker 与 Skill 常量。文档只记录变量名，不记录真实值。 |
 | hatsume/plugins/hatsume-plugin/state.py | 定义 ConversationState。当前由 dialogue 创建一份进程级共享实例，拥有 chat_peers、idle/pending/human 队列、图任务、限流时间、回复回调和记录上下文。 |
 | hatsume/plugins/hatsume-plugin/models.py | 修补 LangChain OpenAI 消息转换以保留 reasoning_content 与 thought_signature；按运行时 ADVANCE_MODEL_NAME 创建高级模型，并创建轻量、迷你、代码模型和 Embedding；封装图片与视频供应商。 |
@@ -592,7 +601,7 @@ graph/tools.py、graph/agents.py、graph/nodes.py 与 handlers/dialogue.py 之�
 | hatsume/plugins/hatsume-plugin/character_proxy.py | 保存全局唯一的 RAM 角色代理，一次生成行为画像与外号，匹配正文称呼，识别 @ 目标并通过 ConversationState 激活 chat peer。 |
 | hatsume/plugins/hatsume-plugin/infra.py | 管理 Docker 容器启动、停止和删除；前台命令、后台进程、日志读取、stdin、超时、引用计数与延迟停止。 |
 | `hatsume/plugins/hatsume-plugin/handlers/__init__.py` | handlers 包说明。 |
-| hatsume/plugins/hatsume-plugin/handlers/dialogue.py | 标准化 OneBot 消息为 LLM JSON 和多模态内容；维护共享 ConversationState；把所有非 peer 消息路由到 auxiliary，把 peer 消息路由到 pending/human；启动图并发送、重试 AI 回复；注册 Agent 与 Timer 新对话回调。 |
+| hatsume/plugins/hatsume-plugin/handlers/dialogue.py | 标准化 OneBot 消息为 LLM JSON 和多模态内容；维护共享 ConversationState；把所有非 peer 消息路由到 auxiliary，把 peer 消息路由到 pending/human；处理新成员欢迎任务；启动图并发送、重试 AI 回复；注册 Agent 与 Timer 新对话回调。 |
 | hatsume/plugins/hatsume-plugin/handlers/forward.py | 规范化 get_forward_msg 的标准与厂商返回结构；递归解析 forward/node；渲染消息段并收集用户。 |
 | hatsume/plugins/hatsume-plugin/handlers/social.py | 执行 QQ 点赞、把累计次数保存到 likes.json，并生成排行榜。 |
 | hatsume/plugins/hatsume-plugin/handlers/tools.py | 实现戳一戳、Shell、视频、Timer、Skill 列表、成员搜索、/model、沙盒重置、Agent 查询、/clear 和自动任务调试命令；共享状态由 dialogue 注入。 |
@@ -635,7 +644,7 @@ virtual/ 下是 Shell 和 Docker 构建、启动、停止、删除脚本，不�
 | tests/test_chat_send.py | AI 文本、图片、视频发送、@、重试、分段与边界行为。 |
 | tests/test_character_proxy.py | 单一 RAM 状态、终止销毁、@ 目标 peer 激活、行为画像与身份作用域。 |
 | tests/test_container_lifecycle.py | Docker 引用计数、延迟停止、取消停止与清理。 |
-| tests/test_conversation.py | ConversationState、对话激活与结束、队列刷新和启动流程。 |
+| tests/test_conversation.py | ConversationState、对话激活与结束、队列刷新、启动流程及目标群新成员欢迎。 |
 | tests/test_forward.py | OneBot 标准与厂商变体、嵌套 forward、异常占位和用户收集。 |
 | tests/test_graph_nodes.py | Human、AI、Detect、Finish、辅助上下文、记忆标签、ADMIN MODE、通知与清理。 |
 | tests/test_md_to_image.py | Markdown 特征检测、链接保留、渲染与纯文本回退。 |

@@ -12,10 +12,17 @@ from typing import Any
 
 import requests
 from nonebot.adapters import Bot
-from nonebot.adapters.onebot.v11 import GroupMessageEvent, Message, MessageEvent, MessageSegment
+from nonebot.adapters.onebot.v11 import (
+    GroupIncreaseNoticeEvent,
+    GroupMessageEvent,
+    Message,
+    MessageEvent,
+    MessageSegment,
+)
 from PIL import Image
 
 from ..config import (
+    AUTO_RESPONSE_GROUP_ID,
     IMAGE_MAX_PIXELS,
     IMAGE_MAX_SIZE_BYTES,
     MESSAGE_MAX_LENGTH,
@@ -36,6 +43,7 @@ from ..utils import (
     build_forward_json,
     get_date,
     get_group_member_name,
+    get_qq_avatar_url,
     mask_secret_keys,
     message_to_json,
     render_cq_at_placeholders,
@@ -348,6 +356,57 @@ try:
     )
 except ImportError:
     pass  # Graceful degradation when timer executor deps aren't available
+
+
+def _build_group_increase_prompt(
+    member_name: str,
+    user_id: int,
+    avatar_url: str,
+) -> str:
+    return (
+        "(SYSTEM) 有新的成员加入了群聊。\n"
+        f"用户名：{member_name}\n"
+        f"用户QQ号：{user_id}\n"
+        f"用户头像：{avatar_url}\n"
+        "请 at 该用户表示欢迎，并简单做个自我介绍。"
+        "向新用户说明除了聊天以外，你还有哪些能力。"
+    )
+
+
+async def handle_group_increase(
+    bot: Bot,
+    event: GroupIncreaseNoticeEvent,
+) -> None:
+    """Welcome members who join the configured auto-response group."""
+    if (
+        AUTO_RESPONSE_GROUP_ID <= 0
+        or event.group_id != AUTO_RESPONSE_GROUP_ID
+        or event.user_id == event.self_id
+    ):
+        return
+
+    member_name = await get_group_member_name(bot, event.group_id, event.user_id)
+    prompt = _build_group_increase_prompt(
+        member_name,
+        event.user_id,
+        get_qq_avatar_url(event.user_id),
+    )
+
+    conversation_exists = conv_state.is_chatting or conv_state.is_graph_running
+    conv_state.activate_chat(event.get_session_id())
+
+    if conversation_exists:
+        conv_state.human_queue.append(
+            make_system_trigger_message(prompt, "group_increase")
+        )
+        return
+
+    _start_conv_for_trigger(
+        event.user_id,
+        event.group_id,
+        prompt,
+        trigger_type="group_increase",
+    )
 
 
 # ---------------------------------------------------------------------------

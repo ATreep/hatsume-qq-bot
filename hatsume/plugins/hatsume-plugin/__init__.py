@@ -4,14 +4,19 @@ from __future__ import annotations
 
 import nonebot
 from nonebot import on_message, on_command, on_fullmatch, on_notice
-from nonebot.rule import keyword, to_me
-from nonebot.adapters.onebot.v11 import Message, GroupMessageEvent, PokeNotifyEvent
+from nonebot.rule import is_type, keyword, to_me
+from nonebot.adapters.onebot.v11 import (
+    GroupIncreaseNoticeEvent,
+    GroupMessageEvent,
+    Message,
+    PokeNotifyEvent,
+)
 from nonebot.exception import FinishedException
 from nonebot.adapters import Bot
 from nonebot.params import CommandArg
 
 from .config import ADMIN_QQ_ID
-from .handlers.dialogue import start_chat, user_chat_handle
+from .handlers.dialogue import handle_group_increase, start_chat, user_chat_handle
 from .handlers.tools import (
     handle_agents,
     handle_autoresponse,
@@ -143,7 +148,16 @@ user_chat = on_message(priority=100)
 # ---------------------------------------------------------------------------
 # Poke (戳一戳) notice — auto-reply with random ACG photo
 # ---------------------------------------------------------------------------
-poke_notice = on_notice(priority=10, block=False)
+poke_notice = on_notice(
+    rule=is_type(PokeNotifyEvent),
+    priority=10,
+    block=False,
+)
+group_increase_notice = on_notice(
+    rule=is_type(GroupIncreaseNoticeEvent),
+    priority=10,
+    block=False,
+)
 
 # ---------------------------------------------------------------------------
 # Command handlers
@@ -259,3 +273,8 @@ async def _(bot: Bot, event: GroupMessageEvent):
 async def _(bot: Bot, event: PokeNotifyEvent):
     if event.is_tome():
         await handle_poke(bot, event)
+
+
+@group_increase_notice.handle()
+async def _(bot: Bot, event: GroupIncreaseNoticeEvent):
+    await handle_group_increase(bot, event)

@@ -57,6 +57,7 @@ def _stub_config():
     mod.SHELL_MAX_OUTPUT = 1000
     mod.SHELL_TIMEOUT = 10
     mod.BOT_QQ_ID = 1234567890
+    mod.AUTO_RESPONSE_GROUP_ID = 100
 
 
 def _load_state_module():
@@ -198,6 +199,9 @@ def _load_conversation_module():
     utils_mod.CQ_AT_PATTERN = re.compile(r"\[CQ:at,qq=(\d+)\]")
     utils_mod.get_date = MagicMock(return_value="2026/01/01 00:00:00")
     utils_mod.get_group_member_name = AsyncMock(return_value="user")
+    utils_mod.get_qq_avatar_url = MagicMock(
+        side_effect=lambda user_id: f"https://q.qlogo.cn/avatar/{user_id}"
+    )
     utils_mod.mask_secret_keys = MagicMock(side_effect=lambda text: text)
     utils_mod.message_to_json = MagicMock(return_value={})
     utils_mod.render_cq_at_placeholders = AsyncMock(side_effect=lambda text, group_id: (text, []))
@@ -255,6 +259,7 @@ def _load_conversation_module():
     sys.modules[v11_name].Message = _Message
     sys.modules[v11_name].MessageSegment = MagicMock()
     sys.modules[v11_name].GroupMessageEvent = MagicMock()
+    sys.modules[v11_name].GroupIncreaseNoticeEvent = MagicMock()
     sys.modules[v11_name].MessageEvent = MagicMock()
     sys.modules[v11_name].PokeNotifyEvent = MagicMock()
 
@@ -291,6 +296,108 @@ def test_start_new_conversation_marks_system_task_for_detection_bypass():
             "_hatsume_system_trigger": "system_task",
         }
     ]
+
+
+def _make_group_increase_event(*, group_id=100, user_id=123456, self_id=999999):
+    return types.SimpleNamespace(
+        group_id=group_id,
+        user_id=user_id,
+        self_id=self_id,
+        get_session_id=lambda: f"group_{group_id}_{user_id}",
+    )
+
+
+def test_group_increase_starts_conversation_and_activates_new_member_peer():
+    dialogue = _load_conversation_module()
+    dialogue.AUTO_RESPONSE_GROUP_ID = 100
+    dialogue.conv_state = _make_state()
+    dialogue.get_group_member_name = AsyncMock(return_value="新成员")
+    dialogue.get_qq_avatar_url = MagicMock(
+        return_value="https://q.qlogo.cn/avatar/123456"
+    )
+    dialogue._start_conv_for_trigger = MagicMock()
+    bot = MagicMock()
+    event = _make_group_increase_event()
+
+    asyncio.run(dialogue.handle_group_increase(bot, event))
+
+    assert dialogue.conv_state.is_chatting
+    assert dialogue.conv_state.chat_peers == {"group_100_123456"}
+    dialogue.get_group_member_name.assert_awaited_once_with(bot, 100, 123456)
+    dialogue._start_conv_for_trigger.assert_called_once()
+    user_id, group_id, prompt = dialogue._start_conv_for_trigger.call_args.args
+    assert (user_id, group_id) == (123456, 100)
+    assert dialogue._start_conv_for_trigger.call_args.kwargs == {
+        "trigger_type": "group_increase"
+    }
+    assert prompt == (
+        "(SYSTEM) 有新的成员加入了群聊。\n"
+        "用户名：新成员\n"
+        "用户QQ号：123456\n"
+        "用户头像：https://q.qlogo.cn/avatar/123456\n"
+        "请 at 该用户表示欢迎，并简单做个自我介绍。"
+        "向新用户说明除了聊天以外，你还有哪些能力。"
+    )
+
+
+def test_group_increase_injects_active_conversation_without_starting_another():
+    dialogue = _load_conversation_module()
+    dialogue.AUTO_RESPONSE_GROUP_ID = 100
+    dialogue.conv_state = _make_state()
+    dialogue.conv_state.activate_chat("group_100_1")
+    dialogue.get_group_member_name = AsyncMock(return_value="新成员")
+    dialogue.get_qq_avatar_url = MagicMock(return_value="avatar-url")
+    dialogue._start_conv_for_trigger = MagicMock()
+    event = _make_group_increase_event()
+
+    asyncio.run(dialogue.handle_group_increase(MagicMock(), event))
+
+    assert dialogue.conv_state.chat_peers == {
+        "group_100_1",
+        "group_100_123456",
+    }
+    assert dialogue.conv_state.human_queue == [
+        {
+            "type": "text",
+            "text": (
+                "(SYSTEM) 有新的成员加入了群聊。\n"
+                "用户名：新成员\n"
+                "用户QQ号：123456\n"
+                "用户头像：avatar-url\n"
+                "请 at 该用户表示欢迎，并简单做个自我介绍。"
+                "向新用户说明除了聊天以外，你还有哪些能力。"
+            ),
+            "_hatsume_system_trigger": "group_increase",
+        }
+    ]
+    dialogue._start_conv_for_trigger.assert_not_called()
+
+
+def test_group_increase_ignores_other_groups_and_the_bot_itself():
+    dialogue = _load_conversation_module()
+    dialogue.AUTO_RESPONSE_GROUP_ID = 100
+    dialogue.conv_state = _make_state()
+    dialogue.get_group_member_name = AsyncMock(return_value="ignored")
+    dialogue._start_conv_for_trigger = MagicMock()
+
+    asyncio.run(
+        dialogue.handle_group_increase(
+            MagicMock(),
+            _make_group_increase_event(group_id=101),
+        )
+    )
+    asyncio.run(
+        dialogue.handle_group_increase(
+            MagicMock(),
+            _make_group_increase_event(user_id=999999, self_id=999999),
+        )
+    )
+
+    assert not dialogue.conv_state.is_chatting
+    assert dialogue.conv_state.chat_peers == set()
+    assert dialogue.conv_state.human_queue == []
+    dialogue.get_group_member_name.assert_not_awaited()
+    dialogue._start_conv_for_trigger.assert_not_called()
 
 
 def test_handle_ai_message_sends_plain_text_segments_without_at_prefix():
