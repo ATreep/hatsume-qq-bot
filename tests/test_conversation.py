@@ -57,6 +57,7 @@ def _stub_config():
     mod.SHELL_MAX_OUTPUT = 1000
     mod.SHELL_TIMEOUT = 10
     mod.BOT_QQ_ID = 1234567890
+    mod.AUTO_RESPONSE_GROUP_ID = 100
 
 
 def _load_state_module():
@@ -198,6 +199,9 @@ def _load_conversation_module():
     utils_mod.CQ_AT_PATTERN = re.compile(r"\[CQ:at,qq=(\d+)\]")
     utils_mod.get_date = MagicMock(return_value="2026/01/01 00:00:00")
     utils_mod.get_group_member_name = AsyncMock(return_value="user")
+    utils_mod.get_qq_avatar_url = MagicMock(
+        side_effect=lambda user_id: f"https://q.qlogo.cn/avatar/{user_id}"
+    )
     utils_mod.mask_secret_keys = MagicMock(side_effect=lambda text: text)
     utils_mod.message_to_json = MagicMock(return_value={})
     utils_mod.render_cq_at_placeholders = AsyncMock(side_effect=lambda text, group_id: (text, []))
@@ -255,6 +259,7 @@ def _load_conversation_module():
     sys.modules[v11_name].Message = _Message
     sys.modules[v11_name].MessageSegment = MagicMock()
     sys.modules[v11_name].GroupMessageEvent = MagicMock()
+    sys.modules[v11_name].GroupIncreaseNoticeEvent = MagicMock()
     sys.modules[v11_name].MessageEvent = MagicMock()
     sys.modules[v11_name].PokeNotifyEvent = MagicMock()
 
@@ -293,16 +298,136 @@ def test_start_new_conversation_marks_system_task_for_detection_bypass():
     ]
 
 
+def _make_group_increase_event(*, group_id=100, user_id=123456, self_id=999999):
+    return types.SimpleNamespace(
+        group_id=group_id,
+        user_id=user_id,
+        self_id=self_id,
+        get_session_id=lambda: f"group_{group_id}_{user_id}",
+    )
+
+
+def test_group_increase_starts_conversation_and_activates_new_member_peer():
+    dialogue = _load_conversation_module()
+    dialogue.AUTO_RESPONSE_GROUP_ID = 100
+    dialogue.conv_state = _make_state()
+    dialogue.get_group_member_name = AsyncMock(return_value="新成员")
+    dialogue.get_qq_avatar_url = MagicMock(
+        return_value="https://q.qlogo.cn/avatar/123456"
+    )
+    dialogue._start_conv_for_trigger = MagicMock()
+    bot = MagicMock()
+    event = _make_group_increase_event()
+
+    asyncio.run(dialogue.handle_group_increase(bot, event))
+
+    assert dialogue.conv_state.is_chatting
+    assert dialogue.conv_state.chat_peers == {"group_100_123456"}
+    dialogue.get_group_member_name.assert_awaited_once_with(bot, 100, 123456)
+    dialogue._start_conv_for_trigger.assert_called_once()
+    user_id, group_id, prompt = dialogue._start_conv_for_trigger.call_args.args
+    assert (user_id, group_id) == (123456, 100)
+    assert dialogue._start_conv_for_trigger.call_args.kwargs == {
+        "trigger_type": "group_increase"
+    }
+    assert prompt == (
+        "(SYSTEM) 有新的成员加入了群聊。\n"
+        "用户名：新成员\n"
+        "用户QQ号：123456\n"
+        "用户头像：https://q.qlogo.cn/avatar/123456\n"
+        "请 at 该用户表示欢迎，并简单做个自我介绍。"
+        "向新用户说明除了聊天以外，你还有哪些能力。"
+    )
+
+
+def test_group_increase_injects_active_conversation_without_starting_another():
+    dialogue = _load_conversation_module()
+    dialogue.AUTO_RESPONSE_GROUP_ID = 100
+    dialogue.conv_state = _make_state()
+    dialogue.conv_state.activate_chat("group_100_1")
+    dialogue.get_group_member_name = AsyncMock(return_value="新成员")
+    dialogue.get_qq_avatar_url = MagicMock(return_value="avatar-url")
+    dialogue._start_conv_for_trigger = MagicMock()
+    event = _make_group_increase_event()
+
+    asyncio.run(dialogue.handle_group_increase(MagicMock(), event))
+
+    assert dialogue.conv_state.chat_peers == {
+        "group_100_1",
+        "group_100_123456",
+    }
+    assert dialogue.conv_state.human_queue == [
+        {
+            "type": "text",
+            "text": (
+                "(SYSTEM) 有新的成员加入了群聊。\n"
+                "用户名：新成员\n"
+                "用户QQ号：123456\n"
+                "用户头像：avatar-url\n"
+                "请 at 该用户表示欢迎，并简单做个自我介绍。"
+                "向新用户说明除了聊天以外，你还有哪些能力。"
+            ),
+            "_hatsume_system_trigger": "group_increase",
+        }
+    ]
+    dialogue._start_conv_for_trigger.assert_not_called()
+
+
+def test_group_increase_ignores_other_groups_and_the_bot_itself():
+    dialogue = _load_conversation_module()
+    dialogue.AUTO_RESPONSE_GROUP_ID = 100
+    dialogue.conv_state = _make_state()
+    dialogue.get_group_member_name = AsyncMock(return_value="ignored")
+    dialogue._start_conv_for_trigger = MagicMock()
+
+    asyncio.run(
+        dialogue.handle_group_increase(
+            MagicMock(),
+            _make_group_increase_event(group_id=101),
+        )
+    )
+    asyncio.run(
+        dialogue.handle_group_increase(
+            MagicMock(),
+            _make_group_increase_event(user_id=999999, self_id=999999),
+        )
+    )
+
+    assert not dialogue.conv_state.is_chatting
+    assert dialogue.conv_state.chat_peers == set()
+    assert dialogue.conv_state.human_queue == []
+    dialogue.get_group_member_name.assert_not_awaited()
+    dialogue._start_conv_for_trigger.assert_not_called()
+
+
 def test_handle_ai_message_sends_plain_text_segments_without_at_prefix():
     dialogue = _load_conversation_module()
     dialogue.auto_convert_text = AsyncMock(return_value=["plain-text-segment"])
     dialogue.MessageSegment.at = MagicMock(return_value="at-segment")
-    matcher = types.SimpleNamespace(send=AsyncMock())
+    bot = types.SimpleNamespace(send_group_msg=AsyncMock())
 
-    asyncio.run(dialogue.handle_ai_message("hello", matcher))
+    asyncio.run(dialogue.handle_ai_message("hello", bot, group_id=7))
 
     dialogue.MessageSegment.at.assert_not_called()
-    matcher.send.assert_awaited_once_with("plain-text-segment")
+    bot.send_group_msg.assert_awaited_once_with(
+        group_id=7,
+        message="plain-text-segment",
+    )
+
+
+def test_handle_ai_message_sends_to_explicit_group_without_matcher_context():
+    dialogue = _load_conversation_module()
+    text_segment = types.SimpleNamespace(type="text", data={"text": "answer"})
+    dialogue.auto_convert_text = AsyncMock(return_value=[text_segment])
+    dialogue.asyncio.sleep = AsyncMock()
+    bot = types.SimpleNamespace(send_group_msg=AsyncMock())
+
+    asyncio.run(dialogue.handle_ai_message("answer", bot, group_id=100))
+
+    bot.send_group_msg.assert_awaited_once_with(
+        group_id=100,
+        message=text_segment,
+    )
 
 
 def test_handle_ai_message_replaces_cq_at_in_pure_text():
@@ -317,11 +442,11 @@ def test_handle_ai_message_replaces_cq_at_in_pure_text():
     dialogue.MessageSegment.at = MagicMock(
         side_effect=lambda uid: types.SimpleNamespace(type="at", data={"qq": uid})
     )
-    matcher = types.SimpleNamespace(send=AsyncMock())
+    bot = types.SimpleNamespace(send_group_msg=AsyncMock())
 
-    asyncio.run(dialogue.handle_ai_message("hi [CQ:at,qq=123456]", matcher, group_id=7))
+    asyncio.run(dialogue.handle_ai_message("hi [CQ:at,qq=123456]", bot, group_id=7))
 
-    payload = matcher.send.await_args.args[0]
+    payload = bot.send_group_msg.await_args.kwargs["message"]
     assert [seg.type for seg in payload] == ["text", "at"]
     assert payload[0].data["text"] == "hi "
     assert payload[1].data["qq"] == 123456
@@ -335,11 +460,11 @@ def test_handle_ai_message_puts_cq_at_segments_before_rendered_image():
     dialogue.MessageSegment.at = MagicMock(
         side_effect=lambda uid: types.SimpleNamespace(type="at", data={"qq": uid})
     )
-    matcher = types.SimpleNamespace(send=AsyncMock())
+    bot = types.SimpleNamespace(send_group_msg=AsyncMock())
 
-    asyncio.run(dialogue.handle_ai_message("# [CQ:at,qq=123456]\nresult", matcher, group_id=7))
+    asyncio.run(dialogue.handle_ai_message("# [CQ:at,qq=123456]\nresult", bot, group_id=7))
 
-    payload = matcher.send.await_args.args[0]
+    payload = bot.send_group_msg.await_args.kwargs["message"]
     assert [seg.type for seg in payload] == ["at", "image"]
     assert payload[0].data["qq"] == 123456
 
@@ -424,6 +549,47 @@ def test_non_peer_messages_always_enter_auxiliary_queue():
     assert dialogue.conv_state.human_queue == []
 
 
+def test_user_chat_callback_sends_to_origin_group_without_matcher_context():
+    dialogue = _load_conversation_module()
+    text_segment = types.SimpleNamespace(type="text", data={"text": "answer"})
+    dialogue.auto_convert_text = AsyncMock(return_value=[text_segment])
+    dialogue.get_human_message = AsyncMock(
+        return_value=(
+            [{"type": "text", "text": "question"}],
+            {"source_id": "m1", "text": "question", "people": []},
+        )
+    )
+    dialogue.USER_INPUT_CONFIRM_DURING_TIME = 0
+
+    character_proxy_name = "hatsume.plugins.hatsume-plugin.character_proxy"
+    character_proxy = types.ModuleType(character_proxy_name)
+    character_proxy.activate_character_proxy_peer = MagicMock()
+    sys.modules[character_proxy_name] = character_proxy
+
+    event = types.SimpleNamespace(
+        group_id=100,
+        user_id=42,
+        original_message=[],
+        get_session_id=lambda: "group_100_42",
+    )
+    bot = types.SimpleNamespace(send_group_msg=AsyncMock())
+    matcher = types.SimpleNamespace(send=AsyncMock())
+    dialogue.conv_state.activate_chat(event.get_session_id())
+
+    async def invoke_ai_callback(_state, ai_callback, _configure_tools, **_kwargs):
+        await ai_callback("answer")
+
+    dialogue.start_new_conversation = AsyncMock(side_effect=invoke_ai_callback)
+
+    asyncio.run(dialogue.user_chat_handle(bot, event, matcher))
+
+    bot.send_group_msg.assert_awaited_once_with(
+        group_id=100,
+        message=text_segment,
+    )
+    matcher.send.assert_not_awaited()
+
+
 def test_handle_ai_message_prepends_reply_segment():
     dialogue = _load_conversation_module()
     text_seg = types.SimpleNamespace(type="text", data={"text": "answer"})
@@ -433,15 +599,15 @@ def test_handle_ai_message_prepends_reply_segment():
             type="reply", data={"id": message_id}
         )
     )
-    matcher = types.SimpleNamespace(send=AsyncMock())
+    bot = types.SimpleNamespace(send_group_msg=AsyncMock())
 
     asyncio.run(
         dialogue.handle_ai_message(
-            "answer", matcher, reply_to_message_id=321
+            "answer", bot, group_id=7, reply_to_message_id=321
         )
     )
 
-    payload = matcher.send.await_args.args[0]
+    payload = bot.send_group_msg.await_args.kwargs["message"]
     assert [seg.type for seg in payload] == ["reply", "text"]
     assert payload[0].data["id"] == 321
 
@@ -455,20 +621,20 @@ def test_handle_ai_message_reply_failure_falls_back_to_plain_send():
             type="reply", data={"id": message_id}
         )
     )
-    matcher = types.SimpleNamespace(
-        send=AsyncMock(side_effect=[RuntimeError("reply rejected"), None])
+    bot = types.SimpleNamespace(
+        send_group_msg=AsyncMock(side_effect=[RuntimeError("reply rejected"), None])
     )
 
     asyncio.run(
         dialogue.handle_ai_message(
-            "answer", matcher, reply_to_message_id=321
+            "answer", bot, group_id=7, reply_to_message_id=321
         )
     )
 
-    assert matcher.send.await_count == 2
-    first_payload = matcher.send.await_args_list[0].args[0]
+    assert bot.send_group_msg.await_count == 2
+    first_payload = bot.send_group_msg.await_args_list[0].kwargs["message"]
     assert first_payload[0].type == "reply"
-    assert matcher.send.await_args_list[1].args[0] is text_seg
+    assert bot.send_group_msg.await_args_list[1].kwargs["message"] is text_seg
 
 
 def test_reply_segment_stays_first_with_cq_at_output():
@@ -492,18 +658,18 @@ def test_reply_segment_stays_first_with_cq_at_output():
             type="reply", data={"id": message_id}
         )
     )
-    matcher = types.SimpleNamespace(send=AsyncMock())
+    bot = types.SimpleNamespace(send_group_msg=AsyncMock())
 
     asyncio.run(
         dialogue.handle_ai_message(
             "hi [CQ:at,qq=123456]",
-            matcher,
+            bot,
             group_id=7,
             reply_to_message_id=321,
         )
     )
 
-    payload = matcher.send.await_args.args[0]
+    payload = bot.send_group_msg.await_args.kwargs["message"]
     assert [seg.type for seg in payload] == ["reply", "text", "at"]
 
 
@@ -516,18 +682,18 @@ def test_reply_segment_stays_first_with_rendered_image_output():
             type="reply", data={"id": message_id}
         )
     )
-    matcher = types.SimpleNamespace(send=AsyncMock())
+    bot = types.SimpleNamespace(send_group_msg=AsyncMock())
 
     asyncio.run(
         dialogue.handle_ai_message(
             "# rendered reply",
-            matcher,
+            bot,
             group_id=7,
             reply_to_message_id=321,
         )
     )
 
-    payload = matcher.send.await_args.args[0]
+    payload = bot.send_group_msg.await_args.kwargs["message"]
     assert [seg.type for seg in payload] == ["reply", "image"]
 
 

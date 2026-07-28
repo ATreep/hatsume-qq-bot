@@ -12,10 +12,17 @@ from typing import Any
 
 import requests
 from nonebot.adapters import Bot
-from nonebot.adapters.onebot.v11 import GroupMessageEvent, Message, MessageEvent, MessageSegment
+from nonebot.adapters.onebot.v11 import (
+    GroupIncreaseNoticeEvent,
+    GroupMessageEvent,
+    Message,
+    MessageEvent,
+    MessageSegment,
+)
 from PIL import Image
 
 from ..config import (
+    AUTO_RESPONSE_GROUP_ID,
     IMAGE_MAX_PIXELS,
     IMAGE_MAX_SIZE_BYTES,
     MESSAGE_MAX_LENGTH,
@@ -36,6 +43,7 @@ from ..utils import (
     build_forward_json,
     get_date,
     get_group_member_name,
+    get_qq_avatar_url,
     mask_secret_keys,
     message_to_json,
     render_cq_at_placeholders,
@@ -350,6 +358,57 @@ except ImportError:
     pass  # Graceful degradation when timer executor deps aren't available
 
 
+def _build_group_increase_prompt(
+    member_name: str,
+    user_id: int,
+    avatar_url: str,
+) -> str:
+    return (
+        "(SYSTEM) 有新的成员加入了群聊。\n"
+        f"用户名：{member_name}\n"
+        f"用户QQ号：{user_id}\n"
+        f"用户头像：{avatar_url}\n"
+        "请 at 该用户表示欢迎，并简单做个自我介绍。"
+        "向新用户说明除了聊天以外，你还有哪些能力。"
+    )
+
+
+async def handle_group_increase(
+    bot: Bot,
+    event: GroupIncreaseNoticeEvent,
+) -> None:
+    """Welcome members who join the configured auto-response group."""
+    if (
+        AUTO_RESPONSE_GROUP_ID <= 0
+        or event.group_id != AUTO_RESPONSE_GROUP_ID
+        or event.user_id == event.self_id
+    ):
+        return
+
+    member_name = await get_group_member_name(bot, event.group_id, event.user_id)
+    prompt = _build_group_increase_prompt(
+        member_name,
+        event.user_id,
+        get_qq_avatar_url(event.user_id),
+    )
+
+    conversation_exists = conv_state.is_chatting or conv_state.is_graph_running
+    conv_state.activate_chat(event.get_session_id())
+
+    if conversation_exists:
+        conv_state.human_queue.append(
+            make_system_trigger_message(prompt, "group_increase")
+        )
+        return
+
+    _start_conv_for_trigger(
+        event.user_id,
+        event.group_id,
+        prompt,
+        trigger_type="group_increase",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Conversation startup (merged from handlers/conversation.py)
 # ---------------------------------------------------------------------------
@@ -508,13 +567,15 @@ async def _send_group_ai_message(
     group_id: int,
     msg: str | Message | MessageSegment,
     reply_to_message_id: int | None = None,
-) -> None:
+) -> bool:
     """Send one AI response directly to a group with reply fallback."""
     segments, force_message = await _build_ai_response_segments(
         msg,
         group_id,
         reply_to_message_id=reply_to_message_id,
     )
+    if not segments:
+        return False
     try:
         await bot.send_group_msg(
             group_id=group_id,
@@ -538,19 +599,24 @@ async def _send_group_ai_message(
                 fallback_force,
             )
         )
+    return True
 
 
 async def handle_ai_message(
     msg: str | Message | MessageSegment,
-    matcher,
-    group_id: int | None = None,
+    bot: Bot,
+    group_id: int,
     retry: int = 0,
     reply_to_message_id: int | None = None,
 ) -> None:
-    """Send AI response to the chat. Retries up to 5 times."""
+    """Send an AI response to an explicit group. Retries up to 5 times."""
     if retry >= 5:
         try:
-            await matcher.send("（电波受到干扰...想要发出的内容丢失了...）")
+            await _send_group_ai_message(
+                bot,
+                group_id,
+                "（电波受到干扰...想要发出的内容丢失了...）",
+            )
         except Exception:
             pass
         return
@@ -560,39 +626,31 @@ async def handle_ai_message(
         print("Current conversation ends")
         return
 
-    segments, force_message = await _build_ai_response_segments(
-        msg,
-        group_id,
-        reply_to_message_id=reply_to_message_id,
-    )
-    if not segments:
-        await matcher.send("（电波受到干扰...想要发出的内容丢失了...）")
-        return
-
     try:
-        if force_message:
-            await matcher.send(_message_payload_for_segments(segments, force_message=True))
-        else:
-            for seg in segments:
-                await matcher.send(seg)
+        sent = await _send_group_ai_message(
+            bot,
+            group_id,
+            msg,
+            reply_to_message_id=reply_to_message_id,
+        )
+        if not sent:
+            await _send_group_ai_message(
+                bot,
+                group_id,
+                "（电波受到干扰...想要发出的内容丢失了...）",
+            )
     except Exception as e:
-        print("Send error: ", e)
-        if reply_to_message_id is not None:
-            print(
-                "Reply target rejected; retrying without reply segment: "
-                f"{reply_to_message_id}"
-            )
-            await handle_ai_message(
-                msg,
-                matcher,
-                group_id=group_id,
-                retry=retry,
-                reply_to_message_id=None,
-            )
-            return
+        print("Send error: ", str(e))
+        traceback.print_exc()
         await asyncio.sleep(3)
         print(f"Retry sending message, {retry=}")
-        await handle_ai_message(msg, matcher, group_id=group_id, retry=retry + 1)
+        await handle_ai_message(
+            msg,
+            bot,
+            group_id=group_id,
+            retry=retry + 1,
+            reply_to_message_id=reply_to_message_id,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -657,7 +715,7 @@ async def user_chat_handle(bot: Bot, event: GroupMessageEvent, user_chat_matcher
             async def ai_cb(msg, reply_to_message_id=None):
                 await handle_ai_message(
                     msg,
-                    user_chat_matcher,
+                    bot,
                     group_id=event.group_id,
                     reply_to_message_id=reply_to_message_id,
                 )
