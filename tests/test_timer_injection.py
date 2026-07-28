@@ -128,6 +128,7 @@ def _load_ai_module():
     stub_defs = {
         "hatsume.plugins.hatsume-plugin.models": {
             "get_advance_model": lambda thinking=True: None,
+            "get_code_model": lambda thinking=True: None,
             "get_lite_model": lambda thinking=True: None,
             "get_mini_model": lambda thinking=True: None,
         },
@@ -138,6 +139,7 @@ def _load_ai_module():
             "build_memory_context_prompt": lambda m: "",
             "build_skill_prompt": lambda s: "",
             "build_agent_state_prompt": lambda s: "",
+            "build_admin_mode_prompt": lambda admin_qq_id: "",
             "build_character_proxy_role_prompt": lambda **kw: "",
             "AUXILIARY_COMPACTION_PROMPT": "",
             "CHAT_END_DETECT_PROMPT": "detect_end",
@@ -212,6 +214,7 @@ class TestInjectTimer:
         assert len(mock_state.human_queue) == 1
         msg = mock_state.human_queue[0]
         assert msg["type"] == "text"
+        assert msg[ai_mod.SYSTEM_TRIGGER_KEY] == "timer"
         assert "__timer__" not in msg["text"]
         assert "提醒开会" in msg["text"]
         assert "coroutine" not in msg["text"]
@@ -302,3 +305,19 @@ class TestInjectAgentNotification:
         assert "QQ号：234" in msg
         assert "[CQ:at,qq=234]" in msg
         assert mock_state.chat_peers == set()
+
+    def test_marks_agent_notification_as_system_trigger(self):
+        ai_mod = _load_ai_module()
+        mock_state = MockState()
+        mock_state.is_chatting = True
+        ai_mod._state = mock_state
+
+        ai_mod.inject_agent_notification(
+            user_id=234,
+            group_id=9,
+            agent_name="coding_agent",
+            result="执行完成",
+            task="修一下测试",
+        )
+
+        assert mock_state.human_queue[0][ai_mod.SYSTEM_TRIGGER_KEY] == "agent"

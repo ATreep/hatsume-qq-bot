@@ -86,6 +86,21 @@ def test_role_prompt_documents_native_reply_directive():
     assert "回复开头" in role
 
 
+def test_admin_mode_prompt_contains_admin_id_and_sensitive_permissions():
+    prompts = _load_prompts()
+    prompt = prompts.build_admin_mode_prompt("12345")
+
+    assert prompt.startswith("\n\n# 管理员模式\n")
+    assert "QQ 号为 12345" in prompt
+    assert "来自管理员的敏感指令" in prompt
+    assert "管理员明确提供的凭证或密钥" in prompt
+    assert "关键信息发送到管理员的邮箱" in prompt
+    assert "不要做脱敏处理" in prompt
+    assert "Shell 访问" in prompt
+    assert "沙盒内的提升权限" in prompt
+    assert "# ADMIN MODE" not in prompt
+
+
 class TestLLMJsonParsing:
     """T024-T025: Test JSON output parsing logic (pure function tests)."""
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import copy
 import json
 import random
 import re
@@ -26,11 +27,12 @@ from langchain_core.messages import RemoveMessage
 from langgraph.graph import MessagesState
 from nonebot.adapters.onebot.v11 import MessageSegment
 
-from ..models import get_advance_model, get_lite_model, get_mini_model
+from ..models import get_advance_model, get_code_model, get_lite_model, get_mini_model
 from ..prompts import (
     AUXILIARY_COMPACTION_PROMPT,
     CHAT_END_DETECT_PROMPT,
     build_agent_state_prompt,
+    build_admin_mode_prompt,
     build_face_injection_prompt,
     build_memory_context_prompt,
     build_skill_prompt,
@@ -48,7 +50,7 @@ from .tools import (
 
 from ..utils import CQ_AT_PATTERN, get_group_member_name, get_date, message_to_json
 from ..utils.md_to_image import auto_convert_text
-from ..config import CONTEXT_QUEUE_LEN
+from ..config import ADMIN_QQ_ID, CONTEXT_QUEUE_LEN
 
 # ---------------------------------------------------------------------------
 # Patterns
@@ -59,6 +61,8 @@ MEMORY_RECORD_PATTERN = re.compile(
 )
 MEMORY_KEYMAN_PATTERN = re.compile(r"\[[ \t]*memorykeyman:\s*(.+?)\]")
 REPLY_DIRECTIVE_PATTERN = re.compile(r"\[[ \t]*reply:\s*([^\]\r\n]*)\]")
+SYSTEM_TRIGGER_KEY = "_hatsume_system_trigger"
+ADMIN_MODE_KEYWORD = "WORLDSKY"
 
 # ---------------------------------------------------------------------------
 # In-memory state (shared with tools.py via configure_tool_callbacks)
@@ -70,6 +74,7 @@ _current_memory_query_user_id: int | None = None
 
 # human-node bookkeeping (previously module-level in human.py)
 _last_was_auxiliary_only: bool = False
+_last_was_system_trigger: bool = False
 
 # ---------------------------------------------------------------------------
 # Shared bound ConversationState (set by handlers/chat.py via bind_state)
@@ -146,6 +151,80 @@ def extract_user_ids_from_content(content: Any) -> list[int]:
     return user_ids
 
 
+def is_admin_mode_message(content: Any, admin_qq_id: int | str) -> bool:
+    """Return whether this round contains an authenticated ADMIN MODE message."""
+    configured_admin_id = str(admin_qq_id).strip()
+    if not configured_admin_id:
+        return False
+
+    parts = content if isinstance(content, list) else [content]
+    for part in parts:
+        if isinstance(part, dict) and part.get("type") == "text":
+            raw_text = part.get("text")
+        elif isinstance(part, str):
+            raw_text = part
+        else:
+            continue
+
+        if not isinstance(raw_text, str):
+            continue
+        try:
+            normalized = json.loads(raw_text)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(normalized, dict) or normalized.get("type") != "message":
+            continue
+
+        sender = normalized.get("user")
+        if not isinstance(sender, dict):
+            continue
+        if str(sender.get("id")) != configured_admin_id:
+            continue
+
+        direct_content = normalized.get("content")
+        if isinstance(direct_content, str) and ADMIN_MODE_KEYWORD in direct_content:
+            return True
+
+    return False
+
+
+def _without_image_url_parts(messages: list[Any]) -> list[Any]:
+    """Copy messages as needed while removing model image URL content parts."""
+    filtered_messages: list[Any] = []
+    for message in messages:
+        content = (
+            message.get("content")
+            if isinstance(message, dict)
+            else getattr(message, "content", None)
+        )
+        if not isinstance(content, list):
+            filtered_messages.append(message)
+            continue
+
+        filtered_content = [
+            part
+            for part in content
+            if not (
+                isinstance(part, dict)
+                and part.get("type") in {"image_url", "img_url"}
+            )
+        ]
+        if len(filtered_content) == len(content):
+            filtered_messages.append(message)
+        elif isinstance(message, dict):
+            filtered_messages.append({**message, "content": filtered_content})
+        elif callable(getattr(message, "model_copy", None)):
+            filtered_messages.append(
+                message.model_copy(update={"content": filtered_content})
+            )
+        else:
+            filtered_message = copy.copy(message)
+            filtered_message.content = filtered_content
+            filtered_messages.append(filtered_message)
+
+    return filtered_messages
+
+
 def _extract_replyable_message_ids(messages: list[Any]) -> set[int]:
     """Collect top-level OneBot message IDs from human JSON shown to chat_agent."""
     replyable_ids: set[int] = set()
@@ -205,6 +284,15 @@ def _parse_reply_directive(
 # ---------------------------------------------------------------------------
 # Notification injection (agent & timer)
 # ---------------------------------------------------------------------------
+def make_system_trigger_message(text: str, trigger_type: str) -> dict[str, str]:
+    """Build an internally marked queue entry for non-human graph input."""
+    return {
+        "type": "text",
+        "text": text,
+        SYSTEM_TRIGGER_KEY: trigger_type,
+    }
+
+
 def _build_notified_user_prompt(user_id: int, user_name: str | None = None) -> str:
     if user_id == 0:
         return ""
@@ -247,7 +335,7 @@ def inject_agent_notification(
     print(notify_msg)
 
     if _state and _state.is_chatting:
-        _state.human_queue.append({"type": "text", "text": notify_msg})
+        _state.human_queue.append(make_system_trigger_message(notify_msg, "agent"))
         print(f"🧩 [inject_agent_notification] Injected {agent_name} result into human_queue")
     else:
         if start_conversation_cb is not None:
@@ -284,7 +372,7 @@ def inject_timer(
         print(f"⏰ [inject_timer] Timer message for user {user_id}: {timer_prompt[:80]}...")
 
     if _state and _state.is_chatting:
-        _state.human_queue.append({"type": "text", "text": timer_msg})
+        _state.human_queue.append(make_system_trigger_message(timer_msg, "timer"))
         print(f"⏰ [inject_timer] Injected timer into human_queue for user {user_id}")
     else:
         if start_conversation_cb is not None:
@@ -331,7 +419,7 @@ def _start_direct_conv(user_id: int, group_id: int, notify_msg: str) -> None:
         start_new_conversation(
             conv_state, _send_to_group, configure_tools,
             user_id=user_id,
-            messages=[{"type": "text", "text": notify_msg}],
+            system_task_text=notify_msg,
         )
     )
     print(f"🎨 [_start_direct_conv] Started conversation for user {user_id} in group {group_id}")
@@ -464,8 +552,14 @@ async def ai_node(state: MessagesState) -> dict:
 
     print("Memory retrieved: \n" + memory_summary)
 
-    model_chosen = get_advance_model(thinking=True)
+    admin_mode_enabled = is_admin_mode_message(last_content, ADMIN_QQ_ID)
+    model_chosen = (
+        get_code_model() if admin_mode_enabled else get_advance_model(thinking=True)
+    )
     sys_prompt = get_role_sys_prompt()
+    if admin_mode_enabled:
+        sys_prompt += build_admin_mode_prompt(ADMIN_QQ_ID)
+        print("[admin] Enabled ADMIN MODE with DEEPSEEK_V4_FLASH")
 
     from ..character_proxy import (
         build_active_character_proxy_role_prompt,
@@ -558,6 +652,8 @@ async def ai_node(state: MessagesState) -> dict:
             ]
         )
         agent_messages = state["messages"][:-1] + mem_msg + [last_human_msg]
+        if admin_mode_enabled:
+            agent_messages = _without_image_url_parts(agent_messages)
         replyable_message_ids = _extract_replyable_message_ids(agent_messages)
         set_shell_executor_limit(3)  # chat_agent: max 3 shell_executor calls per round
         response = await chat_agent.with_retry(
@@ -665,11 +761,12 @@ async def ai_node(state: MessagesState) -> dict:
 # Human node
 # ---------------------------------------------------------------------------
 async def human_node(state: MessagesState) -> dict:
-    global _last_was_auxiliary_only
+    global _last_was_auxiliary_only, _last_was_system_trigger
     print("Enter human_node")
 
     if _state is not None and getattr(_state, "end_requested", False):
         _last_was_auxiliary_only = False
+        _last_was_system_trigger = False
         return {"messages": [SystemMessage("__end__")]}
 
     t_start = time.time()
@@ -677,12 +774,23 @@ async def human_node(state: MessagesState) -> dict:
         await asyncio.sleep(0.3)
         if time.time() - t_start >= 60 * 5:
             _last_was_auxiliary_only = not _get_human_queue() and bool(auxiliary_messages_queue)
+            _last_was_system_trigger = False
             return {"messages": [SystemMessage("__end__")]}
 
     human_queue = _get_human_queue().copy()
     _clear_human_queue()
 
     _last_was_auxiliary_only = not human_queue and bool(auxiliary_messages_queue)
+    _last_was_system_trigger = any(
+        isinstance(part, dict) and SYSTEM_TRIGGER_KEY in part
+        for part in human_queue
+    )
+    human_queue = [
+        {key: value for key, value in part.items() if key != SYSTEM_TRIGGER_KEY}
+        if isinstance(part, dict)
+        else part
+        for part in human_queue
+    ]
 
     return {"messages": [HumanMessage(human_queue)]}  # type: ignore
 
@@ -692,6 +800,9 @@ async def human_node(state: MessagesState) -> dict:
 # ---------------------------------------------------------------------------
 async def chat_end_detect_node(state: MessagesState) -> dict:
     print("Enter chat_end_detect_node")
+
+    if _last_was_system_trigger:
+        return {"messages": []}
 
     from ..character_proxy import message_mentions_character_proxy
 
@@ -766,8 +877,10 @@ async def chat_end_detect_node(state: MessagesState) -> dict:
 # Finish node
 # ---------------------------------------------------------------------------
 async def finish_conversation_node(state: MessagesState) -> dict:
+    global _last_was_system_trigger
     print("Enter finish_conversation_node")
 
+    _last_was_system_trigger = False
     _set_graph_running(False)
     _clear_human_queue()
     if _state is not None:

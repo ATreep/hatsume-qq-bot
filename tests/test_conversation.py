@@ -119,13 +119,20 @@ def _load_conversation_module():
     # Stub graph.nodes
     nodes_name = "hatsume.plugins.hatsume-plugin.graph.nodes"
     if nodes_name not in sys.modules:
-        nodes_mod = types.ModuleType(nodes_name)
-        nodes_mod.bind_state = MagicMock()
-        nodes_mod.reset_memory_record_context = MagicMock()
-        nodes_mod.set_current_query_user_id = MagicMock()
-        nodes_mod.get_role_sys_prompt = MagicMock(return_value="role-prompt")
-        nodes_mod.append_auxiliary_message = MagicMock()
-        sys.modules[nodes_name] = nodes_mod
+        sys.modules[nodes_name] = types.ModuleType(nodes_name)
+    nodes_mod = sys.modules[nodes_name]
+    nodes_mod.bind_state = MagicMock()
+    nodes_mod.reset_memory_record_context = MagicMock()
+    nodes_mod.set_current_query_user_id = MagicMock()
+    nodes_mod.get_role_sys_prompt = MagicMock(return_value="role-prompt")
+    nodes_mod.append_auxiliary_message = MagicMock()
+    nodes_mod.make_system_trigger_message = MagicMock(
+        side_effect=lambda text, trigger_type: {
+            "type": "text",
+            "text": text,
+            "_hatsume_system_trigger": trigger_type,
+        }
+    )
 
     # Stub graph.builder
     builder_name = "hatsume.plugins.hatsume-plugin.graph.builder"
@@ -214,11 +221,11 @@ def _load_conversation_module():
     # Stub graph.tools (imported by chat.py)
     tools_name = "hatsume.plugins.hatsume-plugin.graph.tools"
     if tools_name not in sys.modules:
-        tools_mod = types.ModuleType(tools_name)
-        tools_mod.configure_agent_notification_callback = MagicMock()
-        tools_mod.configure_tool_callbacks = MagicMock()
-        sys.modules[tools_name] = tools_mod
-    sys.modules[tools_name].set_current_group_id = MagicMock()
+        sys.modules[tools_name] = types.ModuleType(tools_name)
+    tools_mod = sys.modules[tools_name]
+    tools_mod.configure_agent_notification_callback = MagicMock()
+    tools_mod.configure_tool_callbacks = MagicMock()
+    tools_mod.set_current_group_id = MagicMock()
 
     # Stub nonebot.adapters (imported by chat.py)
     if "nonebot" not in sys.modules:
@@ -261,6 +268,29 @@ def _load_conversation_module():
     sys.modules[conv_name] = mod
     spec.loader.exec_module(mod)
     return mod
+
+
+def test_start_new_conversation_marks_system_task_for_detection_bypass():
+    dialogue = _load_conversation_module()
+    state = _make_state()
+    dialogue.graph.ainvoke = AsyncMock()
+
+    asyncio.run(
+        dialogue.start_new_conversation(
+            state,
+            AsyncMock(),
+            MagicMock(),
+            system_task_text="scheduled work",
+        )
+    )
+
+    assert state.human_queue == [
+        {
+            "type": "text",
+            "text": "scheduled work",
+            "_hatsume_system_trigger": "system_task",
+        }
+    ]
 
 
 def test_handle_ai_message_sends_plain_text_segments_without_at_prefix():

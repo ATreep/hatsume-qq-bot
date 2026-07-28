@@ -27,6 +27,7 @@ from ..graph.nodes import (
     append_auxiliary_message,
     bind_state,
     get_role_sys_prompt,
+    make_system_trigger_message,
     set_current_query_user_id,
 )
 from ..state import ConversationState
@@ -328,7 +329,7 @@ def _start_conv_for_trigger(
         start_new_conversation(
             conv_state, _send_to_group, configure_tools,
             user_id=effective_user_id,
-            messages=[{"type": "text", "text": notify_msg}],
+            system_task_text=notify_msg,
         )
     )
 
@@ -388,7 +389,9 @@ async def start_new_conversation(
         conv_state.human_source_queue.extend(sources or [])
 
     if system_task_text is not None:
-        conv_state.human_queue.append({"type": "text", "text": system_task_text})
+        conv_state.human_queue.append(
+            make_system_trigger_message(system_task_text, "system_task")
+        )
 
     if user_id is not None:
         set_current_query_user_id(user_id)

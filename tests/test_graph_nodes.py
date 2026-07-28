@@ -244,6 +244,7 @@ def _load_nodes_module():
         "LONG_MSG_THRESHOLD",
     ]:
         setattr(config_mod, attr, 0)
+    config_mod.ADMIN_QQ_ID = "12345"
     sys.modules["hatsume.plugins.hatsume-plugin.config"] = config_mod
 
     # models
@@ -252,6 +253,7 @@ def _load_nodes_module():
     )
     models_mod = types.ModuleType("hatsume.plugins.hatsume-plugin.models")
     models_mod.get_advance_model = lambda **kw: mock_model
+    models_mod.get_code_model = lambda **kw: mock_model
     models_mod.get_lite_model = lambda **kw: mock_model
     models_mod.get_mini_model = lambda **kw: mock_model
     sys.modules["hatsume.plugins.hatsume-plugin.models"] = models_mod
@@ -260,6 +262,10 @@ def _load_nodes_module():
     prompts_pkg.role_sys_prompt = "test prompt"
     prompts_pkg.build_skill_prompt = lambda skills: ""
     prompts_pkg.build_agent_state_prompt = lambda: ""
+    prompts_pkg.build_admin_mode_prompt = lambda admin_qq_id: (
+        "\n\n# 管理员模式\n\n"
+        f"QQ ID = {admin_qq_id} 的用户是管理员。"
+    )
     prompts_pkg.build_character_proxy_role_prompt = lambda **kwargs: ""
     prompts_pkg.AUXILIARY_COMPACTION_PROMPT = "Summarize the following conversation."
     prompts_pkg.CHAT_END_DETECT_PROMPT = "Should this conversation end?"
@@ -964,6 +970,61 @@ def test_human_node_clears_auxiliary_only_flag_when_human_queue_present():
     assert nodes._last_was_auxiliary_only is False
 
 
+def test_human_node_marks_system_trigger_and_strips_internal_metadata():
+    """Injected provenance must reach routing but stay out of model-visible content."""
+    nodes = _load_nodes_module()
+    mock_state = types.SimpleNamespace(
+        human_queue=[
+            {
+                "type": "text",
+                "text": "(SYSTEM) 定时任务已触发。",
+                "_hatsume_system_trigger": "timer",
+            }
+        ],
+        human_source_queue=[],
+        ai_answer=None,
+    )
+    nodes.bind_state(mock_state)
+
+    result = asyncio.run(nodes.human_node({"messages": []}))
+
+    assert nodes._last_was_system_trigger is True
+    assert result["messages"][0].content == [
+        {"type": "text", "text": "(SYSTEM) 定时任务已触发。"}
+    ]
+
+
+def test_human_node_clears_system_trigger_flag_for_user_input():
+    """A system trigger must not make the following user turn skip detection."""
+    nodes = _load_nodes_module()
+    nodes._last_was_system_trigger = True
+    mock_state = types.SimpleNamespace(
+        human_queue=[{"type": "text", "text": "hello bot"}],
+        human_source_queue=[],
+        ai_answer=None,
+    )
+    nodes.bind_state(mock_state)
+
+    asyncio.run(nodes.human_node({"messages": []}))
+
+    assert nodes._last_was_system_trigger is False
+
+
+def test_chat_end_detect_node_skips_model_for_system_trigger():
+    """Agent/Timer injections must continue without invoking a detector model."""
+    nodes = _load_nodes_module()
+    nodes._last_was_system_trigger = True
+    nodes.get_lite_model = lambda: (_ for _ in ()).throw(
+        AssertionError("detector model must not be created")
+    )
+    nodes.get_mini_model = nodes.get_lite_model
+    messages = [MockMessage(content=f"message-{index}") for index in range(4)]
+
+    result = asyncio.run(nodes.chat_end_detect_node({"messages": messages}))
+
+    assert result == {"messages": []}
+
+
 def test_human_node_does_not_merge_or_clear_auxiliary_queue():
     """human_node must return ONLY the raw human_queue content — no aux
     markers, no aux merge — and must leave auxiliary_messages_queue
@@ -1539,6 +1600,155 @@ def test_ai_node_injects_invocation_datetime_into_system_prompt():
     finally:
         nodes.create_agent = original_create_agent
         nodes.get_date = original_get_date
+
+
+def _admin_mode_content(
+    sender_id: int,
+    content: str,
+    *,
+    message_type: str = "message",
+    reply_to: dict | None = None,
+) -> list[dict]:
+    normalized = {
+        "type": message_type,
+        "user": {"id": sender_id, "name": "user"},
+        "content": content,
+        "reply_to": reply_to,
+    }
+    return [{"type": "text", "text": json.dumps(normalized)}]
+
+
+def test_admin_mode_detector_requires_admin_sender_and_uppercase_keyword():
+    nodes = _load_nodes_module()
+
+    assert nodes.is_admin_mode_message(
+        _admin_mode_content(12345, "please WORLDSKY now"), "12345"
+    )
+    assert not nodes.is_admin_mode_message(
+        _admin_mode_content(99999, "please WORLDSKY now"), "12345"
+    )
+    assert not nodes.is_admin_mode_message(
+        _admin_mode_content(12345, "please worldsky now"), "12345"
+    )
+    assert not nodes.is_admin_mode_message(
+        _admin_mode_content(12345, "please WorldSky now"), "12345"
+    )
+    assert not nodes.is_admin_mode_message(
+        _admin_mode_content(12345, "please WORLDSKY now"), ""
+    )
+
+
+def test_admin_mode_detector_ignores_nested_and_malformed_content():
+    nodes = _load_nodes_module()
+    reply_only = _admin_mode_content(
+        12345,
+        "ordinary request",
+        reply_to={"user": {"id": 2}, "content": "WORLDSKY"},
+    )
+    forward = _admin_mode_content(
+        12345,
+        "WORLDSKY",
+        message_type="forward",
+    )
+
+    assert not nodes.is_admin_mode_message(reply_only, "12345")
+    assert not nodes.is_admin_mode_message(forward, "12345")
+    assert not nodes.is_admin_mode_message(
+        [{"type": "text", "text": "not-json WORLDSKY"}], "12345"
+    )
+
+
+def test_admin_mode_detector_accepts_qualifying_message_in_merged_batch():
+    nodes = _load_nodes_module()
+    merged_content = (
+        _admin_mode_content(88888, "ordinary message")
+        + _admin_mode_content(12345, "WORLDSKY run task")
+    )
+
+    assert nodes.is_admin_mode_message(merged_content, "12345")
+
+
+def test_ai_node_admin_mode_applies_model_prompt_and_image_filter_per_round():
+    nodes = _load_nodes_module()
+    sys_prompts: list[str] = []
+    chosen_models: list[object] = []
+    input_contents: list[list[object]] = []
+    admin_model = object()
+    advance_model = object()
+
+    class _FakeAgent:
+        def with_retry(self, **kw):
+            return self
+
+        async def ainvoke(self, payload, *a, **kw):
+            input_contents.append(
+                [message.content for message in payload["messages"]]
+            )
+            return {"messages": [types.SimpleNamespace(content="ok", type="ai")]}
+
+    original_create_agent = nodes.create_agent
+    original_get_advance_model = nodes.get_advance_model
+    original_get_code_model = nodes.get_code_model
+    original_randint = random.randint
+
+    def _tracking_create_agent(model, tools, system_prompt=None, **kw):
+        chosen_models.append(model)
+        sys_prompts.append(system_prompt or "")
+        return _FakeAgent()
+
+    admin_content = _admin_mode_content(12345, "WORLDSKY configure it") + [
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,admin"}},
+        {"type": "img_url", "img_url": "https://example.com/admin.png"},
+    ]
+    regular_content = _admin_mode_content(12345, "ordinary follow-up") + [
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,user"}},
+    ]
+    nodes.create_agent = _tracking_create_agent
+    nodes.get_advance_model = lambda **kw: advance_model
+    nodes.get_code_model = lambda **kw: admin_model
+    random.randint = lambda a, b: 5
+    try:
+        for content in (admin_content, regular_content):
+            history_content = [
+                {"type": "text", "text": "history"},
+                {"type": "image_url", "image_url": {"url": "history-image"}},
+            ]
+            asyncio.run(
+                nodes.ai_node(
+                    {
+                        "messages": [
+                            types.SimpleNamespace(content=history_content, type="human"),
+                            types.SimpleNamespace(content=content, type="human"),
+                        ]
+                    }
+                )
+            )
+    finally:
+        nodes.create_agent = original_create_agent
+        nodes.get_advance_model = original_get_advance_model
+        nodes.get_code_model = original_get_code_model
+        random.randint = original_randint
+
+    assert chosen_models == [admin_model, advance_model]
+    assert "# 管理员模式" in sys_prompts[0]
+    assert "QQ ID = 12345" in sys_prompts[0]
+    assert "# 管理员模式" not in sys_prompts[1]
+    assert all(
+        not (
+            isinstance(part, dict)
+            and part.get("type") in {"image_url", "img_url"}
+        )
+        for content in input_contents[0]
+        if isinstance(content, list)
+        for part in content
+    )
+    assert any(
+        isinstance(part, dict) and part.get("type") == "image_url"
+        for content in input_contents[1]
+        if isinstance(content, list)
+        for part in content
+    )
+    assert any(part.get("type") == "image_url" for part in admin_content)
 
 
 def test_ai_node_reuses_timer_overview_in_system_prompt():

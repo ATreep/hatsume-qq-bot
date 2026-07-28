@@ -48,6 +48,7 @@ flowchart LR
 | 视频发送 | send_video | 支持 HTTP URL、沙盒绝对路径和沙盒 file:// 文件，每轮最多一个 | graph/tools.py |
 | 视频生成 | /video 或 generate_video | Seedance 1.0/1.5 文生视频或图生视频，并轮询任务结果；聊天工具返回 URL，由 send_video 发送 | handlers/tools.py、graph/tools.py、models.py |
 | 高级模型切换 | 管理员 /model [模型名] | 查看或切换当前进程的高级模型名，不改变供应商、Base URL 或 API Key | handlers/tools.py、models.py、config.py |
+| ADMIN MODE | `ADMIN_QQ_ID` 本人发送含大写 `WORLDSKY` 的普通消息 | 程序校验顶层发送者和当前消息正文；本轮 chat_agent 使用 `DEEPSEEK_V4_FLASH`、移除全部 `image_url`/`img_url` 输入段并注入完整沙盒操作授权，下一轮恢复普通模型和多模态输入 | graph/nodes.py、models.py、prompts.py |
 | Docker Shell | 管理员 /ccsh、/cc 或 shell_executor | 在持久化 Kali 容器执行命令，包含超时、ANSI 清理、引用计数和延迟停止 | handlers/tools.py、graph/tools.py、infra.py |
 | 后台长任务 | agent_dispatch(background_shell, ...) | 后台运行长时间或交互式命令，周期判断继续、通知、输入、结束或终止 | graph/agents.py、infra.py |
 | 编码 Agent | agent_dispatch(coding_agent, ...) | 使用代码模型与 Shell、Skill、搜索、图像工具处理复杂开发任务 | graph/agents.py、prompts.py |
@@ -222,6 +223,7 @@ stateDiagram-v2
 - 图历史超过 60 条 LangGraph 消息时，删除最早的一对 Human/AI 消息。
 - ai_node 自动检索记忆，注入 Skill 列表、运行中 Agent 状态、当前群定时任务概览、可选表情提示和调用时的本地日期时间，再用 CHAT_TOOLS 创建 LangChain Agent。主调用最多重试五次，递归上限为 60。
 - ai_node 每轮读取辅助队列的非破坏性快照，临时放在当前 Human 内容之前；同一辅助上下文会持续进入后续轮次，直到新写入触发压缩。发送前移除 reply、memory 与 face 标签；图历史会移除 reply 控制标记，但保留现有 face 与 memory 标签历史语义。
+- ai_node 只解析当前 HumanMessage 中顶层 `type=message` 的 JSON。发送者 QQ ID 等于非空 `ADMIN_QQ_ID` 且该消息的直接正文包含大小写敏感的 `WORLDSKY` 时，本轮本地 `sys_prompt` 追加 ADMIN MODE，chat_agent 改用 `get_code_model()` 所封装的 `DEEPSEEK_V4_FLASH`，并在不修改 LangGraph 历史的前提下从全部模型输入消息复制过滤 `image_url` 与 `img_url` 内容段；回复引用、合并转发、辅助上下文和历史消息均不能触发，下一轮重新使用高级模型、完整多模态输入与基础角色 Prompt。
 - chat_agent 调用 end_conversation 后，ConversationState 立即关闭聊天并清空 chat_peers；ai_node 抑制该轮文本和表情发送，human_node 随即路由到 finish。下一次主动提及通过 activate_chat() 解除结束标记。
 - finish_conversation_node 清理图运行标记和 Human 队列，重置 Skill 单轮去重，把 Human/AI/Tool 历史规范化后放回辅助队列，最后发送 [CONVERSATION END]。
 
@@ -247,7 +249,7 @@ flowchart LR
     ReplySeg -. 发送失败 .-> Plain
 ~~~
 
-Agent/Timer 从 handlers/dialogue.py 启动的新对话复用同一直接群发送 helper。graph/nodes.py 的 `_start_direct_conv()` 继续通过既有的 lazy import 调用该 helper，避免新增另一套回复拼装逻辑；该导入只在 fallback 启动路径运行。
+Agent/Timer 从 handlers/dialogue.py 启动的新对话复用同一直接群发送 helper。graph/nodes.py 的 `_start_direct_conv()` 继续通过既有的 lazy import 调用该 helper，避免新增另一套回复拼装逻辑；该导入只在 fallback 启动路径运行。当前对话与新对话的系统触发消息都会在 `human_queue` 中携带内部来源标记；`human_node` 消费时移除该标记，`chat_end_detect_node` 据此跳过结束检测模型并直接进入 `ai_node`。
 
 ### 3.7 当前清理边界
 
@@ -394,6 +396,7 @@ flowchart LR
 
 - normal 任务通过 inject_timer() 注入定时任务 Prompt。
 - 有活跃对话时进入 human_queue；无活跃对话时通过 dialogue 注册的回调为目标群启动新图。
+- Timer 注入的内部来源标记只用于绕过结束检测，进入聊天模型前会被移除。
 - user_id 非零时，注入 Prompt 会告诉模型可用 `[CQ:at,qq=<user_id>]` 提醒用户，实际 at 由发送层转换。
 - normal 路径在图注入尝试结束后原子推进 point 与 task 计数；即使注入抛出异常也视为已处理。
 - APScheduler listener 按 point 保存 EVENT_JOB_SUBMITTED 的实际 scheduled_run_times；callback 先把超出五分钟容忍窗口的旧时刻推进为过期，再只注入当前有效时刻。全批次均过期时由 EVENT_JOB_MISSED 推进进度，避免 callback 用数据库下标重建时间而发生永久偏移。
@@ -621,7 +624,7 @@ virtual/ 下是 Shell 和 Docker 构建、启动、停止、删除脚本，不�
 | tests/test_agent_dispatch.py | Agent 注册、处理器查找与上下文读取。 |
 | tests/test_agent_monitor.py | Agent 状态写入、运行判断、字段保留与开始时间。 |
 | tests/test_agents_command.py | /agents 在无任务、运行中、完成与混合状态下的输出。 |
-| tests/test_ai_json_output.py | 角色 Prompt 不再要求旧 JSON 输出格式，以及 AI JSON 与非 JSON 兼容行为。 |
+| tests/test_ai_json_output.py | 角色 Prompt 不再要求旧 JSON 输出格式、ADMIN MODE 动态 Prompt，以及 AI JSON 与非 JSON 兼容行为。 |
 | tests/test_auto_response.py | v2 自动回复随机时间范围、目标群禁用、启动单例、执行前进度与后继排期。 |
 | tests/test_background_shell_agent.py | 后台 Shell 注册、任务解析和 DONE/CONTINUE/NOTIFY/TIMEOUT/KILL 决策。 |
 | tests/test_background_shell_infra.py | 后台日志增量读取与进程终止清理。 |
@@ -633,7 +636,7 @@ virtual/ 下是 Shell 和 Docker 构建、启动、停止、删除脚本，不�
 | tests/test_container_lifecycle.py | Docker 引用计数、延迟停止、取消停止与清理。 |
 | tests/test_conversation.py | ConversationState、对话激活与结束、队列刷新和启动流程。 |
 | tests/test_forward.py | OneBot 标准与厂商变体、嵌套 forward、异常占位和用户收集。 |
-| tests/test_graph_nodes.py | Human、AI、Detect、Finish、辅助上下文、记忆标签、通知与清理。 |
+| tests/test_graph_nodes.py | Human、AI、Detect、Finish、辅助上下文、记忆标签、ADMIN MODE、通知与清理。 |
 | tests/test_md_to_image.py | Markdown 特征检测、链接保留、渲染与纯文本回退。 |
 | tests/test_membersearch.py | 成员缓存、子串匹配、字符重叠排序、命令与工具结果。 |
 | tests/test_memory_db.py | 记忆 SQLite 建表、原文 LIKE、精确排序、按需混合检索、写入与生命周期。 |
