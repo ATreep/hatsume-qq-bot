@@ -508,13 +508,15 @@ async def _send_group_ai_message(
     group_id: int,
     msg: str | Message | MessageSegment,
     reply_to_message_id: int | None = None,
-) -> None:
+) -> bool:
     """Send one AI response directly to a group with reply fallback."""
     segments, force_message = await _build_ai_response_segments(
         msg,
         group_id,
         reply_to_message_id=reply_to_message_id,
     )
+    if not segments:
+        return False
     try:
         await bot.send_group_msg(
             group_id=group_id,
@@ -538,19 +540,24 @@ async def _send_group_ai_message(
                 fallback_force,
             )
         )
+    return True
 
 
 async def handle_ai_message(
     msg: str | Message | MessageSegment,
-    matcher,
-    group_id: int | None = None,
+    bot: Bot,
+    group_id: int,
     retry: int = 0,
     reply_to_message_id: int | None = None,
 ) -> None:
-    """Send AI response to the chat. Retries up to 5 times."""
+    """Send an AI response to an explicit group. Retries up to 5 times."""
     if retry >= 5:
         try:
-            await matcher.send("（电波受到干扰...想要发出的内容丢失了...）")
+            await _send_group_ai_message(
+                bot,
+                group_id,
+                "（电波受到干扰...想要发出的内容丢失了...）",
+            )
         except Exception:
             pass
         return
@@ -560,39 +567,31 @@ async def handle_ai_message(
         print("Current conversation ends")
         return
 
-    segments, force_message = await _build_ai_response_segments(
-        msg,
-        group_id,
-        reply_to_message_id=reply_to_message_id,
-    )
-    if not segments:
-        await matcher.send("（电波受到干扰...想要发出的内容丢失了...）")
-        return
-
     try:
-        if force_message:
-            await matcher.send(_message_payload_for_segments(segments, force_message=True))
-        else:
-            for seg in segments:
-                await matcher.send(seg)
+        sent = await _send_group_ai_message(
+            bot,
+            group_id,
+            msg,
+            reply_to_message_id=reply_to_message_id,
+        )
+        if not sent:
+            await _send_group_ai_message(
+                bot,
+                group_id,
+                "（电波受到干扰...想要发出的内容丢失了...）",
+            )
     except Exception as e:
-        print("Send error: ", e)
-        if reply_to_message_id is not None:
-            print(
-                "Reply target rejected; retrying without reply segment: "
-                f"{reply_to_message_id}"
-            )
-            await handle_ai_message(
-                msg,
-                matcher,
-                group_id=group_id,
-                retry=retry,
-                reply_to_message_id=None,
-            )
-            return
+        print("Send error: ", str(e))
+        traceback.print_exc()
         await asyncio.sleep(3)
         print(f"Retry sending message, {retry=}")
-        await handle_ai_message(msg, matcher, group_id=group_id, retry=retry + 1)
+        await handle_ai_message(
+            msg,
+            bot,
+            group_id=group_id,
+            retry=retry + 1,
+            reply_to_message_id=reply_to_message_id,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -657,7 +656,7 @@ async def user_chat_handle(bot: Bot, event: GroupMessageEvent, user_chat_matcher
             async def ai_cb(msg, reply_to_message_id=None):
                 await handle_ai_message(
                     msg,
-                    user_chat_matcher,
+                    bot,
                     group_id=event.group_id,
                     reply_to_message_id=reply_to_message_id,
                 )

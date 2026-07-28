@@ -234,6 +234,7 @@ stateDiagram-v2
 - chat_agent 可在回复开头输出一个 `[reply: <message_id>]`。ai_node 只接受本次实际传入 Agent 的 HumanMessage 顶层 JSON 中存在的 ID；未知、格式错误、重复或非开头标记会被移除并降级为普通消息。
 - 合法目标由发送层转换为首个 `MessageSegment.reply()`，并与文本、at 或渲染图片组成同一条 QQ 消息。若 OneBot 拒绝该引用，程序立即用相同正文重试一次普通发送，再进入原有重试策略。
 - AI 输出中的 `[CQ:at,qq=123456]` 占位符由发送层转换为 QQ at 消息段；图片化发送时先发送 at 段再发送图片，图片内显示为 @用户名。
+- 普通对话启动时捕获显式 Bot 与目标群号，后续 LangGraph 回调通过 `send_group_msg` 定向发送，不依赖 NoneBot matcher 的 `current_bot/current_event` 临时上下文。
 - 发送失败最多尝试五次，每次间隔三秒。
 - [hatsumeface:情绪] 会从运行数据 faces/ 中选择同前缀图片并单独发送。
 
