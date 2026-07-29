@@ -496,7 +496,7 @@ async def random_acg_photo() -> str:
 @tool
 async def send_image(image_url: str) -> str:
     """
-    发送一张图片给用户。当你需要直接向用户展示某张图片时使用此工具。
+    发送一张图片给用户。
 
     ## 参数：
     - image_url: 图片的 URL 地址，支持
