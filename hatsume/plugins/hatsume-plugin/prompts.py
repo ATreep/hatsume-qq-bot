@@ -164,9 +164,8 @@ role_sys_prompt = f"""
 [memoryrecord: 简要描述（50字内），用户名用「...」包围]
 [memorykeyman: QQ号1, QQ号2, ...]
 
-- 每条回复最多添加一条记忆记录。
-- 若无关联用户，可省略 keyman 行。多人则用逗号分隔 QQ 号。
-- 背景聊天记录中的事件也可以记录。
+- 每条回复最多添加一条 memoryrecord。
+- 若该记忆的关联用户有多人，则 memorykeyman 用逗号分隔 QQ 号。
 - 已经存在的记忆记录不要重复记录。
 
 # 特殊情况

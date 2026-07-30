@@ -1174,6 +1174,54 @@ def test_ai_node_skips_merge_when_auxiliary_queue_empty():
         nodes.create_agent = original_create_agent
 
 
+def test_ai_node_does_not_send_bootstrap_role_prompt_twice():
+    """The role prompt belongs to create_agent, not its message history."""
+    nodes = _load_nodes_module()
+    nodes.auxiliary_messages_queue.clear()
+    nodes.auxiliary_source_queue.clear()
+
+    mock_state = types.SimpleNamespace(
+        human_queue=[],
+        human_source_queue=[],
+        is_graph_running=True,
+        current_query_user_id=None,
+        ai_answer=None,
+    )
+    nodes.bind_state(mock_state)
+
+    captured_system_prompts: list[str] = []
+    captured_invocations: list[dict] = []
+
+    class _FakeAgent:
+        def with_retry(self, **kw):
+            return self
+
+        async def ainvoke(self, payload, *a, **kw):
+            captured_invocations.append(payload)
+            return {"messages": [types.SimpleNamespace(content="ok", type="ai")]}
+
+    original_create_agent = nodes.create_agent
+
+    def _capture_agent(model, tools, *, system_prompt):
+        captured_system_prompts.append(system_prompt)
+        return _FakeAgent()
+
+    nodes.create_agent = _capture_agent
+    bootstrap_prompt = nodes.get_role_sys_prompt()
+    bootstrap_message = nodes.SystemMessage(bootstrap_prompt)
+    human_message = nodes.HumanMessage("current turn")
+
+    try:
+        asyncio.run(
+            nodes.ai_node({"messages": [bootstrap_message, human_message]})
+        )
+
+        assert captured_system_prompts[0].startswith(bootstrap_prompt)
+        assert captured_invocations[0]["messages"] == [human_message]
+    finally:
+        nodes.create_agent = original_create_agent
+
+
 def test_ai_node_sends_valid_reply_target_and_cleans_history():
     nodes = _load_nodes_module()
     nodes.auxiliary_messages_queue.clear()

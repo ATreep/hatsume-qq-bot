@@ -225,6 +225,20 @@ def _without_image_url_parts(messages: list[Any]) -> list[Any]:
     return filtered_messages
 
 
+def _without_bootstrap_role_prompt(messages: list[Any]) -> list[Any]:
+    """Remove the graph bootstrap role prompt already owned by chat_agent."""
+    if not messages:
+        return messages
+
+    first_message = messages[0]
+    if (
+        getattr(first_message, "type", None) == "system"
+        and getattr(first_message, "content", None) == get_role_sys_prompt()
+    ):
+        return messages[1:]
+    return messages
+
+
 def _extract_replyable_message_ids(messages: list[Any]) -> set[int]:
     """Collect top-level OneBot message IDs from human JSON shown to chat_agent."""
     replyable_ids: set[int] = set()
@@ -651,7 +665,10 @@ async def ai_node(state: MessagesState) -> dict:
                 HumanMessage(build_memory_context_prompt(memory_summary))
             ]
         )
-        agent_messages = state["messages"][:-1] + mem_msg + [last_human_msg]
+        conversation_history = _without_bootstrap_role_prompt(
+            state["messages"][:-1]
+        )
+        agent_messages = conversation_history + mem_msg + [last_human_msg]
         if admin_mode_enabled:
             agent_messages = _without_image_url_parts(agent_messages)
         replyable_message_ids = _extract_replyable_message_ids(agent_messages)
@@ -660,7 +677,7 @@ async def ai_node(state: MessagesState) -> dict:
             stop_after_attempt=5
         ).ainvoke(
             {"messages": agent_messages},  # type: ignore
-            {"recursion_limit": 60},
+            {"recursion_limit": 20},
         )
         ai_text = response["messages"][-1].content
         if isinstance(ai_text, list):
