@@ -257,6 +257,10 @@ def search_web(query: str) -> str:
     当用户明确指出需要网络搜索或用户提及未知事物时，使用此工具查找搜索引擎。
     search_web 仅能提供简要的网络搜索答案。
     输入搜索关键字。
+
+    注意：
+    若提供了 URL，请使用 coding_agent 爬取网页内容阅读。
+    禁止将 URL 直接作为关键字搜索。
     """
     print("Search the web: ", query)
     try:
@@ -646,7 +650,7 @@ async def send_image(image_url: str) -> str:
 
     ## 注意：
     - 每次调用只能发送一张图片
-    - 图片会直接发送给用户，你不需要再额外描述图片内容
+    - 用户需要知道你发送图片的意图以及图片内容的意义。
     """
     global _send_image_count
 
@@ -1424,7 +1428,7 @@ _AGENT_LIST_STR = "\n".join(
 
 ## 参数：
 - agent_name: 内置 Agent 名称
-- task: 要执行的任务描述
+- task: 要执行的任务描述。任务描述必须包含所有必要信息。子 Agent 的上下文将只包含 task 中的信息。
 - context: 派发此 Agent 的背景上下文，需给出详细的上下文描述，大概300字左右，包括用户的对话背景、需求内容、以及为什么需要派发 Agent 来完成（必填）
 - notified_user_id: 需要通知的用户 QQ ID，如果有用户向你发起了任务，必须传入其QQ号（可选，默认为 0。如果不需要 @ 提醒任何用户，请设置为 0）
 

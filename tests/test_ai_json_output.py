@@ -86,6 +86,15 @@ def test_role_prompt_documents_native_reply_directive():
     assert "回复开头" in role
 
 
+def test_role_prompt_documents_sandbox_image_paths():
+    prompts = _load_prompts()
+    role = prompts.role_sys_prompt
+
+    assert "![图片](/tmp/hatsume-user-images/...)" in role
+    assert "view_image" in role
+    assert "file:///tmp/hatsume-user-images/..." in role
+
+
 def test_admin_mode_prompt_contains_admin_id_and_sensitive_permissions():
     prompts = _load_prompts()
     prompt = prompts.build_admin_mode_prompt("12345")

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import json
 import time
 import traceback
@@ -30,6 +29,7 @@ from ..config import (
     USER_INPUT_CONFIRM_DURING_TIME,
 )
 from ..graph.builder import graph
+from ..infra import find_sandbox_user_image, save_sandbox_user_image
 from ..graph.nodes import (
     append_auxiliary_message,
     bind_state,
@@ -57,6 +57,74 @@ from .forward import (
 )
 
 # ---- Section 2: Message Pipeline & Assembly ----
+
+
+def _normalized_image_extension(format_name: str | None) -> str:
+    if not format_name:
+        raise ValueError("Image format could not be detected")
+    extension = format_name.lower()
+    if extension == "jpeg":
+        extension = "jpg"
+    if not extension.isalnum():
+        raise ValueError(f"Unsupported image format: {format_name}")
+    return extension
+
+
+async def _store_user_image(
+    url: str,
+    message_id: int,
+    image_order: int,
+) -> str:
+    response = requests.get(url, timeout=10)
+    response.raise_for_status()
+    image_bytes = response.content
+
+    if len(image_bytes) > IMAGE_MAX_SIZE_BYTES:
+        size_mb = len(image_bytes) / (1024 * 1024)
+        raise ValueError(f"Image file size {size_mb:.2f}MB exceeds 9MB limit")
+
+    with Image.open(BytesIO(image_bytes)) as image:
+        if image.width * image.height >= IMAGE_MAX_PIXELS:
+            raise ValueError(
+                f"Image pixel size {image.width * image.height} "
+                "exceeds 36000000 pixel limit"
+            )
+        extension = _normalized_image_extension(image.format)
+        image.verify()
+
+    return await save_sandbox_user_image(
+        image_bytes,
+        message_id,
+        image_order,
+        extension,
+    )
+
+
+async def _resolve_user_image_markdown(
+    url: str,
+    message_id: int,
+    image_order: int,
+    *,
+    find_existing: bool,
+) -> str:
+    temporary_markdown = f" ![图片（临时链接）]({url}) "
+
+    if find_existing:
+        try:
+            existing_path = await find_sandbox_user_image(message_id, image_order)
+            if existing_path is not None:
+                return f" ![图片]({existing_path}) "
+        except Exception as exc:
+            print("❌ Cannot find saved reply image: ", exc)
+            traceback.print_exc()
+
+    try:
+        sandbox_path = await _store_user_image(url, message_id, image_order)
+    except Exception as exc:
+        print("❌ Cannot save image to sandbox: ", exc)
+        traceback.print_exc()
+        return temporary_markdown
+    return f" ![图片]({sandbox_path}) "
 
 
 def _format_forward_for_reply(messages: list[dict[str, Any]], max_items: int = 10) -> str:
@@ -139,12 +207,19 @@ async def get_human_message(bot: Bot, event: MessageEvent) -> tuple[list[dict], 
 
         re_message = ""
         reply_has_forward = False
+        reply_image_order = 0
         for msg_seg in event.reply.message:
             match msg_seg.type:
                 case "text":
                     re_message += msg_seg.data.get("text", "")
                 case "image":
-                    re_message += f" ![图片（临时链接）]({msg_seg.data.get('url', '')}) "
+                    reply_image_order += 1
+                    re_message += await _resolve_user_image_markdown(
+                        msg_seg.data.get("url", ""),
+                        event.reply.message_id,
+                        reply_image_order,
+                        find_existing=True,
+                    )
                 case "forward":
                     reply_has_forward = True
 
@@ -172,6 +247,7 @@ async def get_human_message(bot: Bot, event: MessageEvent) -> tuple[list[dict], 
         if len(re_message) > REPLY_MAX_LENGTH:
             re_message = re_message[:REPLY_MAX_LENGTH] + "...... （回复消息过长，无法全部显示）"
 
+    image_order = 0
     for msg_seg in msg:
         match msg_seg.type:
             case "text":
@@ -189,7 +265,13 @@ async def get_human_message(bot: Bot, event: MessageEvent) -> tuple[list[dict], 
                         plain_message += f" @{at_qq} "
                         add_source_person(at_qq, str(at_qq))
             case "image":
-                plain_message += f" ![图片（临时链接）]({msg_seg.data.get('url', '')}) "
+                image_order += 1
+                plain_message += await _resolve_user_image_markdown(
+                    msg_seg.data.get("url", ""),
+                    event.message_id,
+                    image_order,
+                    find_existing=False,
+                )
             case "forward":
                 forward_id_in_loop = msg_seg.data.get("id", "")
                 plain_message += f" [合并转发消息 id={forward_id_in_loop}] "
@@ -247,33 +329,6 @@ async def get_human_message(bot: Bot, event: MessageEvent) -> tuple[list[dict], 
 
     rendered_text = json.dumps(msg_json, ensure_ascii=False)
     content: list[dict[str, Any]] = [{"type": "text", "text": rendered_text}]
-
-    combined_msg = msg
-    if event.reply:
-        combined_msg += event.reply.message
-
-    if combined_msg.count("image") > 0:
-        for msg_seg in combined_msg.include("image"):
-            url = msg_seg.data.get("url")
-            try:
-                response = requests.get(url, timeout=10)  # type: ignore
-                response.raise_for_status()
-                image_bytes = response.content
-
-                if len(image_bytes) > IMAGE_MAX_SIZE_BYTES:
-                    raise Exception(f"Image file size {len(image_bytes) / (1024*1024):.2f}MB exceeds 9MB limit")
-
-                img = Image.open(BytesIO(image_bytes))
-                if img.width * img.height >= IMAGE_MAX_PIXELS:
-                    raise Exception(f"Image pixel size {img.width * img.height} exceeds 36000000 pixel limit")
-
-                b64 = base64.b64encode(image_bytes).decode("utf-8")
-                image_url = f"data:image/jpeg;base64,{b64}"
-
-                content.append({"type": "image_url", "image_url": {"url": image_url}})
-            except Exception as e:
-                print("❌ Cannot download image: ", e)
-                traceback.print_exc()
 
     source_entry = {
         "source_id": f"m{getattr(event, 'message_id', int(time.time() * 1000))}",

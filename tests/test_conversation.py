@@ -7,8 +7,11 @@ import importlib.util
 import re
 import sys
 import types
+from io import BytesIO
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
+
+from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[1]
 PLUGIN_DIR = ROOT / "hatsume/plugins/hatsume-plugin"
@@ -179,6 +182,9 @@ def _load_conversation_module():
         infra_mod.run_cmd = MagicMock(return_value="")
         infra_mod.ensure_container_running = MagicMock()
         sys.modules[infra_name] = infra_mod
+    infra_mod = sys.modules[infra_name]
+    infra_mod.find_sandbox_user_image = AsyncMock(return_value=None)
+    infra_mod.save_sandbox_user_image = AsyncMock()
 
     # Stub prompts (imported by tools.py)
     prompts_name = "hatsume.plugins.hatsume-plugin.prompts"
@@ -469,18 +475,36 @@ def test_handle_ai_message_puts_cq_at_segments_before_rendered_image():
     assert payload[0].data["qq"] == 123456
 
 
-def _make_received_event(dialogue, *, message_id: int, segments: list):
+def _make_received_event(
+    dialogue,
+    *,
+    message_id: int,
+    segments: list,
+    reply=None,
+):
     class _GroupEvent:
         group_id = 7
         user_id = 42
-        reply = None
 
         def __init__(self):
             self.message_id = message_id
             self.original_message = dialogue.Message(segments)
+            self.reply = reply
 
     dialogue.GroupMessageEvent = _GroupEvent
     return _GroupEvent()
+
+
+def _make_image_bytes(image_format: str) -> bytes:
+    output = BytesIO()
+    Image.new("RGB", (2, 3), color="red").save(output, format=image_format)
+    return output.getvalue()
+
+
+def _image_response(image_format: str):
+    response = MagicMock()
+    response.content = _make_image_bytes(image_format)
+    return response
 
 
 def test_get_human_message_passes_normal_event_message_id():
@@ -515,6 +539,216 @@ def test_get_human_message_passes_forward_event_message_id():
     asyncio.run(dialogue.get_human_message(MagicMock(), event))
 
     assert dialogue.build_forward_json.call_args.kwargs["message_id"] == 654
+
+
+def test_get_human_message_stores_current_images_in_segment_order():
+    dialogue = _load_conversation_module()
+    dialogue.message_to_json.reset_mock()
+    dialogue.message_to_json.return_value = {"type": "message"}
+    dialogue.has_forward_segment = MagicMock(return_value=None)
+    dialogue.requests.get = MagicMock(
+        side_effect=[_image_response("PNG"), _image_response("JPEG")]
+    )
+    dialogue.save_sandbox_user_image = AsyncMock(
+        side_effect=lambda _data, message_id, order, extension: (
+            f"/tmp/hatsume-user-images/{message_id}-{order}.{extension}"
+        )
+    )
+    event = _make_received_event(
+        dialogue,
+        message_id=321,
+        segments=[
+            types.SimpleNamespace(type="text", data={"text": "before"}),
+            types.SimpleNamespace(type="image", data={"url": "https://qq/1"}),
+            types.SimpleNamespace(type="text", data={"text": "after"}),
+            types.SimpleNamespace(type="image", data={"url": "https://qq/2"}),
+        ],
+    )
+
+    content, _ = asyncio.run(dialogue.get_human_message(MagicMock(), event))
+
+    assert dialogue.message_to_json.call_args.args[2] == (
+        "before ![图片](/tmp/hatsume-user-images/321-1.png) "
+        "after ![图片](/tmp/hatsume-user-images/321-2.jpg) "
+    )
+    assert content == [{"type": "text", "text": '{"type": "message"}'}]
+    assert dialogue.save_sandbox_user_image.await_args_list[0].args[1:] == (
+        321,
+        1,
+        "png",
+    )
+    assert dialogue.save_sandbox_user_image.await_args_list[1].args[1:] == (
+        321,
+        2,
+        "jpg",
+    )
+
+
+def test_get_human_message_reuses_reply_images_by_reply_message_id():
+    dialogue = _load_conversation_module()
+    dialogue.message_to_json.reset_mock()
+    dialogue.message_to_json.return_value = {"type": "message"}
+    dialogue.has_forward_segment = MagicMock(return_value=None)
+    dialogue.find_sandbox_user_image = AsyncMock(
+        side_effect=[
+            "/tmp/hatsume-user-images/900-1.png",
+            "/tmp/hatsume-user-images/900-2.webp",
+        ]
+    )
+    dialogue.requests.get = MagicMock()
+    reply = types.SimpleNamespace(
+        message_id=900,
+        sender=types.SimpleNamespace(user_id=84),
+        message=dialogue.Message(
+            [
+                types.SimpleNamespace(type="text", data={"text": "old"}),
+                types.SimpleNamespace(type="image", data={"url": "https://qq/a"}),
+                types.SimpleNamespace(type="image", data={"url": "https://qq/b"}),
+            ]
+        ),
+    )
+    event = _make_received_event(
+        dialogue,
+        message_id=901,
+        segments=[types.SimpleNamespace(type="text", data={"text": "replying"})],
+        reply=reply,
+    )
+
+    content, _ = asyncio.run(dialogue.get_human_message(MagicMock(), event))
+
+    reply_to = dialogue.message_to_json.call_args.kwargs["reply_to"]
+    assert reply_to["content"] == (
+        "old ![图片](/tmp/hatsume-user-images/900-1.png) "
+        " ![图片](/tmp/hatsume-user-images/900-2.webp) "
+    )
+    assert dialogue.find_sandbox_user_image.await_args_list[0].args == (900, 1)
+    assert dialogue.find_sandbox_user_image.await_args_list[1].args == (900, 2)
+    dialogue.requests.get.assert_not_called()
+    dialogue.save_sandbox_user_image.assert_not_awaited()
+    assert len(content) == 1
+
+
+def test_get_human_message_recovers_missing_reply_image_from_temp_url():
+    dialogue = _load_conversation_module()
+    dialogue.message_to_json.reset_mock()
+    dialogue.message_to_json.return_value = {"type": "message"}
+    dialogue.has_forward_segment = MagicMock(return_value=None)
+    dialogue.find_sandbox_user_image = AsyncMock(return_value=None)
+    dialogue.requests.get = MagicMock(return_value=_image_response("PNG"))
+    dialogue.save_sandbox_user_image = AsyncMock(
+        return_value="/tmp/hatsume-user-images/700-1.png"
+    )
+    reply = types.SimpleNamespace(
+        message_id=700,
+        sender=types.SimpleNamespace(user_id=84),
+        message=dialogue.Message(
+            [types.SimpleNamespace(type="image", data={"url": "https://qq/missing"})]
+        ),
+    )
+    event = _make_received_event(
+        dialogue,
+        message_id=701,
+        segments=[types.SimpleNamespace(type="text", data={"text": "look"})],
+        reply=reply,
+    )
+
+    asyncio.run(dialogue.get_human_message(MagicMock(), event))
+
+    reply_to = dialogue.message_to_json.call_args.kwargs["reply_to"]
+    assert reply_to["content"] == (
+        " ![图片](/tmp/hatsume-user-images/700-1.png) "
+    )
+    assert dialogue.save_sandbox_user_image.await_args.args[1:] == (
+        700,
+        1,
+        "png",
+    )
+
+
+def test_get_human_message_recovers_reply_image_after_lookup_error():
+    dialogue = _load_conversation_module()
+    dialogue.message_to_json.reset_mock()
+    dialogue.message_to_json.return_value = {"type": "message"}
+    dialogue.has_forward_segment = MagicMock(return_value=None)
+    dialogue.find_sandbox_user_image = AsyncMock(
+        side_effect=RuntimeError("sandbox lookup failed")
+    )
+    dialogue.requests.get = MagicMock(return_value=_image_response("PNG"))
+    dialogue.save_sandbox_user_image = AsyncMock(
+        return_value="/tmp/hatsume-user-images/702-1.png"
+    )
+    reply = types.SimpleNamespace(
+        message_id=702,
+        sender=types.SimpleNamespace(user_id=84),
+        message=dialogue.Message(
+            [types.SimpleNamespace(type="image", data={"url": "https://qq/recover"})]
+        ),
+    )
+    event = _make_received_event(
+        dialogue,
+        message_id=703,
+        segments=[types.SimpleNamespace(type="text", data={"text": "look"})],
+        reply=reply,
+    )
+
+    asyncio.run(dialogue.get_human_message(MagicMock(), event))
+
+    reply_to = dialogue.message_to_json.call_args.kwargs["reply_to"]
+    assert reply_to["content"] == (
+        " ![图片](/tmp/hatsume-user-images/702-1.png) "
+    )
+    dialogue.requests.get.assert_called_once_with("https://qq/recover", timeout=10)
+
+
+def test_get_human_message_keeps_temp_url_when_sandbox_storage_fails():
+    dialogue = _load_conversation_module()
+    dialogue.message_to_json.reset_mock()
+    dialogue.message_to_json.return_value = {"type": "message"}
+    dialogue.has_forward_segment = MagicMock(return_value=None)
+    dialogue.requests.get = MagicMock(side_effect=RuntimeError("network down"))
+    event = _make_received_event(
+        dialogue,
+        message_id=222,
+        segments=[
+            types.SimpleNamespace(
+                type="image",
+                data={"url": "https://qq/temporary"},
+            )
+        ],
+    )
+
+    content, _ = asyncio.run(dialogue.get_human_message(MagicMock(), event))
+
+    assert dialogue.message_to_json.call_args.args[2] == (
+        " ![图片（临时链接）](https://qq/temporary) "
+    )
+    assert len(content) == 1
+
+
+def test_get_human_message_leaves_merged_forward_image_urls_unchanged():
+    dialogue = _load_conversation_module()
+    dialogue.build_forward_json.reset_mock()
+    dialogue.build_forward_json.return_value = {"type": "forward"}
+    dialogue.has_forward_segment = MagicMock(return_value="forward-1")
+    forward_messages = [
+        {
+            "type": "message",
+            "content": "![图片（临时链接）](https://qq/forward)",
+        }
+    ]
+    dialogue.resolve_forward_content = AsyncMock(return_value=forward_messages)
+    dialogue.requests.get = MagicMock()
+    event = _make_received_event(
+        dialogue,
+        message_id=654,
+        segments=[types.SimpleNamespace(type="forward", data={"id": "forward-1"})],
+    )
+
+    content, _ = asyncio.run(dialogue.get_human_message(MagicMock(), event))
+
+    assert dialogue.build_forward_json.call_args.args[2] == forward_messages
+    dialogue.requests.get.assert_not_called()
+    assert len(content) == 1
 
 
 def test_non_peer_messages_always_enter_auxiliary_queue():

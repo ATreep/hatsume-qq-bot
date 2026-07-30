@@ -33,7 +33,7 @@ flowchart LR
 | 群聊旁听上下文 | 不属于当前 chat_peers 的群消息 | 持续保留为辅助上下文，超限时压缩 | handlers/dialogue.py、graph/nodes.py |
 | 回复消息解析 | QQ 回复消息 | 保存被回复者、文本、图片和合并转发摘要 | handlers/dialogue.py |
 | 合并转发解析 | QQ 合并转发消息 | 兼容 OneBot 标准与常见厂商变体，递归解析嵌套节点并保留发送者 | handlers/forward.py |
-| 图片理解输入 | 消息或回复中的图片 | 下载、校验大小和像素，再转为 base64 多模态输入 | handlers/dialogue.py |
+| 图片理解输入 | 普通消息或回复中的图片 | 下载并校验后按消息 ID 与图片顺序保存到沙盒，JSON 内记录绝对路径；合并转发仍保留临时 URL | handlers/dialogue.py、infra.py |
 | 长文本与 Markdown 图片化 | AI 回复超过阈值或含富 Markdown | 渲染标题、代码、表格和公式，并额外保留可点击链接 | utils/md_to_image.py |
 | 长期记忆写入 | 模型输出 [memoryrecord: ...] | 提取显式记忆标签，可关联 QQ 用户后写入 SQLite | graph/nodes.py、memory/engine.py |
 | 长期记忆检索 | 每轮自动检索或 find_memory | SQLite LIKE 精确命中优先，临时 BM25 与 Milvus Lite/BGE-M3 向量结果补足 | graph/tools.py、memory/engine.py、memory/vector_store.py、memory/tokenizer.py |
@@ -48,7 +48,7 @@ flowchart LR
 | 视频发送 | send_video | 支持 HTTP URL、沙盒绝对路径和沙盒 file:// 文件，每轮最多一个 | graph/tools.py |
 | 视频生成 | /video 或 generate_video | Seedance 1.0/1.5 文生视频或图生视频，并轮询任务结果；聊天工具返回 URL，由 send_video 发送 | handlers/tools.py、graph/tools.py、models.py |
 | 高级模型切换 | 管理员 /model [模型名] | 查看或切换当前进程的高级模型名，不改变供应商、Base URL 或 API Key | handlers/tools.py、models.py、config.py |
-| ADMIN MODE | `ADMIN_QQ_ID` 本人发送含大写 `WORLDSKY` 的普通消息 | 程序校验顶层发送者和当前消息正文；本轮 chat_agent 使用 `DEEPSEEK_V4_FLASH`、移除全部 `image_url`/`img_url` 输入段并注入完整沙盒操作授权，下一轮恢复普通模型和多模态输入 | graph/nodes.py、models.py、prompts.py |
+| ADMIN MODE | `ADMIN_QQ_ID` 本人发送含大写 `WORLDSKY` 的普通消息 | 程序校验顶层发送者和当前消息正文；本轮 chat_agent 使用 `DEEPSEEK_V4_FLASH`、防御性移除历史 `image_url`/`img_url` 输入段并注入完整沙盒操作授权，下一轮恢复普通模型和未过滤输入 | graph/nodes.py、models.py、prompts.py |
 | Docker Shell | 管理员 /ccsh、/cc 或 shell_executor | 在持久化 Kali 容器执行命令，包含超时、ANSI 清理、引用计数和延迟停止 | handlers/tools.py、graph/tools.py、infra.py |
 | 后台长任务 | agent_dispatch(background_shell, ...) | 后台运行长时间或交互式命令，周期判断继续、通知、输入、结束或终止 | graph/agents.py、infra.py |
 | 编码 Agent | agent_dispatch(coding_agent, ...) | 使用代码模型与 Shell、Skill、搜索、图像工具处理复杂开发任务 | graph/agents.py、prompts.py |
@@ -132,7 +132,7 @@ sequenceDiagram
 
 ### 3.2 消息标准化
 
-handlers/dialogue.py 的 get_human_message() 把 OneBot 事件转换为统一 JSON 和多模态内容：
+handlers/dialogue.py 的 get_human_message() 把 OneBot 事件转换为单个统一 JSON 文本块：
 
 1. 查询群名片或昵称，加入消息来源人员。
 2. 解析回复中的发送者、文本、图片和合并转发摘要。
@@ -152,9 +152,10 @@ handlers/dialogue.py 的 get_human_message() 把 OneBot 事件转换为统一 JS
 
 5. `message_id` 只出现在真实收到的顶层普通消息或顶层合并转发中。合并转发内部节点、`reply_to`、AI 历史和系统合成消息不包含该字段；顶层合并转发仍可作为一个整体被回复。
 6. 合并转发生成 type=forward 和递归 messages 数组。
-7. 当前消息与回复中的图片会同步下载。达到 9 MiB 或 3600 万像素限制的图片会被拒绝，其余图片转为 data URI 交给多模态模型。
-8. 普通文本最多保留 2000 字，被回复内容最多保留 200 字。
-9. 返回的 source_entry 包含 source_id、序列化文本和 people，用于记忆归因；`source_id` 与模型可见的 `message_id` 职责独立。
+7. 当前普通消息中的图片会同步下载，按实际格式校验 9 MiB 与 3600 万像素限制，再保存为沙盒 `/tmp/hatsume-user-images/<message_id>-<从1开始的图片序号>.<实际扩展名>`；JSON 在原图片段位置写入 `![图片](<绝对路径>)`，不再附加 `image_url` 或 `img_url` 多模态块。
+8. 回复中的图片先按被回复消息的 `message_id` 与图片序号查找已有沙盒文件，未命中时从回复段的临时 URL 重新下载；任一保存流程失败时保留原临时 URL。合并转发中的图片不进入该流程，继续直接使用临时 URL。
+9. 普通文本最多保留 2000 字，被回复内容最多保留 200 字。
+10. 返回的 source_entry 包含 source_id、序列化文本和 people，用于记忆归因；`source_id` 与模型可见的 `message_id` 职责独立。
 
 ### 3.3 合并转发
 
@@ -225,7 +226,7 @@ stateDiagram-v2
 - 图历史超过 60 条 LangGraph 消息时，删除最早的一对 Human/AI 消息。
 - ai_node 自动检索记忆，注入 Skill 列表、运行中 Agent 状态、当前群定时任务概览、可选表情提示和调用时的本地日期时间，再用 CHAT_TOOLS 创建 LangChain Agent。主调用最多重试五次，递归上限为 60。
 - ai_node 每轮读取辅助队列的非破坏性快照，临时放在当前 Human 内容之前；同一辅助上下文会持续进入后续轮次，直到新写入触发压缩。发送前移除 reply、memory 与 face 标签；图历史会移除 reply 控制标记，但保留现有 face 与 memory 标签历史语义。
-- ai_node 只解析当前 HumanMessage 中顶层 `type=message` 的 JSON。发送者 QQ ID 等于非空 `ADMIN_QQ_ID` 且该消息的直接正文包含大小写敏感的 `WORLDSKY` 时，本轮本地 `sys_prompt` 追加 ADMIN MODE，chat_agent 改用 `get_code_model()` 所封装的 `DEEPSEEK_V4_FLASH`，并在不修改 LangGraph 历史的前提下从全部模型输入消息复制过滤 `image_url` 与 `img_url` 内容段；回复引用、合并转发、辅助上下文和历史消息均不能触发，下一轮重新使用高级模型、完整多模态输入与基础角色 Prompt。
+- ai_node 只解析当前 HumanMessage 中顶层 `type=message` 的 JSON。发送者 QQ ID 等于非空 `ADMIN_QQ_ID` 且该消息的直接正文包含大小写敏感的 `WORLDSKY` 时，本轮本地 `sys_prompt` 追加 ADMIN MODE，chat_agent 改用 `get_code_model()` 所封装的 `DEEPSEEK_V4_FLASH`，并在不修改 LangGraph 历史的前提下从全部模型输入消息复制过滤历史 `image_url` 与 `img_url` 内容段；回复引用、合并转发、辅助上下文和历史消息均不能触发，下一轮重新使用高级模型、未过滤输入与基础角色 Prompt。普通消息与回复图片在所有模式下均以沙盒 Markdown 路径输入。
 - chat_agent 调用 end_conversation 后，ConversationState 立即关闭聊天并清空 chat_peers；ai_node 抑制该轮文本和表情发送，human_node 随即路由到 finish。下一次主动提及通过 activate_chat() 解除结束标记。
 - finish_conversation_node 清理图运行标记和 Human 队列，重置 Skill 单轮去重，把 Human/AI/Tool 历史规范化后放回辅助队列，最后发送 [CONVERSATION END]。
 
@@ -525,6 +526,8 @@ sequenceDiagram
 ### 7.2 图片与视频
 
 - 输入图片使用 requests 同步下载，限制为 9 MiB 和 3600 万像素。
+- 普通消息与回复图片使用 Pillow 检测实际格式，并通过 infra.py 的 Docker 边界复制到 `/tmp/hatsume-user-images`；路径由 QQ 消息 ID 与消息内图片序号确定。应用不会主动清理这些文件，容器环境或 `/resetsandbox` 可按既有生命周期移除它们。
+- 回复图片优先复用沙盒中的确定性路径，缺失时从 OneBot 临时 URL 恢复；合并转发图片保持临时 URL。主聊天模型只接收包含 Markdown 路径的 JSON 文本块，需要理解图片时通过 `view_image(file://...)` 读取。
 - search_image 使用固定的 Pexels Search API，通过 PIXELS_API_KEY 鉴权；网络请求在线程中执行，最多返回十条带来源信息的候选结果，再由聊天 Agent 复用 send_image 发送。
 - view_image 将 HTTP/HTTPS 图片 URL 直接交给轻量模型；沙盒 file:// 绝对路径先检测图片 MIME 并转换为 data URI，再返回模型生成的文字描述。
 - generate_image 在 Seedream 和兼容图像接口之间选择；有参考图时使用支持参考图的路径。

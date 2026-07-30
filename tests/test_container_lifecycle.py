@@ -44,6 +44,7 @@ def _setup_package_hierarchy():
     config_mod.DOCKER_ENV_PATH = Path("/tmp/test_docker")
     config_mod.SHELL_MAX_OUTPUT = 1000
     config_mod.SHELL_TIMEOUT = 10
+    config_mod.CONTAINER_NAME = "hatsume-space-kali"
     sys.modules["hatsume.plugins.hatsume_plugin"].config = config_mod
 
     # Load infra module from actual file
@@ -283,6 +284,172 @@ class TestRunCmdRefcount:
             with pytest.raises(asyncio.CancelledError):
                 await infra_mod._stop_timer_task
             infra_mod._stop_timer_task = None
+
+
+class TestSandboxUserImages:
+    """Tests for deterministic user-image lookup and Docker copying."""
+
+    @pytest.mark.asyncio
+    async def test_find_returns_matching_deterministic_path(self):
+        import hatsume.plugins.hatsume_plugin.infra as infra_mod
+
+        run_cmd = AsyncMock(
+            return_value=(
+                "/tmp/hatsume-user-images/123-2.webp\n"
+                "::EXIT::0\n"
+            )
+        )
+        with (
+            patch.object(
+                infra_mod,
+                "_ensure_user_image_sandbox_dir",
+                new_callable=AsyncMock,
+            ),
+            patch.object(infra_mod, "run_cmd", run_cmd),
+        ):
+            result = await infra_mod.find_sandbox_user_image(123, 2)
+
+        assert result == "/tmp/hatsume-user-images/123-2.webp"
+        assert "-name '123-2.*'" in run_cmd.await_args.args[0]
+
+    @pytest.mark.asyncio
+    async def test_find_returns_none_when_no_file_matches(self):
+        import hatsume.plugins.hatsume_plugin.infra as infra_mod
+
+        with (
+            patch.object(
+                infra_mod,
+                "_ensure_user_image_sandbox_dir",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                infra_mod,
+                "run_cmd",
+                new_callable=AsyncMock,
+                return_value="\n::EXIT::0\n",
+            ),
+        ):
+            result = await infra_mod.find_sandbox_user_image(123, 1)
+
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_save_copies_to_deterministic_path_and_cleans_host_temp(self):
+        import hatsume.plugins.hatsume_plugin.infra as infra_mod
+
+        proc = MagicMock(returncode=0)
+        proc.communicate = AsyncMock(return_value=(b"", b""))
+        create_subprocess = AsyncMock(return_value=proc)
+
+        with (
+            patch.object(
+                infra_mod,
+                "_ensure_user_image_sandbox_dir",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                infra_mod.asyncio,
+                "create_subprocess_exec",
+                create_subprocess,
+            ),
+            patch.object(infra_mod, "_acquire_subprocess") as acquire,
+            patch.object(infra_mod, "_release_subprocess") as release,
+        ):
+            result = await infra_mod.save_sandbox_user_image(
+                b"image-bytes",
+                message_id=456,
+                image_order=3,
+                extension="PNG",
+            )
+
+        assert result == "/tmp/hatsume-user-images/456-3.png"
+        command = create_subprocess.await_args.args
+        assert command[:2] == ("docker", "cp")
+        assert command[3] == (
+            "hatsume-space-kali:/tmp/hatsume-user-images/456-3.png"
+        )
+        assert not Path(command[2]).exists()
+        acquire.assert_called_once_with()
+        release.assert_called_once_with()
+
+    @pytest.mark.asyncio
+    async def test_save_failure_releases_refcount_and_cleans_host_temp(self):
+        import hatsume.plugins.hatsume_plugin.infra as infra_mod
+
+        proc = MagicMock(returncode=1)
+        proc.communicate = AsyncMock(return_value=(b"", b"copy failed"))
+        create_subprocess = AsyncMock(return_value=proc)
+
+        with (
+            patch.object(
+                infra_mod,
+                "_ensure_user_image_sandbox_dir",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                infra_mod.asyncio,
+                "create_subprocess_exec",
+                create_subprocess,
+            ),
+            patch.object(infra_mod, "_acquire_subprocess"),
+            patch.object(infra_mod, "_release_subprocess") as release,
+        ):
+            with pytest.raises(RuntimeError, match="copy failed"):
+                await infra_mod.save_sandbox_user_image(
+                    b"image-bytes",
+                    message_id=456,
+                    image_order=1,
+                    extension="jpg",
+                )
+
+        assert not Path(create_subprocess.await_args.args[2]).exists()
+        release.assert_called_once_with()
+
+    @pytest.mark.asyncio
+    async def test_save_timeout_kills_process_and_cleans_host_temp(self):
+        import hatsume.plugins.hatsume_plugin.infra as infra_mod
+
+        proc = MagicMock(returncode=None)
+        proc.communicate = AsyncMock(return_value=(b"", b""))
+        proc.kill = MagicMock()
+        create_subprocess = AsyncMock(return_value=proc)
+
+        async def timeout_wait_for(coroutine, *, timeout):
+            coroutine.close()
+            raise asyncio.TimeoutError
+
+        with (
+            patch.object(
+                infra_mod,
+                "_ensure_user_image_sandbox_dir",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                infra_mod.asyncio,
+                "create_subprocess_exec",
+                create_subprocess,
+            ),
+            patch.object(infra_mod.asyncio, "wait_for", timeout_wait_for),
+            patch.object(infra_mod, "_acquire_subprocess"),
+            patch.object(infra_mod, "_release_subprocess") as release,
+        ):
+            with pytest.raises(RuntimeError, match="timed out"):
+                await infra_mod.save_sandbox_user_image(
+                    b"image-bytes",
+                    message_id=789,
+                    image_order=1,
+                    extension="gif",
+                )
+
+        proc.kill.assert_called_once_with()
+        assert proc.communicate.call_count == 2
+        assert proc.communicate.await_count == 1
+        assert not Path(create_subprocess.await_args.args[2]).exists()
+        release.assert_called_once_with()
+
+
+class TestRunCmdRefcountFailures:
+    """Tests that run_cmd releases its reference on failure paths."""
 
     @pytest.mark.asyncio
     async def test_run_cmd_releases_refcount_on_timeout(self):

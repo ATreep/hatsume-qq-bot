@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import shlex
 import subprocess
 import tempfile
 import threading
@@ -59,6 +60,7 @@ async def _delayed_stop_container() -> None:
 # Docker sandbox
 # ===========================================================================
 _container_active: bool = False
+USER_IMAGE_SANDBOX_DIR = "/tmp/hatsume-user-images"
 
 
 async def ensure_container_running() -> None:
@@ -149,6 +151,128 @@ async def run_cmd(code: str, timeout: float = SHELL_TIMEOUT) -> str:
             return "运行结果无法解码。"
     finally:
         _release_subprocess()
+
+
+def _user_image_basename(message_id: int, image_order: int) -> str:
+    normalized_message_id = int(message_id)
+    normalized_image_order = int(image_order)
+    if normalized_image_order < 1:
+        raise ValueError("image_order must be at least 1")
+    return f"{normalized_message_id}-{normalized_image_order}"
+
+
+async def _ensure_user_image_sandbox_dir() -> None:
+    await ensure_container_running()
+    quoted_dir = shlex.quote(USER_IMAGE_SANDBOX_DIR)
+    output = await run_cmd(
+        f"mkdir -p -- {quoted_dir}; echo '::EXIT::'$?",
+        timeout=30,
+    )
+    if "::EXIT::" not in output:
+        raise RuntimeError("Unable to create sandbox user image directory")
+    detail, exit_text = output.rsplit("::EXIT::", 1)
+    if exit_text.strip() != "0":
+        raise RuntimeError(
+            "Unable to create sandbox user image directory: "
+            f"{detail.strip() or '(no output)'}"
+        )
+
+
+async def find_sandbox_user_image(
+    message_id: int,
+    image_order: int,
+) -> str | None:
+    """Return an existing deterministic user-image path from the sandbox."""
+    basename = _user_image_basename(message_id, image_order)
+    await _ensure_user_image_sandbox_dir()
+    quoted_dir = shlex.quote(USER_IMAGE_SANDBOX_DIR)
+    quoted_pattern = shlex.quote(f"{basename}.*")
+    output = await run_cmd(
+        (
+            f"find {quoted_dir} -maxdepth 1 -type f "
+            f"-name {quoted_pattern} -print -quit; echo '::EXIT::'$?"
+        ),
+        timeout=30,
+    )
+    if "::EXIT::" not in output:
+        raise RuntimeError("Unable to search sandbox user image directory")
+    detail, exit_text = output.rsplit("::EXIT::", 1)
+    if exit_text.strip() != "0":
+        raise RuntimeError(
+            "Unable to search sandbox user image directory: "
+            f"{detail.strip() or '(no output)'}"
+        )
+
+    expected_prefix = f"{USER_IMAGE_SANDBOX_DIR}/{basename}."
+    for line in detail.splitlines():
+        candidate = line.strip()
+        if candidate.startswith(expected_prefix):
+            return candidate
+    return None
+
+
+async def save_sandbox_user_image(
+    image_bytes: bytes,
+    message_id: int,
+    image_order: int,
+    extension: str,
+) -> str:
+    """Copy validated image bytes to their deterministic sandbox path."""
+    basename = _user_image_basename(message_id, image_order)
+    normalized_extension = extension.lower().lstrip(".")
+    if not normalized_extension or not normalized_extension.isalnum():
+        raise ValueError("extension must contain only letters and numbers")
+
+    await _ensure_user_image_sandbox_dir()
+    destination = (
+        f"{USER_IMAGE_SANDBOX_DIR}/{basename}.{normalized_extension}"
+    )
+
+    from .config import CONTAINER_NAME
+
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            prefix="hatsume-user-image-",
+            suffix=f".{normalized_extension}",
+            delete=False,
+        ) as temporary_file:
+            temporary_file.write(image_bytes)
+            temporary_path = Path(temporary_file.name)
+
+        _acquire_subprocess()
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "docker",
+                "cp",
+                str(temporary_path),
+                f"{CONTAINER_NAME}:{destination}",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(),
+                    timeout=SHELL_TIMEOUT,
+                )
+            except asyncio.TimeoutError as exc:
+                proc.kill()
+                await proc.communicate()
+                raise RuntimeError("Copying user image into sandbox timed out") from exc
+
+            if proc.returncode != 0:
+                detail = _strip_ansi(stderr or stdout).strip()
+                raise RuntimeError(
+                    "Unable to copy user image into sandbox: "
+                    f"{detail or '(no output)'}"
+                )
+        finally:
+            _release_subprocess()
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+    return destination
 
 
 def delete_container() -> None:
