@@ -21,21 +21,26 @@ def _load_tools_module():
     """Load graph/tools.py with all external dependencies stubbed."""
     # Clean up previously loaded modules
     for name in list(sys.modules):
-        if name.startswith("hatsume") or name in (
-            "nonebot",
-            "nonebot.adapters",
-            "nonebot.adapters.onebot",
-            "nonebot.adapters.onebot.v11",
-            "langchain",
-            "langchain.messages",
-            "langchain.agents",
-            "langchain_core",
-            "langchain_core.messages",
-            "langchain_core.tools",
-            "langchain_community",
-            "langchain_community.tools",
-            "langgraph",
-            "langgraph.graph",
+        if (
+            name.startswith("hatsume")
+            or name == "requests"
+            or name.startswith("requests.")
+            or name in (
+                "nonebot",
+                "nonebot.adapters",
+                "nonebot.adapters.onebot",
+                "nonebot.adapters.onebot.v11",
+                "langchain",
+                "langchain.messages",
+                "langchain.agents",
+                "langchain_core",
+                "langchain_core.messages",
+                "langchain_core.tools",
+                "langchain_community",
+                "langchain_community.tools",
+                "langgraph",
+                "langgraph.graph",
+            )
         ):
             del sys.modules[name]
 
@@ -171,6 +176,8 @@ def _load_tools_module():
     config_mod.GITHUB_ACCOUNT = "test-account"
     config_mod.GITHUB_REPO = "test/repo"
     config_mod.CONTEXT_QUEUE_LEN = 20
+    config_mod.PIXELS_API_KEY = "test-pexels-key"
+    config_mod.PEXELS_BASE_URL = "https://api.pexels.com"
     sys.modules["hatsume.plugins.hatsume-plugin.config"] = config_mod
 
     models_mod = types.ModuleType("hatsume.plugins.hatsume-plugin.models")
@@ -254,6 +261,108 @@ class TestGetAvatarMultiCall:
         result = tools.get_avatar(111)
         assert "111" in result
         assert "错误" not in result
+
+
+# -----------------------------------------------------------------------
+# search_image: Pexels photo search
+# -----------------------------------------------------------------------
+
+
+class TestSearchImage:
+    @pytest.mark.asyncio
+    async def test_returns_sendable_urls_and_attribution(self, monkeypatch):
+        tools = _load_tools_module()
+        response = MagicMock()
+        response.json.return_value = {
+            "photos": [
+                {
+                    "url": "https://www.pexels.com/photo/sunrise-42/",
+                    "photographer": "Test Photographer",
+                    "alt": "Sunrise over a mountain lake",
+                    "src": {
+                        "large": "https://images.pexels.com/photos/42/large.jpeg",
+                        "original": "https://images.pexels.com/photos/42/original.jpeg",
+                    },
+                }
+            ]
+        }
+        get = MagicMock(return_value=response)
+        monkeypatch.setattr(tools.requests, "get", get)
+
+        result = await tools.search_image("mountain sunrise", 2, "landscape")
+
+        get.assert_called_once_with(
+            "https://api.pexels.com/v1/search",
+            params={
+                "query": "mountain sunrise",
+                "per_page": 2,
+                "page": 1,
+                "orientation": "landscape",
+            },
+            headers={
+                "Accept": "application/json",
+                "Authorization": "test-pexels-key",
+                "User-Agent": "Hatsume/1.0",
+            },
+            timeout=10,
+        )
+        assert "verify" not in get.call_args.kwargs
+        response.raise_for_status.assert_called_once_with()
+        assert "https://images.pexels.com/photos/42/large.jpeg" in result
+        assert "Test Photographer" in result
+        assert "https://www.pexels.com/photo/sunrise-42/" in result
+        assert "test-pexels-key" not in result
+
+    @pytest.mark.asyncio
+    async def test_missing_api_key_does_not_make_request(self, monkeypatch):
+        tools = _load_tools_module()
+        config = sys.modules["hatsume.plugins.hatsume-plugin.config"]
+        config.PIXELS_API_KEY = ""
+        get = MagicMock()
+        monkeypatch.setattr(tools.requests, "get", get)
+
+        result = await tools.search_image("city skyline")
+
+        assert "未配置 PIXELS_API_KEY" in result
+        get.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_rate_limit_returns_safe_error(self, monkeypatch):
+        tools = _load_tools_module()
+
+        def rate_limited(*args, **kwargs):
+            response = MagicMock(status_code=429)
+            raise tools.requests.exceptions.HTTPError(
+                "limited", response=response
+            )
+
+        monkeypatch.setattr(tools, "_fetch_pexels_search", rate_limited)
+
+        result = await tools.search_image("city skyline")
+
+        assert "请求过于频繁" in result
+        assert "test-pexels-key" not in result
+
+    @pytest.mark.asyncio
+    async def test_ssl_error_is_reported_without_disabling_verification(
+        self, monkeypatch
+    ):
+        tools = _load_tools_module()
+
+        def ssl_error(*args, **kwargs):
+            raise tools.requests.exceptions.SSLError("certificate verify failed")
+
+        monkeypatch.setattr(tools, "_fetch_pexels_search", ssl_error)
+
+        result = await tools.search_image("city skyline")
+
+        assert "SSL 证书" in result
+        assert "test-pexels-key" not in result
+
+    def test_registered_once_for_chat_agent(self):
+        tools = _load_tools_module()
+
+        assert tools.CHAT_TOOLS.count(tools.search_image) == 1
 
 
 # -----------------------------------------------------------------------

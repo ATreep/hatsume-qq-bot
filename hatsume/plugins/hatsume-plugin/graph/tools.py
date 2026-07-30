@@ -12,8 +12,9 @@ import subprocess
 import traceback
 import urllib.request
 import urllib.error
-from typing import TYPE_CHECKING, Annotated, Any, Callable, TypedDict
+from typing import TYPE_CHECKING, Annotated, Any, Callable, Literal, TypedDict
 
+import requests
 from langchain_core.tools import tool as _langchain_tool
 from langchain_community.tools import DuckDuckGoSearchRun
 from nonebot.adapters.onebot.v11 import MessageSegment
@@ -31,6 +32,8 @@ if TYPE_CHECKING:
 PositiveTimerStep = Annotated[int, Field(strict=True, gt=0)]
 IsoWeekday = Annotated[int, Field(strict=True, ge=1, le=7)]
 MonthDay = Annotated[int, Field(strict=True, ge=1, le=31)]
+ImageSearchCount = Annotated[int, Field(strict=True, ge=1, le=10)]
+ImageOrientation = Literal["landscape", "portrait", "square"]
 
 
 class WeeklyTimePoint(TypedDict):
@@ -261,6 +264,143 @@ def search_web(query: str) -> str:
     except Exception:
         print("Search failed.")
         return "search_web 没有找到相关结果"
+
+
+def _fetch_pexels_search(
+    query: str,
+    count: int,
+    orientation: ImageOrientation | None,
+    api_key: str,
+    base_url: str,
+) -> Any:
+    """Fetch one page from Pexels without blocking the async caller."""
+    params: dict[str, str | int] = {"query": query, "per_page": count, "page": 1}
+    if orientation is not None:
+        params["orientation"] = orientation
+    response = requests.get(
+        f"{base_url.rstrip('/')}/v1/search",
+        params=params,
+        headers={
+            "Accept": "application/json",
+            "Authorization": api_key,
+            "User-Agent": "Hatsume/1.0",
+        },
+        timeout=10,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+@tool
+async def search_image(
+    query: str,
+    count: ImageSearchCount = 3,
+    orientation: ImageOrientation | None = None,
+) -> str:
+    """
+    使用 Pexels 搜索真实照片，返回可发送的图片 URL、说明、摄影师和来源页面。
+    此工具只搜索图片，不会直接发送；选定结果后使用 send_image 发送 image_url。
+
+    ## 参数：
+    - query: 简洁、具体的图片搜索关键词，优先使用英文关键词
+    - count: 返回结果数，范围 1 到 10，默认 3
+    - orientation: 可选构图方向：landscape、portrait 或 square
+
+    ## 使用场景：
+    - 用户希望查找或查看现有的真实照片、素材图、风景图时使用
+    - 用户要求创作一张新图片时不要使用，应调用 generate_image
+    """
+    normalized_query = query.strip()
+    if not normalized_query:
+        return "错误：图片搜索关键词不能为空。"
+    if isinstance(count, bool) or not isinstance(count, int) or not 1 <= count <= 10:
+        return "错误：count 必须是 1 到 10 之间的整数。"
+    if orientation not in (None, "landscape", "portrait", "square"):
+        return "错误：orientation 必须是 landscape、portrait 或 square。"
+
+    from .. import config
+
+    api_key = getattr(config, "PIXELS_API_KEY", "").strip()
+    if not api_key:
+        return "图片搜索不可用：未配置 PIXELS_API_KEY。"
+    base_url = getattr(config, "PEXELS_BASE_URL", "https://api.pexels.com")
+
+    print(f"Search Pexels images: {normalized_query!r}")
+    try:
+        payload = await asyncio.to_thread(
+            _fetch_pexels_search,
+            normalized_query,
+            count,
+            orientation,
+            api_key,
+            base_url,
+        )
+    except requests.exceptions.HTTPError as e:
+        status_code = e.response.status_code if e.response is not None else 0
+        print(f"Pexels image search HTTP error: {status_code or 'unknown'}")
+        if status_code in (401, 403):
+            return "图片搜索失败：PIXELS_API_KEY 无效或无权访问 Pexels API。"
+        if status_code == 429:
+            return "图片搜索失败：Pexels API 请求过于频繁，请稍后重试。"
+        if status_code:
+            return f"图片搜索失败：Pexels API 返回 HTTP {status_code}。"
+        return "图片搜索失败：Pexels API 返回了未知 HTTP 错误。"
+    except requests.exceptions.SSLError as e:
+        print(f"Pexels image search SSL error: {e}")
+        return "图片搜索失败：无法验证 Pexels API 的 SSL 证书。"
+    except requests.exceptions.Timeout as e:
+        print(f"Pexels image search timeout: {e}")
+        return "图片搜索失败：连接 Pexels API 超时。"
+    except requests.exceptions.ConnectionError as e:
+        print(f"Pexels image search network error: {e}")
+        return "图片搜索失败：暂时无法连接 Pexels API。"
+    except requests.exceptions.InvalidJSONError as e:
+        print(f"Pexels image search response error: {e}")
+        return "图片搜索失败：Pexels API 返回了无效数据。"
+    except requests.exceptions.RequestException as e:
+        print(f"Pexels image search request error: {e}")
+        return "图片搜索失败：Pexels API 请求异常。"
+
+    if not isinstance(payload, dict) or not isinstance(payload.get("photos"), list):
+        return "图片搜索失败：Pexels API 返回了无效数据。"
+
+    results: list[str] = []
+    for photo in payload["photos"]:
+        if not isinstance(photo, dict) or not isinstance(photo.get("src"), dict):
+            continue
+        image_url = photo["src"].get("large") or photo["src"].get("original")
+        if not isinstance(image_url, str) or not image_url.startswith("https://"):
+            continue
+        alt_value = photo.get("alt")
+        photographer_value = photo.get("photographer")
+        source_url_value = photo.get("url")
+        alt: str = alt_value if isinstance(alt_value, str) else ""
+        photographer: str = (
+            photographer_value if isinstance(photographer_value, str) else "Unknown"
+        )
+        source_url: str = (
+            source_url_value if isinstance(source_url_value, str) else ""
+        )
+        details = [
+            f"{len(results) + 1}. {alt or normalized_query}",
+            f"   image_url: {image_url}",
+        ]
+        if source_url.startswith("https://"):
+            details.append(
+                f"   attribution: Photo by {photographer} on Pexels: {source_url}"
+            )
+        else:
+            details.append(f"   attribution: Photo by {photographer} on Pexels")
+        results.append("\n".join(details))
+        if len(results) >= count:
+            break
+
+    if not results:
+        return f"Pexels 没有找到与 {normalized_query!r} 匹配的图片。"
+    return (
+        f"Pexels 找到 {len(results)} 张图片。需要展示时，将所选结果的 image_url "
+        "传给 send_image。\n\n" + "\n\n".join(results)
+    )
 
 
 @tool
@@ -1456,6 +1596,7 @@ def end_conversation() -> str:
 # Single registration point consumed by graph.nodes. Add new chat-facing tools here.
 CHAT_TOOLS = [
     search_web,
+    search_image,
     shell_executor,
     find_memory,
     view_image,

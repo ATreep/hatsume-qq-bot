@@ -428,6 +428,7 @@ flowchart LR
 | 工具 | 作用 |
 |---|---|
 | search_web | DuckDuckGo 联网搜索 |
+| search_image | 通过 Pexels 搜索真实照片，返回图片 URL 与摄影师来源信息 |
 | shell_executor | Docker 沙盒同步命令；普通聊天每轮最多三次 |
 | find_memory | 主动检索长期记忆 |
 | view_image | 使用轻量模型读取网络或沙盒图片并返回文字描述 |
@@ -486,7 +487,7 @@ sequenceDiagram
     N->>N: 当前 human_queue 或新对话
 ~~~
 
-- coding_agent 使用代码模型，可调用 shell_executor、Skill 工具、搜索和图片生成；它把 Shell 上限设为无限制。
+- coding_agent 使用代码模型，可调用 shell_executor、Skill 工具、网页与 Pexels 图片搜索、图片生成；它把 Shell 上限设为无限制。
 - background_shell 先把任务解析为单条命令、终止条件和总超时，然后后台启动进程并增量读取日志。
 - 后台决策支持 DONE、KILL、CONTINUE:N、NOTIFY:N 与 INPUT_NEEDED:<timeout>:<description>。
 - 每次派发生成唯一 instance_id，保存任务、上下文、用户、开始时间、状态和结果。
@@ -524,6 +525,7 @@ sequenceDiagram
 ### 7.2 图片与视频
 
 - 输入图片使用 requests 同步下载，限制为 9 MiB 和 3600 万像素。
+- search_image 使用固定的 Pexels Search API，通过 PIXELS_API_KEY 鉴权；网络请求在线程中执行，最多返回十条带来源信息的候选结果，再由聊天 Agent 复用 send_image 发送。
 - view_image 将 HTTP/HTTPS 图片 URL 直接交给轻量模型；沙盒 file:// 绝对路径先检测图片 MIME 并转换为 data URI，再返回模型生成的文字描述。
 - generate_image 在 Seedream 和兼容图像接口之间选择；有参考图时使用支持参考图的路径。
 - 沙盒绝对路径会先在 Docker 内读取并转换为 data URI。
@@ -687,7 +689,7 @@ config.py 会在本地加载 .env.prod，但公开仓库不提供该文件或任
 - Bot 与权限：BOT_QQ_ID、ADMIN_QQ_ID、AGENT_QQ_EMAIL。
 - 自动任务目标：AUTO_RESPONSE_GROUP_ID。
 - Agent 仓库身份：GITHUB_ACCOUNT、GITHUB_REPO。
-- 模型供应商：ARK_PLAN_API_KEY、ARK_API_KEY、SILICONFLOW_API_KEY、OPENCODE_API_KEY、KEGEAI_API_KEY、ZHTH_API_KEY。
+- 模型与媒体供应商：ARK_PLAN_API_KEY、ARK_API_KEY、SILICONFLOW_API_KEY、OPENCODE_API_KEY、KEGEAI_API_KEY、ZHTH_API_KEY、PIXELS_API_KEY。
 - Docker：DOCKER_ENV_PATH；未设置时指向源码内 virtual/ 目录。
 - NoneBot 与 OneBot 连接配置，例如 DRIVER、LOCALSTORE_USE_CWD、ONEBOT_ACCESS_TOKEN。
 

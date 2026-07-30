@@ -36,6 +36,7 @@ ZHTH_API_KEY = os.environ.get("ZHTH_API_KEY", "")
 DS_API_KEY = os.environ.get("DS_API_KEY", "")
 AR_API_KET = os.environ.get("AR_API_KEY", "")
 RUOLI_API_KEY = os.environ.get("ROULI_API_KEY", "")
+PIXELS_API_KEY: str = os.environ.get("PIXELS_API_KEY", "")
 
 # ---------------------------------------------------------------------------
 # Base URLs (No `v1` suffix)
@@ -51,6 +52,7 @@ ZHTH_BASE_URL = "https://api.zhehentiaohe.cn"
 DS_BASE_URL = "https://api.deepseek.com"
 AR_BASE_URL = "https://agentrouter.org"
 RUOLI_BASE_URL = "https://ruoli.dev"
+PEXELS_BASE_URL = "https://api.pexels.com"
 
 
 # ---------------------------------------------------------------------------

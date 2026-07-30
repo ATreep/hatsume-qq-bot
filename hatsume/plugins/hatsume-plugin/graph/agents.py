@@ -154,6 +154,31 @@ def get_agent_handler(name: str) -> AgentHandler | None:
 # Built-in agent handler implementations
 # ---------------------------------------------------------------------------
 
+def _get_coding_agent_tools() -> list[Any]:
+    """Build the coding-agent tool list without creating an import cycle."""
+    from .tools import (
+        generate_image,
+        search_image,
+        search_web,
+        shell_executor,
+        skill_create,
+        skill_download,
+        skill_loader,
+        skill_remove,
+    )
+
+    return [
+        shell_executor,
+        skill_loader,
+        search_web,
+        search_image,
+        skill_remove,
+        skill_download,
+        skill_create,
+        generate_image,
+    ]
+
+
 async def _run_coding_agent(task: str, user_id: int) -> str:
     """Execute coding agent task using shell_executor + claude-code-agent skill.
 
@@ -168,12 +193,12 @@ async def _run_coding_agent(task: str, user_id: int) -> str:
 
     from ..models import get_code_model
     from ..prompts import CODING_AGENT_PROMPT, build_skill_prompt
-    from .tools import shell_executor, skill_loader, search_web, skill_remove, skill_download, skill_create, generate_image, set_shell_executor_limit
+    from .tools import set_shell_executor_limit
     from ..skills import get_skill_manager
 
     coding_agent = create_agent(
         get_code_model(),
-        [shell_executor, skill_loader, search_web, skill_remove, skill_download, skill_create, generate_image],
+        _get_coding_agent_tools(),
         system_prompt=CODING_AGENT_PROMPT + "\n\n" + build_skill_prompt(get_skill_manager().list_skills()),
     )
 

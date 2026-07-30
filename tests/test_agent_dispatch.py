@@ -5,8 +5,6 @@ import sys
 import types
 from pathlib import Path
 
-import pytest
-
 # Set up package hierarchy so the real module can be imported
 ROOT = Path(__file__).resolve().parents[1]
 PLUGIN_DIR = ROOT / "hatsume/plugins/hatsume-plugin"
@@ -141,6 +139,39 @@ class TestAgentRegistry:
 
         result = get_agent_handler("nonexistent_agent")
         assert result is None
+
+    def test_coding_agent_includes_image_search_tool(self):
+        """The coding agent receives Pexels search alongside web search."""
+        from hatsume.plugins.hatsume_plugin.graph.agents import (
+            _get_coding_agent_tools,
+        )
+
+        module_name = "hatsume.plugins.hatsume_plugin.graph.tools"
+        previous = sys.modules.get(module_name)
+        fake_tools = types.ModuleType(module_name)
+        tool_names = (
+            "generate_image",
+            "search_image",
+            "search_web",
+            "shell_executor",
+            "skill_create",
+            "skill_download",
+            "skill_loader",
+            "skill_remove",
+        )
+        for name in tool_names:
+            setattr(fake_tools, name, object())
+        sys.modules[module_name] = fake_tools
+        try:
+            coding_tools = _get_coding_agent_tools()
+        finally:
+            if previous is None:
+                sys.modules.pop(module_name, None)
+            else:
+                sys.modules[module_name] = previous
+
+        assert fake_tools.search_image in coding_tools
+        assert coding_tools.count(fake_tools.search_image) == 1
 
 
 class TestAgentContext:
