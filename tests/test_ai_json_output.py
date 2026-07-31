@@ -33,6 +33,7 @@ def _load_prompts() -> types.ModuleType:
     config_mod.AGENT_QQ_EMAIL = "test@qq.com"
     config_mod.GITHUB_ACCOUNT = "test"
     config_mod.GITHUB_REPO = "test/repo"
+    config_mod.HUGGINGFACE_ACCOUNT = "test-huggingface"
     sys.modules["hatsume.plugins.hatsume-plugin.config"] = config_mod
 
     utils_mod = types.ModuleType("hatsume.plugins.hatsume-plugin.utils")

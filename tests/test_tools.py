@@ -175,6 +175,7 @@ def _load_tools_module():
     config_mod.AGENT_QQ_EMAIL = "test@qq.com"
     config_mod.GITHUB_ACCOUNT = "test-account"
     config_mod.GITHUB_REPO = "test/repo"
+    config_mod.HUGGINGFACE_ACCOUNT = "test-huggingface"
     config_mod.CONTEXT_QUEUE_LEN = 20
     config_mod.PIXELS_API_KEY = "test-pexels-key"
     config_mod.PEXELS_BASE_URL = "https://api.pexels.com"

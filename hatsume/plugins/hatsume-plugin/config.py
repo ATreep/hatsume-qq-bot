@@ -22,7 +22,8 @@ BOT_QQ_ID: int = _get_int_env("BOT_QQ_ID")
 AGENT_QQ_EMAIL = os.getenv("AGENT_QQ_EMAIL", "")
 ADMIN_QQ_ID: str = os.getenv("ADMIN_QQ_ID", "")
 GITHUB_ACCOUNT = os.getenv("GITHUB_ACCOUNT", "")
-GITHUB_REPO = os.getenv("GITHUB_REPO", "ATreep/hatsume-qq-bot")
+HUGGINGFACE_ACCOUNT = os.getenv("HUGGINGFACE_ACCOUNT", "")
+GITHUB_REPO = os.getenv("GITHUB_REPO", "")
 
 # ---------------------------------------------------------------------------
 # API keys — read from environment

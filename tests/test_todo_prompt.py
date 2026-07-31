@@ -21,6 +21,8 @@ def _load_prompts_module():
     config.AGENT_QQ_EMAIL = "test@example.com"
     config.BOT_QQ_ID = 123
     config.GITHUB_ACCOUNT = "test"
+    config.GITHUB_REPO = "test/repo"
+    config.HUGGINGFACE_ACCOUNT = "test-huggingface"
     sys.modules[config.__name__] = config
 
     name = f"{TEST_PACKAGE}.prompts"

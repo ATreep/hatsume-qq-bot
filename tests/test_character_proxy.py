@@ -287,6 +287,8 @@ def test_role_prompt_scopes_proxy_and_preserves_notification_identity():
     config.AGENT_QQ_EMAIL = "test@qq.com"
     config.BOT_QQ_ID = 999
     config.GITHUB_ACCOUNT = "test"
+    config.GITHUB_REPO = "test/repo"
+    config.HUGGINGFACE_ACCOUNT = "test-huggingface"
     sys.modules[config.__name__] = config
     _package("hatsume", ROOT / "hatsume")
     _package("hatsume.plugins", ROOT / "hatsume/plugins")

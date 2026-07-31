@@ -42,6 +42,7 @@ def _load_prompts_module():
     sys.modules[cfg_name].BOT_QQ_ID = "12345"
     sys.modules[cfg_name].GITHUB_ACCOUNT = "test-account"
     sys.modules[cfg_name].GITHUB_REPO = "test/repo"
+    sys.modules[cfg_name].HUGGINGFACE_ACCOUNT = "test-huggingface"
 
     spec = importlib.util.spec_from_file_location(prompts_name, prompts_path)
     prompts_mod = importlib.util.module_from_spec(spec)
