@@ -1,6 +1,6 @@
 # Hatsume 架构与运行逻辑
 
-本文档以 2026-07-25 的源码为准，是完整功能、运行流程、模块职责与测试索引的当前真源。specs/ 与 docs/superpowers/ 保存功能规格和历史设计决策，不代表所有内容仍与当前实现一致。
+本文档以 2026-07-31 的源码为准，是完整功能、运行流程、模块职责与测试索引的当前真源。specs/ 与 docs/superpowers/ 保存功能规格和历史设计决策，不代表所有内容仍与当前实现一致。
 
 ## 1. 功能总览
 
@@ -18,6 +18,7 @@ flowchart LR
     Graph --> Tools[聊天工具]
     Tools --> Memory[(记忆 SQLite 与 Milvus Lite)]
     Tools --> Timers[(Timer SQLite 与 APScheduler)]
+    Tools --> Todos[(Todo SQLite)]
     Tools --> Skills[Markdown Skills]
     Tools --> Agents[后台 Agents]
     Tools --> Sandbox[Docker 沙盒]
@@ -57,6 +58,7 @@ flowchart LR
 | 定时任务创建 | daily、weekly、monthly、at 四个聊天工具 | 频率任务每周期最多 5 个 `HH:MM:SS` 时间点、正整数间隔且由结束时间限定；指定时刻最多 10 个 | graph/tools.py、timer/schedule.py、timer/store.py |
 | 定时任务管理 | /timer 或聊天工具 | 按群显示完整频率规则或全部指定时刻，支持删除；命令更新兼容为最多 10 个指定时刻 | handlers/tools.py、graph/tools.py |
 | 定时任务恢复与清理 | Bot 连接完成、每日 03:00 | 恢复原生 point 作业、补偿五分钟内漏触发，并清理已完成普通任务 | `timer/__init__.py`、timer/executor.py |
+| 群聊待办 | create_todo、mark_todo、每轮自动检查 | 每群最多 15 条，当前聊天可触发主动创建；48 小时过期，条件满足后删除并 @ 发起人 | graph/tools.py、graph/nodes.py、prompts.py、todo/ |
 | 自动回复 | auto_response 记录或 /autoresponse | 固定群主动参与话题，每 1 至 3 小时重新排期 | timer/、prompts.py |
 | 新成员欢迎 | `AUTO_RESPONSE_GROUP_ID` 的 OneBot `group_increase` 事件 | 激活新成员 peer，并向现有图注入欢迎任务或在无对话时启动新图 | `__init__.py`、handlers/dialogue.py |
 | Skill 加载 | /skills、skill_loader | 扫描 Markdown 与 YAML frontmatter，按需加载并进行单轮去重 | skills/ |
@@ -224,7 +226,7 @@ stateDiagram-v2
 - human_node 每 0.3 秒检查 human_queue，五分钟无输入时写入 __end__。
 - chat_end_detect_node 在早期轮次或最后消息包含“初芽”时直接继续；其他情况随机选择轻量或迷你模型判断，也保留随机直接继续分支。
 - 图历史超过 60 条 LangGraph 消息时，删除最早的一对 Human/AI 消息。
-- ai_node 自动检索记忆，注入 Skill 列表、运行中 Agent 状态、当前群定时任务概览、可选表情提示和调用时的本地日期时间，再用 CHAT_TOOLS 创建 LangChain Agent。主调用最多重试五次，递归上限为 60。
+- ai_node 自动检索记忆，注入 Skill 列表、运行中 Agent 状态、当前群定时任务概览、当前群待办、可选表情提示和调用时的本地日期时间，再用 CHAT_TOOLS 创建 LangChain Agent。进入节点时先删除所有已满 48 小时的待办；Todo 数据库不可用时只注入不可用状态，不中断普通回复。主调用最多重试五次，递归上限为 60。
 - ai_node 每轮读取辅助队列的非破坏性快照，临时放在当前 Human 内容之前；同一辅助上下文会持续进入后续轮次，直到新写入触发压缩。发送前移除 reply、memory 与 face 标签；图历史会移除 reply 控制标记，但保留现有 face 与 memory 标签历史语义。
 - ai_node 只解析当前 HumanMessage 中顶层 `type=message` 的 JSON。发送者 QQ ID 等于非空 `ADMIN_QQ_ID` 且该消息的直接正文包含大小写敏感的 `WORLDSKY` 时，本轮本地 `sys_prompt` 追加 ADMIN MODE，chat_agent 改用 `get_code_model()` 所封装的 `DEEPSEEK_V4_FLASH`，并在不修改 LangGraph 历史的前提下从全部模型输入消息复制过滤历史 `image_url` 与 `img_url` 内容段；回复引用、合并转发、辅助上下文和历史消息均不能触发，下一轮重新使用高级模型、未过滤输入与基础角色 Prompt。普通消息与回复图片在所有模式下均以沙盒 Markdown 路径输入。
 - chat_agent 调用 end_conversation 后，ConversationState 立即关闭聊天并清空 chat_peers；ai_node 抑制该轮文本和表情发送，human_node 随即路由到 finish。下一次主动提及通过 activate_chat() 解除结束标记。
@@ -277,7 +279,7 @@ Agent/Timer 从 handlers/dialogue.py 启动的新对话复用同一直接群发�
 
 ### 4.1 持久化边界
 
-SQLite 是记忆 ID 与元数据真源，默认数据库为 data/hatsume-plugin/memory.db，并启用 WAL。Milvus Lite 的 data/hatsume-plugin/memory_vectors.db 目录保存运行时向量，主键 `memory_id` 与 SQLite `memories.id` 完全相同，使用 1024 维 BGE-M3 向量和 cosine 距离。进程内不保留全量记忆、分词语料、BM25 索引或向量矩阵。每次向量操作串行打开 Milvus，完成后关闭 PyMilvus 客户端并停止 embedded gRPC server，避免后续 Shell/Docker fork 继承 gRPC 文件描述符。
+SQLite 是记忆 ID 与元数据真源，默认数据库为 data/hatsume-plugin/memory-db/memory.db，并启用 WAL。Milvus Lite 的 data/hatsume-plugin/memory-db/memory_vectors.db 目录保存运行时向量，主键 `memory_id` 与 SQLite `memories.id` 完全相同，使用 1024 维 BGE-M3 向量和 cosine 距离。两个记忆存储统一位于 memory-db/ 目录；新部署会按需创建该目录。进程内不保留全量记忆、分词语料、BM25 索引或向量矩阵。每次向量操作串行打开 Milvus，完成后关闭 PyMilvus 客户端并停止 embedded gRPC server，避免后续 Shell/Docker fork 继承 gRPC 文件描述符。
 
 ~~~text
 memories
@@ -443,6 +445,8 @@ flowchart LR
 | create_weekly_timer | 创建含 weekday/time 周期点和周间隔的任务 |
 | create_monthly_timer | 创建含 day/time 周期点和月间隔的任务 |
 | create_at_timer | 创建含 1..10 个指定时间戳的任务 |
+| create_todo | 为当前群创建最长保留 48 小时的待办，保存发起人群名片与严格完成条件 |
+| mark_todo | 完成并删除当前群待办，返回必须 @ 发起人的完成通知信息 |
 | list_timers | 按完成状态显示完整频率规则或全部指定时刻 |
 | delete_timer | 删除当前群任务 |
 | skill_loader | 加载 Skill 完整指令 |
@@ -455,9 +459,19 @@ flowchart LR
 | end_conversation | 用户要求不再回复时立即结束当前对话，直到再次被主动提及 |
 | create_character_proxy(proxied_user_id, during_time=180) / terminate_character_proxy | 根据 RAM 代理开关互斥提供；持续时间以分钟计，默认 180，范围 1 至 1440，超时自动终止 |
 
-configure_tool_callbacks() 在每次新图启动时注入发送回调、当前用户、检索集合和媒体限流回调。当前群号、Agent 通知回调和部分工具计数仍是 graph/tools.py 的模块级状态；Shell 次数使用 ContextVar 区分普通聊天与 coding_agent。get_chat_tools() 根据 character_proxy.py 的单一 RAM 状态过滤生命周期工具：关闭时只有 create_character_proxy，开启时只有 terminate_character_proxy。
+configure_tool_callbacks() 在每次新图启动时注入发送回调、当前用户、检索集合和媒体限流回调。当前群号、Agent 通知回调和部分工具计数仍是 graph/tools.py 的模块级状态；graph/nodes.py 通过 get_current_group_id() 动态读取群号，避免导入整数快照。Shell 次数使用 ContextVar 区分普通聊天与 coding_agent。get_chat_tools() 根据 character_proxy.py 的单一 RAM 状态过滤生命周期工具：关闭时只有 create_character_proxy，开启时只有 terminate_character_proxy。
 
-### 6.2 角色代理
+### 6.2 群聊待办
+
+todo/store.py 通过 nonebot_plugin_localstore 定位 `todo-db/todo.db`，只保存 `todo_items` 表。每条记录包含 ID、群号、发起人 QQ ID、创建时解析得到的群名片、待办内容、创建时间和完成条件。完成条件固定由 `Permitted finisher` 与 `Completion event` 两个自由文本子句组成；内容和每个子句均不能为空且最多 500 字符。
+
+容量、可见性和完成操作均按群隔离。create_todo 在 `BEGIN IMMEDIATE` 事务内先清理过期行，再检查相同群、发起人、内容和条件的精确重复，最后检查该群是否已有 15 条；重复时返回已有 ID，满额时拒绝且不驱逐旧项。mark_todo 同样在事务内重做过期清理，只按当前群与 ID 查询，成功后立即硬删除，不保留历史。
+
+ai_node 每次进入时全局删除 `created_at <= now - 48h` 的记录，再按 `created_at, id` 读取当前群。prompts.py 把活动记录以结构化数据注入 role system prompt，并明确规定：可从当前聊天主动创建、不得仅从背景聊天创建、避免语义重复、允许结合近期上下文判断完成、必须同时满足允许完成人与完成事件。mark_todo 成功结果要求 chat_agent 在同一自然回复中使用 `[CQ:at,qq=...]` 提及发起人，并说明完成来自条件满足而非过期。过期只删除，不发送通知。
+
+TodoStore 使用进程级惰性单例、WAL、参数化 SQL、显式 commit 和 busy timeout。初始化失败会关闭候选连接并允许下次重试；ai_node 捕获读取失败并继续聊天。运行时没有 Todo 调度器、QQ 命令、编辑/手动删除工具或完成历史表。
+
+### 6.3 角色代理
 
 character_proxy.py 只维护一个进程级 CharacterProxy 和一个自动终止 TimerHandle，包含被代理用户 ID、昵称、外号、一次生成的行为 Prompt 和带时区的自动结束时间，不写入 SQLite，进程重启即丢失。创建时通过 memory.get_recent_user_memories() 从 SQLite 按需读取该用户最新最多 100 条关联记忆，再用一次轻量模型调用以 JSON 同时生成行为 Prompt 和外号列表，并把包含外号的完整角色 Prompt 打印到控制台；持续时间默认 180 分钟且不得超过 1440 分钟，到期或手动终止时清空对象并取消定时句柄。
 
@@ -467,7 +481,7 @@ chat_end_detect_node 在调用结束检测模型前解析最新规范化消息�
 
 ai_node 在代理开启时把行为画像和带时区的自动结束时间附加到 role system prompt。该 Prompt 规定只有当前消息明确 @ 被代理用户时才模仿；与初芽的普通对话、Agent 通知和 Timer 通知继续使用初芽身份。终止工具执行后，下一次 ai_node 不再注入该 Prompt。
 
-### 6.3 Agent 注册与通知
+### 6.4 Agent 注册与通知
 
 graph/agents.py 维护 AGENT_REGISTRY 和 _AGENT_STATES。
 
@@ -496,7 +510,7 @@ sequenceDiagram
 - stdin 请求使用 request_id -> asyncio.Queue 保存。聊天模型调用 respond_to_shell_prompt() 后，后台 Agent 再用代码模型把原始回复转换为最终进程输入。
 - Agent 状态与当前群号只保存在内存中，进程重启后不会恢复。
 
-### 6.4 Skill
+### 6.5 Skill
 
 - skills/manager.py 扫描配置目录中的 Markdown 文件并解析 YAML frontmatter。
 - 有效 Skill 至少需要名称、描述和正文。
@@ -504,7 +518,7 @@ sequenceDiagram
 - 同一对话内记录已加载名称，避免重复加载；finish 会重置该集合。
 - skill_create、skill_download 与 skill_remove 修改运行时 Skill 文件并清理缓存，新 Skill 无需重启即可使用。
 
-### 6.5 高级模型运行时切换
+### 6.6 高级模型运行时切换
 
 - config.py 的 ADVANCE_MODEL_NAME 保存当前进程使用的高级模型名，初始值由源码配置决定。
 - 管理员发送 /model 可查看当前值；/model <模型名> 会原样保留模型标识的大小写和标点，只去除首尾空白。
@@ -587,6 +601,7 @@ flowchart TD
     Tools --> Agents[graph/agents.py]
     Tools --> Memory
     Tools --> Timer
+    Tools --> Todo
     Tools --> Infra[infra.py]
     Timer --> Nodes
     Commands --> Infra
@@ -599,10 +614,10 @@ graph/tools.py、graph/agents.py、graph/nodes.py 与 handlers/dialogue.py 之�
 | Python 模块 | 职责说明 |
 |---|---|
 | `hatsume/plugins/hatsume-plugin/__init__.py` | 唯一插件入口；初始化记忆；Bot 连接后恢复 Timer；修补 @ 检测；注册命令、聊天 matcher、戳一戳与新成员事件。 |
-| hatsume/plugins/hatsume-plugin/config.py | 加载 .env.prod；定义机器人身份、模型和供应商配置读取器，以及队列、限流、图片、记忆、Timer、Docker 与 Skill 常量。文档只记录变量名，不记录真实值。 |
+| hatsume/plugins/hatsume-plugin/config.py | 加载 .env.prod；定义机器人身份、模型和供应商配置读取器，以及队列、限流、图片、记忆、Todo、Timer、Docker 与 Skill 常量。文档只记录变量名，不记录真实值。 |
 | hatsume/plugins/hatsume-plugin/state.py | 定义 ConversationState。当前由 dialogue 创建一份进程级共享实例，拥有 chat_peers、idle/pending/human 队列、图任务、限流时间、回复回调和记录上下文。 |
 | hatsume/plugins/hatsume-plugin/models.py | 修补 LangChain OpenAI 消息转换以保留 reasoning_content 与 thought_signature；按运行时 ADVANCE_MODEL_NAME 创建高级模型，并创建轻量、迷你、代码模型和 Embedding；封装图片与视频供应商。 |
-| hatsume/plugins/hatsume-plugin/prompts.py | 保存角色、Skill、Agent 状态、辅助上下文压缩、表情、结束检测、记忆、角色代理、编码 Agent、自动任务和后台 Shell Prompt。 |
+| hatsume/plugins/hatsume-plugin/prompts.py | 保存角色、Skill、Agent 状态、辅助上下文压缩、表情、结束检测、记忆、Todo、角色代理、编码 Agent、自动任务和后台 Shell Prompt。 |
 | hatsume/plugins/hatsume-plugin/character_proxy.py | 保存全局唯一的 RAM 角色代理，一次生成行为画像与外号，匹配正文称呼，识别 @ 目标并通过 ConversationState 激活 chat peer。 |
 | hatsume/plugins/hatsume-plugin/infra.py | 管理 Docker 容器启动、停止和删除；前台命令、后台进程、日志读取、stdin、超时、引用计数与延迟停止。 |
 | `hatsume/plugins/hatsume-plugin/handlers/__init__.py` | handlers 包说明。 |
@@ -612,13 +627,15 @@ graph/tools.py、graph/agents.py、graph/nodes.py 与 handlers/dialogue.py 之�
 | hatsume/plugins/hatsume-plugin/handlers/tools.py | 实现戳一戳、Shell、视频、Timer、Skill 列表、成员搜索、/model、沙盒重置、Agent 查询、/clear 和自动任务调试命令；共享状态由 dialogue 注入。 |
 | `hatsume/plugins/hatsume-plugin/graph/__init__.py` | graph 包说明。 |
 | hatsume/plugins/hatsume-plugin/graph/builder.py | 构建并编译 human -> chat_end_detect -> chat_llm -> human 图，连接 finish 与 END。 |
-| hatsume/plugins/hatsume-plugin/graph/nodes.py | 实现 Human、Detect、AI、Finish；拥有模块级辅助队列与表情状态；处理记忆标签、Skill/Agent 注入、Agent/Timer 标记、@ 回复和对话结束。 |
-| hatsume/plugins/hatsume-plugin/graph/tools.py | 定义并唯一注册 CHAT_TOOLS；维护工具回调、当前群号、媒体与发送次数、Shell 上限；负责 Agent 派发和 stdin 回复。 |
+| hatsume/plugins/hatsume-plugin/graph/nodes.py | 实现 Human、Detect、AI、Finish；拥有模块级辅助队列与表情状态；处理记忆标签、Skill/Agent/Timer/Todo 注入、@ 回复和对话结束。 |
+| hatsume/plugins/hatsume-plugin/graph/tools.py | 定义并唯一注册 CHAT_TOOLS；维护工具回调、当前群号、媒体与发送次数、Shell 上限；负责 Todo 操作、Agent 派发和 stdin 回复。 |
 | hatsume/plugins/hatsume-plugin/graph/agents.py | 维护 AGENT_REGISTRY、并发实例状态和 stdin 队列；实现 coding_agent 与 background_shell。 |
 | `hatsume/plugins/hatsume-plugin/memory/__init__.py` | 统一导出记忆数据库、规范化、检索和分词 API。 |
 | hatsume/plugins/hatsume-plugin/memory/engine.py | 管理 memories SQLite、原文 LIKE、有限候选 BM25、显式写入、JSON 迁移、Milvus 结果融合和每日过期清理。 |
 | hatsume/plugins/hatsume-plugin/memory/vector_store.py | 封装 Milvus Lite collection、ID 向量 CRUD、cosine 搜索和 SQLite 只读向量迁移。 |
 | hatsume/plugins/hatsume-plugin/memory/tokenizer.py | 使用 Jieba 词性标注过滤并保留有意义的中文词，供临时 BM25 查询使用。 |
+| `hatsume/plugins/hatsume-plugin/todo/__init__.py` | 暴露 TodoStore 类型和可失败重试的进程级惰性单例。 |
+| hatsume/plugins/hatsume-plugin/todo/store.py | 通过 localstore 定位 Todo SQLite，管理严格单表 schema、48 小时过期、每群 15 条容量、精确去重和按群完成删除。 |
 | `hatsume/plugins/hatsume-plugin/skills/__init__.py` | 暴露 SkillManager 并提供进程级单例。 |
 | hatsume/plugins/hatsume-plugin/skills/manager.py | 扫描 Markdown Skill、解析 frontmatter、缓存内容、单轮加载去重、保存覆盖、删除和目录创建。 |
 | `hatsume/plugins/hatsume-plugin/timer/__init__.py` | 提供 TimerStore 单例，并按 recovery -> auto_response -> cleanup 顺序启动。 |
@@ -666,12 +683,15 @@ virtual/ 下是 Shell 和 Docker 构建、启动、停止、删除脚本，不�
 | tests/test_skill_create.py | Skill 保存、覆盖、缓存失效与 frontmatter 校验。 |
 | tests/test_skill_manager.py | Skill 扫描、加载去重、缓存、删除、目录创建与 Prompt 列表。 |
 | tests/test_thought_signature.py | thought_signature 修补、捕获、恢复、缺失兼容，以及高级模型名向标准工厂的动态转发。 |
+| tests/test_todo_prompt.py | Todo role prompt 的字段格式、创建/完成规则、低信任数据边界和不可用状态。 |
+| tests/test_todo_startup.py | TodoStore 单例初始化失败关闭、重试恢复和复用。 |
+| tests/test_todo_store.py | Todo localstore 路径、单表 schema、群隔离、48 小时边界、容量、去重、并发和硬删除。 |
 | tests/test_timer_injection.py | Timer 标记检测、活跃或非活跃会话注入与完整投递上下文。 |
 | tests/test_timer_schedule.py | 四种规则解析、严格时间格式、锚定间隔、超大正整数 step、无效月份跳过、5/10 限制和无频率总次数上限。 |
 | tests/test_timer_store.py | localstore 路径、严格 v2 schema、任务/point CRUD、幂等进度、exact replacement、级联删除和完成清理。 |
 | tests/test_timer_executor.py | 原生 trigger、最终 occurrence 降级、注册/取消、实际 scheduled_at 漏触发核对、执行后进度、启动恢复和 03:00 清理。 |
 | tests/test_timer_startup.py | TimerStore 单例初始化失败重试及 recovery/auto_response/cleanup 启动顺序。 |
-| tests/test_tools.py | 图片、视频、发送限流、头像、记忆格式、四类 Timer 工具与详细列表、/timer、/model、角色 Prompt 和 stdin。 |
+| tests/test_tools.py | 图片、视频、发送限流、头像、记忆格式、Todo、四类 Timer 工具与详细列表、/timer、/model、角色 Prompt 和 stdin。 |
 
 常用验证：
 
@@ -702,9 +722,10 @@ config.py 会在本地加载 .env.prod，但公开仓库不提供该文件或任
 
 data/ 是运行时目录，常见内容包括：
 
-- data/hatsume-plugin/memory.db*：长期记忆数据库及 WAL/SHM。
-- data/hatsume-plugin/memory_vectors.db/：Milvus Lite 记忆向量数据库目录。
+- data/hatsume-plugin/memory-db/memory.db*：长期记忆数据库及 WAL/SHM。
+- data/hatsume-plugin/memory-db/memory_vectors.db/：Milvus Lite 记忆向量数据库目录。
 - data/hatsume-plugin/timer-v2-db/timer.db*：当前定时任务数据库及 WAL/SHM。
+- data/hatsume-plugin/todo-db/todo.db*：每群对话待办数据库及 WAL/SHM。
 - data/hatsume-plugin/likes.json：累计点赞数据。
 - data/hatsume-plugin/skills/：运行时安装或创建的 Skill。
 - data/hatsume-plugin/faces/：AI 表情和 Markdown 印章图片。

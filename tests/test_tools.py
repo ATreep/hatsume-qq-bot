@@ -2022,6 +2022,137 @@ def test_end_conversation_calls_configured_callback():
     assert "当用户希望你不回话时使用" in tools.end_conversation.__doc__
 
 
+class _TodoValidationError(ValueError):
+    pass
+
+
+def _install_todo_store(store):
+    todo = types.ModuleType("hatsume.plugins.hatsume-plugin.todo")
+    todo.TodoValidationError = _TodoValidationError
+    todo.get_store = lambda: store
+    sys.modules[todo.__name__] = todo
+
+
+def test_todo_tools_are_registered_once():
+    tools = _load_tools_module()
+
+    assert tools.CHAT_TOOLS.count(tools.create_todo) == 1
+    assert tools.CHAT_TOOLS.count(tools.mark_todo) == 1
+
+
+def test_create_todo_requires_group_context():
+    tools = _load_tools_module()
+
+    result = asyncio.run(tools.create_todo(123, "content", "user", "event"))
+
+    assert "无法确定当前群聊 ID" in result
+
+
+def test_create_todo_resolves_name_and_delegates_to_store():
+    tools = _load_tools_module()
+    item = {
+        "id": 9,
+        "initiator_group_name": "Group Card",
+        "initiator_qq_id": 123,
+        "content": "calculate sleep duration",
+        "finish_condition": (
+            "Permitted finisher: initiator\nCompletion event: initiator wakes up"
+        ),
+    }
+    store = MagicMock()
+    store.create_item.return_value = types.SimpleNamespace(
+        status="created", item=item
+    )
+    _install_todo_store(store)
+    bot = object()
+    sys.modules["nonebot"].get_bot = lambda: bot
+    utils = sys.modules["hatsume.plugins.hatsume-plugin.utils"]
+    utils.get_group_member_name = AsyncMock(return_value="Group Card")
+    tools.set_current_group_id(456)
+
+    result = asyncio.run(
+        tools.create_todo(
+            123,
+            "calculate sleep duration",
+            "initiator",
+            "initiator wakes up",
+        )
+    )
+
+    utils.get_group_member_name.assert_awaited_once_with(bot, 456, 123)
+    store.create_item.assert_called_once_with(
+        456,
+        123,
+        "Group Card",
+        "calculate sleep duration",
+        "initiator",
+        "initiator wakes up",
+    )
+    assert "待办已创建（ID: 9）" in result
+    assert "Group Card(123)" in result
+
+
+def test_create_todo_handles_duplicate_full_validation_and_name_fallback():
+    tools = _load_tools_module()
+    tools.set_current_group_id(456)
+    sys.modules["nonebot"].get_bot = lambda: object()
+    utils = sys.modules["hatsume.plugins.hatsume-plugin.utils"]
+    utils.get_group_member_name = AsyncMock(side_effect=RuntimeError("offline"))
+    item = {
+        "id": 4,
+        "initiator_group_name": "123",
+        "initiator_qq_id": 123,
+        "content": "content",
+        "finish_condition": "condition",
+    }
+    store = MagicMock()
+    _install_todo_store(store)
+
+    store.create_item.return_value = types.SimpleNamespace(
+        status="duplicate", item=item
+    )
+    duplicate = asyncio.run(tools.create_todo(123, "content", "user", "event"))
+    assert "未重复创建" in duplicate
+    assert store.create_item.call_args.args[2] == "123"
+
+    store.create_item.return_value = types.SimpleNamespace(status="full", item=None)
+    full = asyncio.run(tools.create_todo(123, "other", "user", "event"))
+    assert "15 个活动待办" in full
+
+    store.create_item.side_effect = _TodoValidationError("错误：待办内容不能为空。")
+    invalid = asyncio.run(tools.create_todo(123, "", "user", "event"))
+    assert invalid == "错误：待办内容不能为空。"
+
+
+def test_mark_todo_is_group_scoped_and_returns_required_notice():
+    tools = _load_tools_module()
+    tools.set_current_group_id(456)
+    store = MagicMock()
+    _install_todo_store(store)
+    store.mark_item.return_value = None
+
+    missing = tools.mark_todo(8)
+
+    store.mark_item.assert_called_once_with(456, 8)
+    assert missing == "错误：当前群找不到该活动待办。"
+
+    store.mark_item.return_value = {
+        "id": 8,
+        "initiator_group_name": "Alice",
+        "initiator_qq_id": 123,
+        "content": "calculate sleep duration",
+        "finish_condition": (
+            "Permitted finisher: Alice\nCompletion event: Alice wakes up"
+        ),
+    }
+    completed = tools.mark_todo(8)
+
+    assert "完成条件满足" in completed
+    assert "不是因为过期" in completed
+    assert "[CQ:at,qq=123]" in completed
+    assert "calculate sleep duration" in completed
+
+
 def test_character_proxy_tools_are_mutually_exclusive():
     tools = _load_tools_module()
     module_name = "hatsume.plugins.hatsume-plugin.character_proxy"

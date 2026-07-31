@@ -9,7 +9,7 @@ import random
 import sys
 import types
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 ROOT = Path(__file__).resolve().parents[1]
 NODES_PKG_DIR = ROOT / "hatsume/plugins/hatsume-plugin/graph"
@@ -274,6 +274,9 @@ def _load_nodes_module():
         "\n\n# 表情发送\n\n可选的情绪：" + "、".join(emotions)
         if emotions else ""
     )
+    prompts_pkg.build_todo_prompt = lambda items, available=True: (
+        f"\n\ntodo prompt: available={available}; items={items}"
+    )
 
     # skills (skill management module)
     skills_pkg.get_skill_manager = lambda: type(
@@ -321,6 +324,8 @@ def _load_nodes_module():
     tools_mod.create_weekly_timer = None
     tools_mod.create_monthly_timer = None
     tools_mod.create_at_timer = None
+    tools_mod.create_todo = None
+    tools_mod.mark_todo = None
     tools_mod.list_timers = None
     tools_mod.get_timer_overview = AsyncMock(return_value="timer overview")
     tools_mod.delete_timer = None
@@ -335,6 +340,7 @@ def _load_nodes_module():
     tools_mod.send_video = None
     tools_mod.random_acg_photo = None
     tools_mod.set_shell_executor_limit = lambda *a, **kw: None
+    tools_mod.get_current_group_id = lambda: None
     tools_mod._current_group_id = None
     tools_mod.reset_capture_flag = lambda *a, **kw: None
     tools_mod.CHAT_TOOLS = [
@@ -352,6 +358,8 @@ def _load_nodes_module():
         tools_mod.create_weekly_timer,
         tools_mod.create_monthly_timer,
         tools_mod.create_at_timer,
+        tools_mod.create_todo,
+        tools_mod.mark_todo,
         tools_mod.list_timers,
         tools_mod.delete_timer,
         tools_mod.skill_loader,
@@ -377,6 +385,15 @@ def _load_nodes_module():
     tools_mod._last_capture_html = ""
     tools_mod._last_capture_html_demand = ""
     sys.modules["hatsume.plugins.hatsume-plugin.graph.tools"] = tools_mod
+
+    todo_store = types.SimpleNamespace(
+        delete_expired=MagicMock(return_value=0),
+        list_items=MagicMock(return_value=[]),
+    )
+    todo_pkg = types.ModuleType("hatsume.plugins.hatsume-plugin.todo")
+    todo_pkg.get_store = lambda: todo_store
+    todo_pkg._test_store = todo_store
+    sys.modules[todo_pkg.__name__] = todo_pkg
 
     # ------------------------------------------------------------------
     # Load graph/nodes.py (flat module — was formerly a package)
@@ -1829,7 +1846,79 @@ def test_ai_node_reuses_timer_overview_in_system_prompt():
         nodes.create_agent = original_create_agent
 
     tools_mod.get_timer_overview.assert_awaited_once_with()
-    assert "\n\nshared timer overview\n\n# 当前日期与时间" in sys_prompts[0]
+    assert sys_prompts[0].index("shared timer overview") < sys_prompts[0].index(
+        "todo prompt"
+    )
+    assert sys_prompts[0].index("todo prompt") < sys_prompts[0].index(
+        "# 当前日期与时间"
+    )
+
+
+def test_ai_node_deletes_expired_todos_and_injects_current_group_items():
+    nodes = _load_nodes_module()
+    todo_pkg = sys.modules["hatsume.plugins.hatsume-plugin.todo"]
+    todo_store = todo_pkg._test_store
+    item = {
+        "id": 3,
+        "initiator_group_name": "Alice",
+        "initiator_qq_id": 123,
+        "content": "follow up",
+        "finish_condition": "condition",
+        "created_at": 1.0,
+    }
+    call_order: list[str] = []
+    todo_store.delete_expired.side_effect = lambda: call_order.append("delete") or 2
+    todo_store.list_items.side_effect = (
+        lambda group_id: call_order.append("list") or [item]
+    )
+    nodes.get_current_group_id = lambda: 456
+
+    prompt = nodes._build_current_todo_prompt()
+
+    todo_store.delete_expired.assert_called_once_with()
+    todo_store.list_items.assert_called_once_with(456)
+    assert call_order == ["delete", "list"]
+    assert "available=True" in prompt
+    assert "follow up" in prompt
+
+
+def test_todo_prompt_failure_is_unavailable_without_raising():
+    nodes = _load_nodes_module()
+    todo_pkg = sys.modules["hatsume.plugins.hatsume-plugin.todo"]
+    todo_pkg.get_store = MagicMock(side_effect=RuntimeError("database offline"))
+
+    prompt = nodes._build_current_todo_prompt()
+
+    assert "available=False" in prompt
+
+
+def test_ai_node_continues_when_todo_database_is_unavailable():
+    nodes = _load_nodes_module()
+    todo_pkg = sys.modules["hatsume.plugins.hatsume-plugin.todo"]
+    todo_pkg.get_store = MagicMock(side_effect=RuntimeError("database offline"))
+    sys_prompts: list[str] = []
+
+    class _FakeAgent:
+        def with_retry(self, **kw):
+            return self
+
+        async def ainvoke(self, *a, **kw):
+            return {"messages": [types.SimpleNamespace(content="still replied", type="ai")]}
+
+    def _tracking_create_agent(model, tools, system_prompt=None, **kw):
+        sys_prompts.append(system_prompt or "")
+        return _FakeAgent()
+
+    nodes.create_agent = _tracking_create_agent
+
+    result = asyncio.run(
+        nodes.ai_node(
+            {"messages": [types.SimpleNamespace(content="hello", type="human")]}
+        )
+    )
+
+    assert result["messages"][0].content == "still replied"
+    assert "todo prompt: available=False" in sys_prompts[0]
 
 
 def test_generate_image_used_skips_face_injection():

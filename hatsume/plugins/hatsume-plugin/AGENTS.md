@@ -67,8 +67,8 @@ existing graph; do not add a separate reply pipeline or direct send path.
 
 ## Persistence
 
-- Memory metadata: `memory/engine.py` and SQLite `memory.db`; no full resident index.
-- Memory vectors: `memory/vector_store.py` and local Milvus `memory_vectors.db`, keyed by SQLite memory ID.
+- Memory metadata: `memory/engine.py` and SQLite `memory-db/memory.db`; no full resident index.
+- Memory vectors: `memory/vector_store.py` and local Milvus `memory-db/memory_vectors.db`, keyed by SQLite memory ID.
 - Milvus Lite sessions must stop their embedded gRPC server after each operation; this process also forks Shell/Docker subprocesses.
 - Timers: `timer/store.py`, SQLite `timer.db`, APScheduler jobs in `executor.py`.
 - Skills: Markdown files under the configured skills directory.

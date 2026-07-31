@@ -41,8 +41,8 @@ from ..prompts import (
 from ..skills import get_skill_manager
 from .tools import (
     get_chat_tools,
+    get_current_group_id,
     get_timer_overview,
-    _current_group_id,
     query_memory,
     reset_capture_flag,
     set_shell_executor_limit,
@@ -524,6 +524,27 @@ def set_current_query_user_id(uid: int | None) -> None:
     _set_current_query_user_id(uid)
 
 
+def _build_current_todo_prompt() -> str:
+    """Delete expired todos and build the current group's prompt section."""
+    from ..prompts import build_todo_prompt
+
+    try:
+        from ..todo import get_store
+
+        todo_store = get_store()
+        deleted = todo_store.delete_expired()
+        if deleted:
+            print(f"[todo] Deleted {deleted} expired item(s)")
+        group_id = get_current_group_id()
+        if group_id is None or group_id <= 0:
+            return build_todo_prompt([], available=False)
+        return build_todo_prompt(todo_store.list_items(group_id))
+    except Exception:
+        print("❌ Failed to load todo prompt")
+        traceback.print_exc()
+        return build_todo_prompt([], available=False)
+
+
 # ===========================================================================
 # Graph nodes
 # ===========================================================================
@@ -603,6 +624,9 @@ async def ai_node(state: MessagesState) -> dict:
     timer_overview = await get_timer_overview()
     sys_prompt += "\n\n" + timer_overview
     print("[timers] Injected timer overview into system prompt")
+
+    sys_prompt += _build_current_todo_prompt()
+    print("[todo] Injected todo policy and active items into system prompt")
 
     # ── Face injection gate ──
 
@@ -742,11 +766,14 @@ async def ai_node(state: MessagesState) -> dict:
         qq_numbers = mem_record.get("qq_numbers", [])
         if content:
             people: list[dict] = []
-            if qq_numbers and _current_group_id is not None:
+            current_group_id = get_current_group_id()
+            if qq_numbers and current_group_id is not None:
                 try:
                     bot = get_bot()
                     for qq in qq_numbers:
-                        user_name = await get_group_member_name(bot, _current_group_id, qq)
+                        user_name = await get_group_member_name(
+                            bot, current_group_id, qq
+                        )
                         people.append({"user_id": qq, "user_name": user_name})
                 except Exception as e:
                     print(f"[memory] Failed to resolve usernames for QQ numbers: {e}")

@@ -53,7 +53,9 @@ def _load_db_module():
     sys.modules["nonebot"] = nonebot_mod
 
     store_mod = types.ModuleType("nonebot_plugin_localstore")
-    store_mod.get_data_file = MagicMock(return_value=Path("/tmp/test_memory.db"))
+    store_mod.get_plugin_data_file = MagicMock(
+        side_effect=lambda name: Path("/tmp") / name
+    )
     sys.modules["nonebot_plugin_localstore"] = store_mod
 
     # Provide normalize_memory_object stub (was in store, now merged into engine)
@@ -94,6 +96,33 @@ def test_init_db_creates_tables():
     assert cursor.fetchone() is not None
     cols = {row[1] for row in conn.execute("PRAGMA table_info(memories)")}
     assert cols >= {"id", "content", "time", "people", "tokens", "embedding", "created_at"}
+
+
+def test_runtime_memory_paths_share_memory_db_directory(tmp_path):
+    memory = _load_db_module()
+    memory.store.get_plugin_data_file = MagicMock(
+        side_effect=lambda name: tmp_path / name
+    )
+    memory._db_conn = None
+    fake_vector_store = MagicMock()
+    memory.MilvusVectorStore = MagicMock(return_value=fake_vector_store)
+
+    connection = memory._get_db()
+    vector_store = memory._get_vector_store()
+    try:
+        assert (tmp_path / "memory-db/memory.db").exists()
+        memory.MilvusVectorStore.assert_called_once_with(
+            tmp_path / "memory-db/memory_vectors.db",
+            dimension=1024,
+        )
+        assert vector_store is fake_vector_store
+        assert memory.store.get_plugin_data_file.call_args_list == [
+            (("memory-db/memory.db",),),
+            (("memory-db/memory_vectors.db",),),
+        ]
+    finally:
+        connection.close()
+        memory._db_conn = None
 
 
 def test_insert_memory_persists_metadata_without_sqlite_embedding():

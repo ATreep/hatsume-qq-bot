@@ -29,6 +29,8 @@ require("nonebot_plugin_localstore")
 _EMBEDDING_MAX_CHARS = 300
 _VECTOR_DIMENSION = 1024
 _VECTOR_CANDIDATE_MULTIPLIER = 3
+_MEMORY_DB_FILE = "memory-db/memory.db"
+_MEMORY_VECTOR_DB_FILE = "memory-db/memory_vectors.db"
 
 _db_conn: sqlite3.Connection | None = None
 _vector_store_lock = threading.RLock()
@@ -45,7 +47,9 @@ def init_db(conn_or_path: sqlite3.Connection | str | Path) -> sqlite3.Connection
     if isinstance(conn_or_path, sqlite3.Connection):
         conn = conn_or_path
     else:
-        conn = sqlite3.connect(str(conn_or_path), check_same_thread=False)
+        path = Path(conn_or_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(str(path), check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute(
@@ -287,13 +291,13 @@ def query_exact_memories(
 def _get_db() -> sqlite3.Connection:
     global _db_conn
     if _db_conn is None:
-        _db_conn = init_db(store.get_plugin_data_file("memory.db"))
+        _db_conn = init_db(store.get_plugin_data_file(_MEMORY_DB_FILE))
     return _db_conn
 
 
 def _get_vector_store() -> MilvusVectorStore:
     return MilvusVectorStore(
-        store.get_plugin_data_file("memory_vectors.db"),
+        store.get_plugin_data_file(_MEMORY_VECTOR_DB_FILE),
         dimension=_VECTOR_DIMENSION,
     )
 

@@ -38,12 +38,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--sqlite",
         type=Path,
-        default=ROOT / "data/hatsume-plugin/memory.db",
+        default=ROOT / "data/hatsume-plugin/memory-db/memory.db",
     )
     parser.add_argument(
         "--milvus",
         type=Path,
-        default=ROOT / "data/hatsume-plugin/memory_vectors.db",
+        default=ROOT / "data/hatsume-plugin/memory-db/memory_vectors.db",
     )
     parser.add_argument("--batch-size", type=int, default=100)
     return parser.parse_args()

@@ -155,6 +155,11 @@ def set_current_group_id(group_id: int | None) -> None:
     _current_group_id = group_id
 
 
+def get_current_group_id() -> int | None:
+    """Return the current group ID without exposing an imported scalar snapshot."""
+    return _current_group_id
+
+
 def configure_tool_callbacks(
     query_user_id: int | None,
     answer_fn: Any = None,
@@ -1017,6 +1022,108 @@ async def create_at_timer(
     return await _create_scheduled_timer(user_id, prompt, plan)
 
 
+# ---------------------------------------------------------------------------
+# Todo tools
+# ---------------------------------------------------------------------------
+@tool
+async def create_todo(
+    initiator_qq_id: int,
+    content: str,
+    permitted_finisher: str,
+    completion_event: str,
+) -> str:
+    """创建一个最长保留 48 小时的当前群待办。
+
+    当“当前聊天记录”出现值得在未来条件满足时继续完成的事情，可以主动调用；
+    禁止仅根据“背景聊天记录”创建。initiator_qq_id 必须是提出该待办的用户 QQ ID。
+    content 描述将来要做的事情；permitted_finisher 必须严格说明谁能完成；
+    completion_event 必须严格说明什么可观察事件代表完成。三个文本参数均最多 500 字符。
+    """
+    group_id = get_current_group_id()
+    if group_id is None or group_id <= 0:
+        return "错误：无法确定当前群聊 ID，待办功能不可用。"
+
+    try:
+        from nonebot import get_bot
+        from ..utils import get_group_member_name
+
+        initiator_name = await get_group_member_name(
+            get_bot(), group_id, initiator_qq_id
+        )
+    except Exception:
+        initiator_name = str(initiator_qq_id)
+
+    try:
+        from ..todo import TodoValidationError, get_store
+    except Exception as exc:
+        print(f"❌ create_todo failed to load store: {exc}")
+        traceback.print_exc()
+        return "错误：待办数据库暂时不可用。"
+
+    try:
+        result = get_store().create_item(
+            group_id,
+            initiator_qq_id,
+            initiator_name,
+            content,
+            permitted_finisher,
+            completion_event,
+        )
+    except TodoValidationError as exc:
+        return str(exc)
+    except Exception as exc:
+        print(f"❌ create_todo failed: {exc}")
+        traceback.print_exc()
+        return "错误：待办数据库暂时不可用。"
+
+    if result.status == "full":
+        return "错误：当前群已有 15 个活动待办，无法创建更多待办。"
+    if result.item is None:
+        return "错误：待办创建失败。"
+    item = result.item
+    if result.status == "duplicate":
+        return f"未重复创建：相同的活动待办已存在（ID: {item['id']}）。"
+    return (
+        f"待办已创建（ID: {item['id']}）。\n"
+        f"发起人：{item['initiator_group_name']}({item['initiator_qq_id']})\n"
+        f"内容：{item['content']}\n"
+        f"完成条件：\n{item['finish_condition']}"
+    )
+
+
+@tool
+def mark_todo(todo_id: int) -> str:
+    """在当前群待办的严格完成条件已经满足时，将其标记完成并删除。
+
+    可以结合近期对话上下文判断，但 Permitted finisher 和 Completion event 必须同时满足。
+    不确定时禁止调用。禁止把过期当作完成；过期待办由系统自动删除。
+    """
+    group_id = get_current_group_id()
+    if group_id is None or group_id <= 0:
+        return "错误：无法确定当前群聊 ID，待办功能不可用。"
+
+    try:
+        from ..todo import get_store
+
+        item = get_store().mark_item(group_id, todo_id)
+    except Exception as exc:
+        print(f"❌ mark_todo failed: {exc}")
+        traceback.print_exc()
+        return "错误：待办数据库暂时不可用。"
+    if item is None:
+        return "错误：当前群找不到该活动待办。"
+    return (
+        f"待办已因完成条件满足而完成并删除（不是因为过期）。\n"
+        f"待办 ID：{item['id']}\n"
+        f"发起人：{item['initiator_group_name']}({item['initiator_qq_id']})\n"
+        f"内容：{item['content']}\n"
+        f"完成条件：\n{item['finish_condition']}\n"
+        "你必须在本轮自然回复中包含 "
+        f"[CQ:at,qq={item['initiator_qq_id']}]，明确告诉发起人该待办已完成，"
+        "并说明原因是完成条件已满足，而不是待办过期。"
+    )
+
+
 @tool
 async def list_timers() -> str:
     """
@@ -1614,6 +1721,8 @@ CHAT_TOOLS = [
     create_weekly_timer,
     create_monthly_timer,
     create_at_timer,
+    create_todo,
+    mark_todo,
     list_timers,
     delete_timer,
     skill_loader,

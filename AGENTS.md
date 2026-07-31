@@ -141,6 +141,8 @@ hatsume/plugins/hatsume-plugin/
 不要为完成代码任务而重写以下运行时文件，也不得将它们提交到 Hatsume 主仓库：
 
 - `data/hatsume-plugin/*.db*`
+- `data/hatsume-plugin/memory-db/*.db*`
+- `data/hatsume-plugin/memory-db/memory_vectors.db/`
 - `data/hatsume-plugin/timer-v2-db/*.db*`
 - `data/hatsume-plugin/timer_db/*.db*`
 - `data/hatsume-plugin/likes.json`
