@@ -55,7 +55,7 @@ flowchart LR
 | 编码 Agent | agent_dispatch(coding_agent, ...) | 使用代码模型与 Shell、Skill、搜索、图像工具处理复杂开发任务 | graph/agents.py、prompts.py |
 | Agent 通知 | 后台 Agent 中间输出或完成 | 注入当前对话；无活跃对话时为目标群启动新图 | graph/tools.py、graph/nodes.py、handlers/dialogue.py |
 | Agent stdin | respond_to_shell_prompt | 把用户回复交回等待输入的后台进程 | graph/tools.py、graph/agents.py |
-| 定时任务创建 | daily、weekly、monthly、at 四个聊天工具 | 频率任务每周期最多 5 个 `HH:MM:SS` 时间点、正整数间隔且由结束时间限定；指定时刻最多 10 个 | graph/tools.py、timer/schedule.py、timer/store.py |
+| 定时任务创建 | daily、weekly、monthly、at 四个聊天工具 | 频率任务每周期最多 5 个 `HH:MM:SS` 时间点、正整数间隔且由结束时间限定；用户未指定结束时间时 Agent 按任务语义选择有限边界且创建后告知用户；指定时刻最多 10 个 | graph/tools.py、timer/schedule.py、timer/store.py |
 | 定时任务管理 | /timer 或聊天工具 | 按群显示完整频率规则或全部指定时刻，支持删除；命令更新兼容为最多 10 个指定时刻 | handlers/tools.py、graph/tools.py |
 | 定时任务恢复与清理 | Bot 连接完成、每日 03:00 | 恢复原生 point 作业、补偿五分钟内漏触发，并清理已完成普通任务 | `timer/__init__.py`、timer/executor.py |
 | 群聊待办 | create_todo、mark_todo、每轮自动检查 | 每群最多 15 条，当前聊天可触发主动创建；48 小时过期，条件满足后删除并 @ 发起人 | graph/tools.py、graph/nodes.py、prompts.py、todo/ |
@@ -441,9 +441,9 @@ flowchart LR
 | send_video | 发送 HTTP URL、沙盒绝对路径或沙盒文件；每轮最多一个 |
 | get_avatar | 获取 QQ 头像 URL |
 | random_acg_photo | 从 macOS Photos 导出 ACG 图片到沙盒 |
-| create_daily_timer | 创建含起止边界、1..5 个 `HH:MM:SS` 点和天间隔的任务 |
-| create_weekly_timer | 创建含 weekday/time 周期点和周间隔的任务 |
-| create_monthly_timer | 创建含 day/time 周期点和月间隔的任务 |
+| create_daily_timer | 创建含起止边界、1..5 个 `HH:MM:SS` 点和天间隔的任务；未指定结束时间时由 Agent 推断并在创建后告知用户 |
+| create_weekly_timer | 创建含 weekday/time 周期点和周间隔的任务；未指定结束时间时由 Agent 推断并在创建后告知用户 |
+| create_monthly_timer | 创建含 day/time 周期点和月间隔的任务；未指定结束时间时由 Agent 推断并在创建后告知用户 |
 | create_at_timer | 创建含 1..10 个指定时间戳的任务 |
 | create_todo | 为当前群创建最长保留 48 小时的待办，保存发起人群名片与严格完成条件 |
 | mark_todo | 完成并删除当前群待办，返回必须 @ 发起人的完成通知信息 |

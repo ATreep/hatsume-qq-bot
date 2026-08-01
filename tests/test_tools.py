@@ -627,6 +627,23 @@ class TestCreateTimerTools:
         assert "保留最早" not in doc
 
     @pytest.mark.parametrize(
+        "tool_name",
+        ["create_daily_timer", "create_weekly_timer", "create_monthly_timer"],
+    )
+    def test_frequency_tool_docs_require_agent_chosen_end_time(self, tool_name):
+        tools = _load_tools_module()
+        structured_tool = _real_langchain_tool(getattr(tools, tool_name))
+        description = " ".join(structured_tool.description.split())
+
+        assert "如果用户明确指定结束时间，必须使用该时间" in description
+        assert "任务内容和当前聊天上下文" in description
+        assert "合理的有限 end_at" in description
+        assert "不得 仅因此向用户追问" in description
+        assert "成功创建任务后" in description
+        assert "自然回复中明确告诉用户实际传入的结束时间" in description
+        assert "end_at" in structured_tool.args_schema.model_json_schema()["required"]
+
+    @pytest.mark.parametrize(
         ("tool_name", "required_fields"),
         [
             ("create_weekly_timer", {"weekday", "time"}),
