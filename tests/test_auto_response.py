@@ -55,6 +55,10 @@ def _load_modules():
     config.TIMER_MAX_EXACT_POINTS = 10
     config.TIMER_TOLERANCE_MINUTES = 5
     config.AUTO_RESPONSE_GROUP_ID = 123
+    config.AUTO_RESPONSE_MIN_INTERVAL_MINUTES = 30
+    config.AUTO_RESPONSE_MAX_INTERVAL_MINUTES = 120
+    config.AUTO_RESPONSE_QUIET_START_HOUR = 2
+    config.AUTO_RESPONSE_QUIET_END_HOUR = 6
     sys.modules[config.__name__] = config
 
     prompts = types.ModuleType(f"{BASE_NAME}.prompts")
@@ -119,13 +123,19 @@ def store(tmp_path, modules):
     instance.close()
 
 
-def test_random_response_trigger_is_between_one_and_three_hours(modules):
+def test_random_response_trigger_is_between_thirty_minutes_and_two_hours(
+    modules, monkeypatch
+):
     _, executor, _, _ = modules
+    uniform = MagicMock(return_value=75)
+    monkeypatch.setattr(executor.random, "uniform", uniform)
     before = datetime.now(SHANGHAI)
 
     result = datetime.fromtimestamp(executor._random_response_trigger(), SHANGHAI)
 
-    assert timedelta(hours=1) <= result - before <= timedelta(hours=3)
+    after = datetime.now(SHANGHAI)
+    uniform.assert_called_once_with(30, 120)
+    assert before + timedelta(minutes=75) <= result <= after + timedelta(minutes=75)
 
 
 @pytest.mark.asyncio
@@ -243,6 +253,40 @@ async def test_auto_response_registers_successor_when_injection_fails(
     assert successor["exact_at"] == successor_at
     assert scheduler.add_job.call_count == 1
     assert scheduler.add_job.call_args.kwargs["id"] == successor["job_id"]
+
+
+@pytest.mark.parametrize(
+    ("hour", "minute", "should_inject"),
+    [
+        (1, 59, True),
+        (2, 0, False),
+        (5, 59, False),
+        (6, 0, True),
+    ],
+)
+@pytest.mark.asyncio
+async def test_auto_response_skips_quiet_hours_and_registers_successor(
+    modules, store, monkeypatch, hour, minute, should_inject
+):
+    _, executor, scheduler, nodes = modules
+    trigger_at = datetime(2026, 1, 2, hour, minute, tzinfo=SHANGHAI).timestamp()
+    successor_at = trigger_at + 3600
+    store.upsert_auto_response(trigger_at, "participate in chat")
+    point = store.get_auto_response_point()
+    assert point is not None
+    monkeypatch.setattr(executor, "_random_response_trigger", lambda: successor_at)
+    scheduler.reset_mock()
+
+    await executor._execute_point(point["id"], store, scheduled_at=trigger_at)
+
+    if should_inject:
+        nodes.inject_timer.assert_called_once()
+    else:
+        nodes.inject_timer.assert_not_called()
+    successor = store.get_auto_response_point()
+    assert successor is not None
+    assert successor["exact_at"] == successor_at
+    assert scheduler.add_job.call_count == 1
 
 
 @pytest.mark.asyncio

@@ -16,7 +16,14 @@ from apscheduler.triggers.date import DateTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from nonebot import require
 
-from ..config import AUTO_RESPONSE_GROUP_ID, TIMER_TOLERANCE_MINUTES
+from ..config import (
+    AUTO_RESPONSE_GROUP_ID,
+    AUTO_RESPONSE_MAX_INTERVAL_MINUTES,
+    AUTO_RESPONSE_MIN_INTERVAL_MINUTES,
+    AUTO_RESPONSE_QUIET_END_HOUR,
+    AUTO_RESPONSE_QUIET_START_HOUR,
+    TIMER_TOLERANCE_MINUTES,
+)
 from .schedule import SHANGHAI, occurrence_at_index
 from .store import TimerStore
 
@@ -184,19 +191,35 @@ def add_jobs_for_task(task_id: int, store: TimerStore) -> None:
 
 
 def _random_response_trigger() -> float:
-    """Return a random timestamp between one and three hours from now."""
-    return (datetime.now(SHANGHAI) + timedelta(hours=random.uniform(1, 3))).timestamp()
+    """Return a random timestamp within the configured interval from now."""
+    delay_minutes = random.uniform(
+        AUTO_RESPONSE_MIN_INTERVAL_MINUTES,
+        AUTO_RESPONSE_MAX_INTERVAL_MINUTES,
+    )
+    return (datetime.now(SHANGHAI) + timedelta(minutes=delay_minutes)).timestamp()
 
 
-async def _execute_auto_response(task: dict[str, Any], store: TimerStore) -> None:
+def _is_auto_response_quiet_time(triggered_at: float) -> bool:
+    """Return whether a scheduled trigger falls within Shanghai quiet hours."""
+    trigger_hour = datetime.fromtimestamp(triggered_at, SHANGHAI).hour
+    return AUTO_RESPONSE_QUIET_START_HOUR <= trigger_hour < AUTO_RESPONSE_QUIET_END_HOUR
+
+
+async def _execute_auto_response(
+    task: dict[str, Any], store: TimerStore, *, triggered_at: float
+) -> None:
     """Inject an internal auto-response and immediately schedule its successor."""
     if AUTO_RESPONSE_GROUP_ID <= 0:
         print("[auto_response] Skipped: AUTO_RESPONSE_GROUP_ID is not configured")
         return
 
-    from ..graph.nodes import inject_timer
-
     try:
+        if _is_auto_response_quiet_time(triggered_at):
+            print("[auto_response] Skipped: scheduled during quiet hours")
+            return
+
+        from ..graph.nodes import inject_timer
+
         inject_timer(
             user_id=0,
             group_id=AUTO_RESPONSE_GROUP_ID,
@@ -347,7 +370,7 @@ async def _execute_point(
 
     if task["task_type"] == "auto_response":
         if store.mark_occurrence_processed(point_id, scheduled_at):
-            await _execute_auto_response(task, store)
+            await _execute_auto_response(task, store, triggered_at=scheduled_at)
         return
 
     user_id = int(task["user_id"])

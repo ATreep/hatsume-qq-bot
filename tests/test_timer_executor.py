@@ -57,6 +57,10 @@ def _load_modules():
     config.TIMER_MAX_EXACT_POINTS = 10
     config.TIMER_TOLERANCE_MINUTES = 5
     config.AUTO_RESPONSE_GROUP_ID = 123
+    config.AUTO_RESPONSE_MIN_INTERVAL_MINUTES = 30
+    config.AUTO_RESPONSE_MAX_INTERVAL_MINUTES = 120
+    config.AUTO_RESPONSE_QUIET_START_HOUR = 2
+    config.AUTO_RESPONSE_QUIET_END_HOUR = 6
     sys.modules[config.__name__] = config
 
     prompts = types.ModuleType(f"{BASE_NAME}.prompts")

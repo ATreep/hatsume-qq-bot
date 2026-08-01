@@ -154,6 +154,10 @@ TODO_EXPIRY_SECONDS: int = 48 * 60 * 60
 # Auto response timer
 # ---------------------------------------------------------------------------
 AUTO_RESPONSE_GROUP_ID: int = _get_int_env("AUTO_RESPONSE_GROUP_ID")
+AUTO_RESPONSE_MIN_INTERVAL_MINUTES: int = 30
+AUTO_RESPONSE_MAX_INTERVAL_MINUTES: int = 120
+AUTO_RESPONSE_QUIET_START_HOUR: int = 2
+AUTO_RESPONSE_QUIET_END_HOUR: int = 6
 # ---------------------------------------------------------------------------
 # Memory constants
 # ---------------------------------------------------------------------------

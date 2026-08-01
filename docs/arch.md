@@ -59,7 +59,7 @@ flowchart LR
 | 定时任务管理 | /timer 或聊天工具 | 按群显示完整频率规则或全部指定时刻，支持删除；命令更新兼容为最多 10 个指定时刻 | handlers/tools.py、graph/tools.py |
 | 定时任务恢复与清理 | Bot 连接完成、每日 03:00 | 恢复原生 point 作业、补偿五分钟内漏触发，并清理已完成普通任务 | `timer/__init__.py`、timer/executor.py |
 | 群聊待办 | create_todo、mark_todo、每轮自动检查 | 每群最多 15 条，当前聊天可触发主动创建；48 小时过期，条件满足后删除并 @ 发起人 | graph/tools.py、graph/nodes.py、prompts.py、todo/ |
-| 自动回复 | auto_response 记录或 /autoresponse | 固定群主动参与话题，每 1 至 3 小时重新排期 | timer/、prompts.py |
+| 自动回复 | auto_response 记录或 /autoresponse | 固定群主动参与话题，每 30 分钟至 2 小时重新排期；02:00 至 06:00 的触发只推进并续排，不注入回复 | timer/、prompts.py |
 | 新成员欢迎 | `AUTO_RESPONSE_GROUP_ID` 的 OneBot `group_increase` 事件 | 激活新成员 peer，并向现有图注入欢迎任务或在无对话时启动新图 | `__init__.py`、handlers/dialogue.py |
 | Skill 加载 | /skills、skill_loader | 扫描 Markdown 与 YAML frontmatter，按需加载并进行单轮去重 | skills/ |
 | Skill 增删 | skill_create、skill_download、skill_remove | 运行时创建、下载、删除 Skill 并清理缓存 | graph/tools.py、skills/manager.py |
@@ -418,7 +418,7 @@ flowchart LR
 
 ### 5.5 自动任务
 
-- auto_response 向 AUTO_RESPONSE_GROUP_ID 注入主动参与群聊的 Prompt，不 @ 用户，并在 1 至 3 小时后重新排期。启动时自动确保存在未来任务。
+- auto_response 向 AUTO_RESPONSE_GROUP_ID 注入主动参与群聊的 Prompt，不 @ 用户，并在 30 分钟至 2 小时后重新排期。计划触发时间位于上海时区 02:00（含）至 06:00（不含）时，只推进当前 point 并排期下一条任务，不注入回复。启动时自动确保存在未来任务。
 - 自动回复目标群号未配置或不大于 0 时禁止注入和重新排期；auto_response 启动恢复还会取消并清理残留待触发任务，避免向 group_id=0 发送消息。
 - 调试命令默认使用命令所在群；参数 prod 才使用配置中的固定群。
 
