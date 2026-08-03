@@ -333,7 +333,7 @@ def test_delete_finished_tasks_excludes_active_and_auto_response(store, at_plan)
     finished_id = store.create_task(1, 2, "finished", at_plan)
     active_id = store.create_task(1, 3, "active", at_plan)
     internal_id = store.create_task(
-        0, 0, "internal", at_plan, task_type="auto_response"
+        1, 0, "internal", at_plan, task_type="auto_response"
     )
     for task_id in (finished_id, internal_id):
         for point in store.get_points_for_task(task_id):
@@ -345,20 +345,30 @@ def test_delete_finished_tasks_excludes_active_and_auto_response(store, at_plan)
     assert store.get_task(internal_id) is not None
 
 
-def test_upsert_auto_response_keeps_one_internal_task(store):
+def test_upsert_auto_response_keeps_one_internal_task_per_group(store):
     first_id = store.upsert_auto_response(
+        101,
         datetime.fromisoformat(f"2026-08-01T09:00:00{SHANGHAI_OFFSET}").timestamp()
     )
-    second_id = store.upsert_auto_response(
+    other_id = store.upsert_auto_response(
+        202,
+        datetime.fromisoformat(f"2026-08-01T09:30:00{SHANGHAI_OFFSET}").timestamp(),
+    )
+    replacement_id = store.upsert_auto_response(
+        101,
         datetime.fromisoformat(f"2026-08-01T10:00:00{SHANGHAI_OFFSET}").timestamp(),
         prompt="custom",
     )
 
-    assert second_id != first_id
+    assert replacement_id != first_id
     assert store.get_task(first_id) is None
-    point = store.get_auto_response_point()
-    assert point["task_id"] == second_id
-    assert point["prompt"] == "custom"
+    replacement = store.get_auto_response_point(101)
+    other = store.get_auto_response_point(202)
+    assert replacement["task_id"] == replacement_id
+    assert replacement["group_id"] == 101
+    assert replacement["prompt"] == "custom"
+    assert other["task_id"] == other_id
+    assert other["group_id"] == 202
 
 
 def test_validate_prompt_contract(store):

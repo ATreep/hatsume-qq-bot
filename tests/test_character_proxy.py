@@ -41,12 +41,15 @@ def _load_character_proxy(
     memories: list[dict] | None = None,
     model_content: str = '{"behavior_prompt":"说话简短直接","aliases":["阿树"]}',
 ):
+    sys.modules.pop(f"{PACKAGE}.group_runtime", None)
     _package("hatsume", ROOT / "hatsume")
     _package("hatsume.plugins", ROOT / "hatsume/plugins")
     _package(PACKAGE, PLUGIN_DIR)
 
     memory = types.ModuleType(f"{PACKAGE}.memory")
-    memory.get_recent_user_memories = lambda user_id, limit: (memories or [])[:limit]
+    memory.get_recent_user_memories = (
+        lambda user_id, limit, **_kwargs: (memories or [])[:limit]
+    )
     sys.modules[memory.__name__] = memory
 
     class Model:
@@ -76,6 +79,9 @@ def _load_character_proxy(
     module = importlib.util.module_from_spec(spec)
     sys.modules[name] = module
     spec.loader.exec_module(module)
+    runtime_module = sys.modules[f"{PACKAGE}.group_runtime"]
+    runtime = runtime_module.group_runtime_registry.get_or_create(101)
+    runtime_module.set_current_group_runtime(runtime)
     return module, Model
 
 
@@ -95,6 +101,39 @@ def test_only_one_ram_proxy_exists_and_termination_destroys_it():
     removed = proxy.terminate_character_proxy_state()
     assert removed is first
     assert proxy.get_character_proxy() is None
+
+
+def test_different_groups_can_hold_independent_proxies():
+    proxy, _ = _load_character_proxy()
+    first = proxy.activate_character_proxy(
+        user_id=1,
+        user_name="A",
+        behavior_prompt="group 101",
+    )
+    proxy.group_runtime_registry.get_or_create(202)
+    second = proxy.activate_character_proxy(
+        user_id=2,
+        user_name="B",
+        behavior_prompt="group 202",
+        group_id=202,
+    )
+
+    assert proxy.get_character_proxy(101) is first
+    assert proxy.get_character_proxy(202) is second
+
+    runtime_module = sys.modules[f"{PACKAGE}.group_runtime"]
+    first_runtime = proxy.group_runtime_registry.get_existing(101)
+    second_runtime = proxy.group_runtime_registry.get_existing(202)
+    with runtime_module.bind_group_runtime(first_runtime):
+        assert proxy.message_mentions_character_proxy("A")
+        assert not proxy.message_mentions_character_proxy("B")
+    with runtime_module.bind_group_runtime(second_runtime):
+        assert proxy.message_mentions_character_proxy("B")
+        assert not proxy.message_mentions_character_proxy("A")
+
+    proxy.terminate_character_proxy_state(101)
+    assert proxy.get_character_proxy(101) is None
+    assert proxy.get_character_proxy(202) is second
 
 
 def test_activation_records_auto_termination_time(monkeypatch):
@@ -148,8 +187,8 @@ def test_scheduled_termination_uses_minutes_and_clears_proxy(monkeypatch):
     handle = Handle()
 
     class Loop:
-        def call_later(self, delay, callback):
-            callbacks.extend([delay, callback])
+        def call_later(self, delay, callback, *args):
+            callbacks.extend([delay, lambda: callback(*args)])
             return handle
 
     monkeypatch.setattr(proxy.asyncio, "get_running_loop", lambda: Loop())

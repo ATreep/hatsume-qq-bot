@@ -49,12 +49,13 @@ async def render_cq_at_placeholders(
         return text, []
 
     bot = None
-    try:
-        from nonebot import get_bot
+    if group_id is not None:
+        try:
+            from ..group_runtime import group_runtime_registry
 
-        bot = get_bot()
-    except Exception:
-        bot = None
+            bot = group_runtime_registry.get_bot(group_id)
+        except Exception:
+            bot = None
 
     display_names: dict[int, str] = {}
     for uid in user_ids:

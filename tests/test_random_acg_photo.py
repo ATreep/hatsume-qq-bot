@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import importlib.util
 import sys
 import types
@@ -67,7 +68,6 @@ def _load_tools_module():
         cfg_mod.SHELL_MAX_OUTPUT = 1000
         cfg_mod.SHELL_TIMEOUT = 10
         cfg_mod.CONTEXT_QUEUE_LEN = 20
-        cfg_mod.CONTAINER_NAME = "hatsume-space-kali"
 
     sys.modules["nonebot"] = types.ModuleType("nonebot")
     adapters_mod = types.ModuleType("nonebot.adapters")
@@ -141,8 +141,42 @@ def _load_tools_module():
     config_mod.GITHUB_REPO = "test/repo"
     config_mod.HUGGINGFACE_ACCOUNT = "test-huggingface"
     config_mod.CONTEXT_QUEUE_LEN = 20
-    config_mod.CONTAINER_NAME = "hatsume-space-kali"
     sys.modules["hatsume.plugins.hatsume-plugin.config"] = config_mod
+
+    runtimes = {}
+    current_runtime = [types.SimpleNamespace(group_id=12345)]
+
+    def _get_or_create(group_id):
+        group_id = int(group_id)
+        return runtimes.setdefault(group_id, types.SimpleNamespace(group_id=group_id))
+
+    def _get_current_group_runtime(*, required=True):
+        runtime = current_runtime[0]
+        if runtime is None and required:
+            raise RuntimeError("group runtime is not bound")
+        return runtime
+
+    @contextlib.contextmanager
+    def _bind_group_runtime(runtime):
+        previous = current_runtime[0]
+        current_runtime[0] = runtime
+        try:
+            yield runtime
+        finally:
+            current_runtime[0] = previous
+
+    group_runtime_mod = types.ModuleType(
+        "hatsume.plugins.hatsume-plugin.group_runtime"
+    )
+    group_runtime_mod.group_runtime_registry = types.SimpleNamespace(
+        get_or_create=_get_or_create
+    )
+    group_runtime_mod.get_current_group_runtime = _get_current_group_runtime
+    group_runtime_mod.set_current_group_runtime = (
+        lambda runtime: current_runtime.__setitem__(0, runtime)
+    )
+    group_runtime_mod.bind_group_runtime = _bind_group_runtime
+    sys.modules[group_runtime_mod.__name__] = group_runtime_mod
 
     models_mod = types.ModuleType("hatsume.plugins.hatsume-plugin.models")
     models_mod.get_lite_model = lambda **kw: types.SimpleNamespace(
@@ -170,9 +204,16 @@ def _load_tools_module():
 
     infra_mod = sys.modules["hatsume.plugins.hatsume-plugin.infra"]
     infra_mod.run_cmd = lambda *a, **kw: ""
+    infra_mod.container_name_for_group = (
+        lambda group_id: f"hatsume-space-{group_id}"
+    )
     async def _mock_ensure(*a, **kw): pass
     infra_mod.ensure_container_running = _mock_ensure
     infra_mod.delete_container = lambda *a, **kw: None
+    infra_mod.read_sandbox_image_data_uri = AsyncMock(
+        return_value="data:image/png;base64,aW1hZ2U="
+    )
+    infra_mod.copy_host_file_to_sandbox = AsyncMock()
     async def _mock_render_html(*a, **kw):
         return b"fake_png_bytes"
     infra_mod.render_html_to_image = _mock_render_html
@@ -215,15 +256,17 @@ class TestRandomAcgPhoto:
         tools = _load_tools_module()
 
         mock_subprocess = MagicMock()
-        mock_subprocess.run.side_effect = [
-            MagicMock(returncode=0, stdout=b""),
-            MagicMock(returncode=0, stdout=b""),
-        ]
-        mock_ensure = AsyncMock()
+        mock_subprocess.run.return_value = MagicMock(returncode=0, stdout=b"")
+        mock_copy = AsyncMock()
 
         with (
             patch.object(tools, "subprocess", mock_subprocess),
-            patch.object(tools, "ensure_container_running", mock_ensure),
+            patch.object(tools, "copy_host_file_to_sandbox", mock_copy),
+            patch.object(
+                tools.tempfile,
+                "mkdtemp",
+                return_value="/tmp/hatsume-acg-export-test",
+            ),
             patch("os.listdir", return_value=["IMG_1234.jpg"]),
             patch("os.path.isfile", return_value=True),
             patch("shutil.rmtree"),
@@ -235,15 +278,13 @@ class TestRandomAcgPhoto:
             result = asyncio.run(tools.random_acg_photo())
 
             assert result == "/tmp/apple_photo_export_260727_143025_000042.jpg"
-            cp_command = mock_subprocess.run.call_args_list[1].args[0]
-            assert cp_command == [
-                "docker",
-                "cp",
-                "/tmp/hatsume_acg_export/IMG_1234.jpg",
-                "hatsume-space-kali:/tmp/apple_photo_export_260727_143025_000042.jpg",
-            ]
+            mock_copy.assert_awaited_once_with(
+                "/tmp/hatsume-acg-export-test/IMG_1234.jpg",
+                "/tmp/apple_photo_export_260727_143025_000042.jpg",
+                timeout=30,
+                group_id=12345,
+            )
             mock_randint.assert_called_once_with(0, 999999)
-            assert mock_ensure.called
 
     def test_empty_album_returns_error(self):
         """When ACG album has no photos, return Chinese error."""
@@ -257,6 +298,11 @@ class TestRandomAcgPhoto:
 
         with (
             patch.object(tools, "subprocess", mock_subprocess),
+            patch.object(
+                tools.tempfile,
+                "mkdtemp",
+                return_value="/tmp/hatsume-acg-export-test",
+            ),
             patch("shutil.rmtree"),
             patch("os.makedirs"),
         ):
@@ -277,6 +323,11 @@ class TestRandomAcgPhoto:
 
         with (
             patch.object(tools, "subprocess", mock_subprocess),
+            patch.object(
+                tools.tempfile,
+                "mkdtemp",
+                return_value="/tmp/hatsume-acg-export-test",
+            ),
             patch("shutil.rmtree"),
             patch("os.makedirs"),
         ):
@@ -289,18 +340,24 @@ class TestRandomAcgPhoto:
         tools = _load_tools_module()
 
         mock_subprocess = MagicMock()
-        mock_subprocess.run.side_effect = [
-            MagicMock(returncode=0, stdout=b""),
-            MagicMock(returncode=1, stderr=b"Error: No such container"),
-        ]
+        mock_subprocess.run.return_value = MagicMock(returncode=0, stdout=b"")
 
         with (
             patch.object(tools, "subprocess", mock_subprocess),
+            patch.object(
+                tools.tempfile,
+                "mkdtemp",
+                return_value="/tmp/hatsume-acg-export-test",
+            ),
             patch("os.listdir", return_value=["photo.png"]),
             patch("os.path.isfile", return_value=True),
             patch("shutil.rmtree"),
             patch("os.makedirs"),
-            patch.object(tools, "ensure_container_running", AsyncMock()),
+            patch.object(
+                tools,
+                "copy_host_file_to_sandbox",
+                AsyncMock(side_effect=RuntimeError("No such container")),
+            ),
         ):
             result = asyncio.run(tools.random_acg_photo())
 

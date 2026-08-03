@@ -405,17 +405,26 @@ class TimerStore:
         return task_ids
 
     def upsert_auto_response(
-        self, trigger_at: float, prompt: str | None = None
+        self,
+        group_id: int,
+        trigger_at: float,
+        prompt: str | None = None,
     ) -> int:
-        """Replace the internal auto-response task with one exact point."""
+        """Replace one group's internal auto-response task with one exact point."""
         from ..prompts import get_auto_response_prompt
 
+        if isinstance(group_id, bool) or not isinstance(group_id, int) or group_id <= 0:
+            raise ValueError("group_id must be a positive integer")
         plan = _build_internal_at_plan([trigger_at])
         conn = self._connection()
         with self.transaction():
-            conn.execute("DELETE FROM timer_tasks WHERE task_type = 'auto_response'")
+            conn.execute(
+                "DELETE FROM timer_tasks "
+                "WHERE task_type = 'auto_response' AND group_id = ?",
+                (group_id,),
+            )
             task_id = self.create_task(
-                0,
+                group_id,
                 0,
                 prompt or get_auto_response_prompt(),
                 plan,
@@ -424,20 +433,37 @@ class TimerStore:
             )
         return task_id
 
-    def get_auto_response_point(self) -> dict | None:
+    def get_auto_response_point(self, group_id: int) -> dict | None:
+        if isinstance(group_id, bool) or not isinstance(group_id, int) or group_id <= 0:
+            raise ValueError("group_id must be a positive integer")
         row = self._connection().execute(
-            "SELECT p.*, t.prompt, t.task_type, t.schedule_type, t.step "
+            "SELECT p.*, t.group_id, t.prompt, t.task_type, t.schedule_type, t.step "
             "FROM timer_schedule_points AS p "
             "JOIN timer_tasks AS t ON t.id = p.task_id "
-            "WHERE t.task_type = 'auto_response' "
+            "WHERE t.task_type = 'auto_response' AND t.group_id = ? "
             "AND p.processed_occurrences < p.planned_occurrences "
-            "ORDER BY p.first_fire_at LIMIT 1"
+            "ORDER BY p.first_fire_at LIMIT 1",
+            (group_id,),
         ).fetchone()
         return dict(row) if row is not None else None
 
-    def delete_auto_response_tasks(self) -> None:
+    def list_auto_response_group_ids(self) -> tuple[int, ...]:
+        rows = self._connection().execute(
+            "SELECT DISTINCT group_id FROM timer_tasks "
+            "WHERE task_type = 'auto_response' ORDER BY group_id"
+        ).fetchall()
+        return tuple(int(row["group_id"]) for row in rows)
+
+    def delete_auto_response_tasks(self, group_id: int | None = None) -> None:
         conn = self._connection()
-        conn.execute("DELETE FROM timer_tasks WHERE task_type = 'auto_response'")
+        if group_id is None:
+            conn.execute("DELETE FROM timer_tasks WHERE task_type = 'auto_response'")
+        else:
+            conn.execute(
+                "DELETE FROM timer_tasks "
+                "WHERE task_type = 'auto_response' AND group_id = ?",
+                (group_id,),
+            )
         conn.commit()
 
     def validate_prompt(self, prompt: str) -> str | None:

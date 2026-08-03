@@ -7,9 +7,7 @@ import importlib.util
 import sys
 import types
 from pathlib import Path
-from unittest.mock import MagicMock
-
-import pytest
+from unittest.mock import AsyncMock, MagicMock
 
 ROOT = Path(__file__).resolve().parents[1]
 PLUGIN_BASE = ROOT / "hatsume/plugins/hatsume-plugin"
@@ -144,6 +142,12 @@ def _stub_external_deps():
     )
     sys.modules["requests"] = requests_mod
 
+    group_runtime = types.ModuleType(
+        "hatsume.plugins.hatsume-plugin.group_runtime"
+    )
+    group_runtime.get_current_group_id = lambda: 123
+    sys.modules[group_runtime.__name__] = group_runtime
+
 
 def _load_config_module():
     """Load the real config.py."""
@@ -242,3 +246,39 @@ class TestEmbeddingModel:
         embedding = models.get_embedding_model()
 
         assert embedding.kwargs["base_url"] == "https://api.siliconflow.cn/v1"
+
+
+class TestGenerateImageForVolc:
+    def test_converts_file_urls_to_data_uris_before_calling_ark(self):
+        _full_setup()
+        models = _load_models_module()
+        infra = sys.modules["hatsume.plugins.hatsume-plugin.infra"]
+        infra.read_sandbox_image_data_uri = AsyncMock(
+            return_value="data:image/png;base64,cmVmZXJlbmNlLWltYWdl"
+        )
+
+        ark_client = MagicMock()
+        ark_client.images.generate.return_value = types.SimpleNamespace(
+            data=[types.SimpleNamespace(url="https://example.com/generated.png")]
+        )
+        models.Ark = MagicMock(return_value=ark_client)
+
+        result = asyncio.run(
+            models.generate_image_for_volc(
+                "edit the reference",
+                images=[
+                    "file:///work/reference image.png",
+                    "https://example.com/second.png",
+                ],
+            )
+        )
+
+        assert result == "https://example.com/generated.png"
+        infra.read_sandbox_image_data_uri.assert_awaited_once_with(
+            "/work/reference image.png",
+            group_id=123,
+        )
+        assert ark_client.images.generate.call_args.kwargs["image"] == [
+            "data:image/png;base64,cmVmZXJlbmNlLWltYWdl",
+            "https://example.com/second.png",
+        ]

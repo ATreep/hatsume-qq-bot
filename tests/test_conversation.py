@@ -11,6 +11,7 @@ from io import BytesIO
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -88,7 +89,7 @@ ConversationState = _state_mod.ConversationState
 
 
 def _make_state(**overrides) -> ConversationState:
-    state = ConversationState()
+    state = ConversationState(group_id=101)
     for k, v in overrides.items():
         setattr(state, k, v)
     return state
@@ -119,6 +120,17 @@ def _load_conversation_module():
     """Load handlers/dialogue.py with dependencies stubbed."""
     _stub_package_hierarchy()
     _stub_config()
+
+    runtime_name = "hatsume.plugins.hatsume-plugin.group_runtime"
+    runtime_mod = sys.modules.get(runtime_name)
+    if runtime_mod is None or not hasattr(runtime_mod, "GroupRuntime"):
+        runtime_spec = importlib.util.spec_from_file_location(
+            runtime_name,
+            PLUGIN_DIR / "group_runtime.py",
+        )
+        runtime_mod = importlib.util.module_from_spec(runtime_spec)
+        sys.modules[runtime_name] = runtime_mod
+        runtime_spec.loader.exec_module(runtime_mod)
 
     # Stub graph.nodes
     nodes_name = "hatsume.plugins.hatsume-plugin.graph.nodes"
@@ -183,6 +195,7 @@ def _load_conversation_module():
         infra_mod.ensure_container_running = MagicMock()
         sys.modules[infra_name] = infra_mod
     infra_mod = sys.modules[infra_name]
+    infra_mod.copy_host_file_to_sandbox = AsyncMock()
     infra_mod.find_sandbox_user_image = AsyncMock(return_value=None)
     infra_mod.save_sandbox_user_image = AsyncMock()
 
@@ -283,12 +296,14 @@ def _load_conversation_module():
 
 def test_start_new_conversation_marks_system_task_for_detection_bypass():
     dialogue = _load_conversation_module()
-    state = _make_state()
+    dialogue.group_runtime_registry.clear_for_tests()
+    runtime = dialogue.group_runtime_registry.get_or_create(101)
+    state = runtime.conversation
     dialogue.graph.ainvoke = AsyncMock()
 
     asyncio.run(
         dialogue.start_new_conversation(
-            state,
+            runtime,
             AsyncMock(),
             MagicMock(),
             system_task_text="scheduled work",
@@ -304,6 +319,317 @@ def test_start_new_conversation_marks_system_task_for_detection_bypass():
     ]
 
 
+def test_group_runtime_registry_and_task_local_binding_are_isolated():
+    dialogue = _load_conversation_module()
+    registry = dialogue.group_runtime_registry
+    registry.clear_for_tests()
+    runtime_mod = sys.modules[
+        "hatsume.plugins.hatsume-plugin.group_runtime"
+    ]
+    first = registry.get_or_create(101)
+    same = registry.get_or_create(101)
+    second = registry.get_or_create(202)
+
+    assert first is same
+    assert first is not second
+    assert first.conversation is not second.conversation
+    assert registry.get_existing(303) is None
+
+    async def exercise_binding():
+        both_ready = asyncio.Event()
+        release = asyncio.Event()
+        ready: set[int] = set()
+
+        async def worker(runtime):
+            with runtime_mod.bind_group_runtime(runtime):
+                assert runtime_mod.get_current_group_runtime() is runtime
+                ready.add(runtime.group_id)
+                if len(ready) == 2:
+                    both_ready.set()
+                await release.wait()
+                assert runtime_mod.get_current_group_runtime() is runtime
+
+        first_task = asyncio.create_task(worker(first))
+        second_task = asyncio.create_task(worker(second))
+        await asyncio.wait_for(both_ready.wait(), timeout=1)
+        assert ready == {101, 202}
+        release.set()
+        await asyncio.gather(first_task, second_task)
+        assert runtime_mod.get_current_group_runtime(required=False) is None
+
+        with runtime_mod.bind_group_runtime(first):
+            with runtime_mod.bind_group_runtime(second):
+                assert runtime_mod.get_current_group_runtime() is second
+            assert runtime_mod.get_current_group_runtime() is first
+
+    asyncio.run(exercise_binding())
+    registry.clear_for_tests()
+
+
+def test_group_runtime_rejects_invalid_ids_and_owns_distinct_mutable_state():
+    dialogue = _load_conversation_module()
+    registry = dialogue.group_runtime_registry
+    registry.clear_for_tests()
+
+    for invalid in (0, -1, True, "101"):
+        with pytest.raises(ValueError, match="positive integer"):
+            registry.get_or_create(invalid)
+
+    first = registry.get_or_create(101)
+    second = registry.get_or_create(202)
+    first.conversation.chat_peers.add("peer")
+    first.conversation.pending_queue.append({"text": "pending"})
+    first.auxiliary_messages_queue.append({"text": "aux"})
+    first.face_cooling_count = 3
+    first.send_image_count = 2
+    first.generate_video_used = True
+
+    assert second.conversation.chat_peers == set()
+    assert second.conversation.pending_queue == []
+    assert second.auxiliary_messages_queue == []
+    assert second.face_cooling_count == 0
+    assert second.send_image_count == 0
+    assert second.generate_video_used is False
+    registry.clear_for_tests()
+
+
+def test_group_runtime_discovers_and_unbinds_target_group_bots():
+    dialogue = _load_conversation_module()
+    registry = dialogue.group_runtime_registry
+    registry.clear_for_tests()
+    first_bot = types.SimpleNamespace(
+        get_group_list=AsyncMock(
+            return_value=[{"group_id": 101}, {"group_id": "202"}]
+        )
+    )
+    second_bot = object()
+
+    discovered = asyncio.run(registry.discover_bot_groups(first_bot))
+    registry.bind_bot(303, second_bot)
+
+    assert discovered == (101, 202)
+    assert registry.routed_group_ids() == (101, 202, 303)
+    assert registry.get_bot(101) is first_bot
+    assert registry.get_or_create(202).bot is first_bot
+    assert registry.get_bot(303) is second_bot
+
+    registry.unbind_bot(first_bot)
+    with pytest.raises(LookupError, match="group 101"):
+        registry.get_bot(101)
+    assert registry.routed_group_ids() == (303,)
+    assert registry.get_bot(303) is second_bot
+    registry.clear_for_tests()
+
+
+def test_external_trigger_uses_the_target_groups_registered_bot():
+    dialogue = _load_conversation_module()
+    registry = dialogue.group_runtime_registry
+    registry.clear_for_tests()
+    first_bot = object()
+    second_bot = object()
+    registry.bind_bot(101, first_bot)
+    registry.bind_bot(202, second_bot)
+    dialogue._send_group_ai_message = AsyncMock()
+    dialogue.start_new_conversation = AsyncMock()
+
+    async def scenario():
+        dialogue._start_conv_for_trigger(
+            42,
+            202,
+            "timer result",
+            trigger_type="timer",
+        )
+        await asyncio.sleep(0)
+        callback = registry.get_existing(202).conversation.ai_answer
+        await callback("answer")
+        await asyncio.sleep(0)
+
+    asyncio.run(scenario())
+
+    dialogue._send_group_ai_message.assert_awaited_once_with(
+        second_bot,
+        202,
+        "answer",
+        reply_to_message_id=None,
+    )
+    registry.clear_for_tests()
+
+
+def test_different_group_graphs_run_in_parallel():
+    dialogue = _load_conversation_module()
+    registry = dialogue.group_runtime_registry
+    registry.clear_for_tests()
+    runtime_mod = sys.modules[
+        "hatsume.plugins.hatsume-plugin.group_runtime"
+    ]
+    first = registry.get_or_create(101)
+    second = registry.get_or_create(202)
+
+    async def scenario():
+        both_entered = asyncio.Event()
+        release = asyncio.Event()
+        entered: set[int] = set()
+
+        async def invoke(_state, _config):
+            group_id = runtime_mod.get_current_group_id()
+            entered.add(group_id)
+            if len(entered) == 2:
+                both_entered.set()
+            await release.wait()
+
+        dialogue.graph.ainvoke = AsyncMock(side_effect=invoke)
+        first_task = asyncio.create_task(
+            dialogue.start_new_conversation(
+                first,
+                AsyncMock(),
+                MagicMock(),
+                system_task_text="first",
+            )
+        )
+        second_task = asyncio.create_task(
+            dialogue.start_new_conversation(
+                second,
+                AsyncMock(),
+                MagicMock(),
+                system_task_text="second",
+            )
+        )
+
+        await asyncio.wait_for(both_entered.wait(), timeout=1)
+        assert entered == {101, 202}
+        assert not first_task.done()
+        assert not second_task.done()
+        release.set()
+        await asyncio.gather(first_task, second_task)
+
+    asyncio.run(scenario())
+    registry.clear_for_tests()
+
+
+def test_graph_failure_releases_only_its_group_slot():
+    dialogue = _load_conversation_module()
+    registry = dialogue.group_runtime_registry
+    registry.clear_for_tests()
+    runtime_mod = sys.modules[
+        "hatsume.plugins.hatsume-plugin.group_runtime"
+    ]
+    failing = registry.get_or_create(101)
+    healthy = registry.get_or_create(202)
+
+    async def scenario():
+        healthy_entered = asyncio.Event()
+        release_healthy = asyncio.Event()
+
+        async def invoke(_state, _config):
+            if runtime_mod.get_current_group_id() == 101:
+                raise RuntimeError("group 101 failed")
+            healthy_entered.set()
+            await release_healthy.wait()
+
+        dialogue.graph.ainvoke = AsyncMock(side_effect=invoke)
+        failing_task = asyncio.create_task(
+            dialogue.start_new_conversation(
+                failing,
+                AsyncMock(),
+                MagicMock(),
+                system_task_text="fail",
+            )
+        )
+        healthy_task = asyncio.create_task(
+            dialogue.start_new_conversation(
+                healthy,
+                AsyncMock(),
+                MagicMock(),
+                system_task_text="healthy",
+            )
+        )
+
+        await asyncio.wait_for(healthy_entered.wait(), timeout=1)
+        with pytest.raises(RuntimeError, match="group 101 failed"):
+            await failing_task
+        assert failing.conversation.is_graph_running is False
+        assert failing.conversation._graph_task is None
+        assert healthy.conversation.is_graph_running is True
+        assert not healthy_task.done()
+
+        release_healthy.set()
+        await healthy_task
+
+    asyncio.run(scenario())
+    registry.clear_for_tests()
+
+
+def test_same_group_graph_starts_coalesce_without_losing_trigger():
+    dialogue = _load_conversation_module()
+    registry = dialogue.group_runtime_registry
+    registry.clear_for_tests()
+    runtime = registry.get_or_create(101)
+
+    async def scenario():
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def invoke(_state, _config):
+            entered.set()
+            await release.wait()
+
+        dialogue.graph.ainvoke = AsyncMock(side_effect=invoke)
+        first_task = asyncio.create_task(
+            dialogue.start_new_conversation(
+                runtime,
+                AsyncMock(),
+                MagicMock(),
+                system_task_text="first",
+            )
+        )
+        await asyncio.wait_for(entered.wait(), timeout=1)
+
+        await dialogue.start_new_conversation(
+            runtime,
+            AsyncMock(),
+            MagicMock(),
+            system_task_text="second",
+        )
+
+        assert dialogue.graph.ainvoke.await_count == 1
+        assert [message["text"] for message in runtime.conversation.human_queue] == [
+            "first",
+            "second",
+        ]
+        release.set()
+        await first_task
+
+    asyncio.run(scenario())
+    registry.clear_for_tests()
+
+
+def test_shutdown_continues_to_containers_after_agent_cleanup_failure():
+    dialogue = _load_conversation_module()
+    registry = dialogue.group_runtime_registry
+    registry.clear_for_tests()
+    registry.get_or_create(101)
+    agents = sys.modules["hatsume.plugins.hatsume-plugin.graph.agents"]
+    infra = sys.modules["hatsume.plugins.hatsume-plugin.infra"]
+    previous_agent_shutdown = getattr(agents, "shutdown_all_agents", None)
+    previous_container_shutdown = getattr(infra, "shutdown_all_containers", None)
+    agents.shutdown_all_agents = AsyncMock(side_effect=RuntimeError("agent cleanup"))
+    infra.shutdown_all_containers = AsyncMock()
+
+    try:
+        asyncio.run(registry.shutdown())
+        infra.shutdown_all_containers.assert_awaited_once_with()
+        assert registry.values() == ()
+    finally:
+        if previous_agent_shutdown is None:
+            delattr(agents, "shutdown_all_agents")
+        else:
+            agents.shutdown_all_agents = previous_agent_shutdown
+        if previous_container_shutdown is None:
+            delattr(infra, "shutdown_all_containers")
+        else:
+            infra.shutdown_all_containers = previous_container_shutdown
+
+
 def _make_group_increase_event(*, group_id=100, user_id=123456, self_id=999999):
     return types.SimpleNamespace(
         group_id=group_id,
@@ -316,7 +642,7 @@ def _make_group_increase_event(*, group_id=100, user_id=123456, self_id=999999):
 def test_group_increase_starts_conversation_and_activates_new_member_peer():
     dialogue = _load_conversation_module()
     dialogue.AUTO_RESPONSE_GROUP_ID = 100
-    dialogue.conv_state = _make_state()
+    dialogue.group_runtime_registry.clear_for_tests()
     dialogue.get_group_member_name = AsyncMock(return_value="新成员")
     dialogue.get_qq_avatar_url = MagicMock(
         return_value="https://q.qlogo.cn/avatar/123456"
@@ -327,14 +653,16 @@ def test_group_increase_starts_conversation_and_activates_new_member_peer():
 
     asyncio.run(dialogue.handle_group_increase(bot, event))
 
-    assert dialogue.conv_state.is_chatting
-    assert dialogue.conv_state.chat_peers == {"group_100_123456"}
+    state = dialogue.group_runtime_registry.get_existing(100).conversation
+    assert state.is_chatting
+    assert state.chat_peers == {"group_100_123456"}
     dialogue.get_group_member_name.assert_awaited_once_with(bot, 100, 123456)
     dialogue._start_conv_for_trigger.assert_called_once()
     user_id, group_id, prompt = dialogue._start_conv_for_trigger.call_args.args
     assert (user_id, group_id) == (123456, 100)
     assert dialogue._start_conv_for_trigger.call_args.kwargs == {
-        "trigger_type": "group_increase"
+        "trigger_type": "group_increase",
+        "bot": bot,
     }
     assert prompt == (
         "(SYSTEM) 有新的成员加入了群聊。\n"
@@ -349,8 +677,9 @@ def test_group_increase_starts_conversation_and_activates_new_member_peer():
 def test_group_increase_injects_active_conversation_without_starting_another():
     dialogue = _load_conversation_module()
     dialogue.AUTO_RESPONSE_GROUP_ID = 100
-    dialogue.conv_state = _make_state()
-    dialogue.conv_state.activate_chat("group_100_1")
+    dialogue.group_runtime_registry.clear_for_tests()
+    state = dialogue.group_runtime_registry.get_or_create(100).conversation
+    state.activate_chat("group_100_1")
     dialogue.get_group_member_name = AsyncMock(return_value="新成员")
     dialogue.get_qq_avatar_url = MagicMock(return_value="avatar-url")
     dialogue._start_conv_for_trigger = MagicMock()
@@ -358,11 +687,11 @@ def test_group_increase_injects_active_conversation_without_starting_another():
 
     asyncio.run(dialogue.handle_group_increase(MagicMock(), event))
 
-    assert dialogue.conv_state.chat_peers == {
+    assert state.chat_peers == {
         "group_100_1",
         "group_100_123456",
     }
-    assert dialogue.conv_state.human_queue == [
+    assert state.human_queue == [
         {
             "type": "text",
             "text": (
@@ -382,7 +711,7 @@ def test_group_increase_injects_active_conversation_without_starting_another():
 def test_group_increase_ignores_other_groups_and_the_bot_itself():
     dialogue = _load_conversation_module()
     dialogue.AUTO_RESPONSE_GROUP_ID = 100
-    dialogue.conv_state = _make_state()
+    dialogue.group_runtime_registry.clear_for_tests()
     dialogue.get_group_member_name = AsyncMock(return_value="ignored")
     dialogue._start_conv_for_trigger = MagicMock()
 
@@ -399,9 +728,8 @@ def test_group_increase_ignores_other_groups_and_the_bot_itself():
         )
     )
 
-    assert not dialogue.conv_state.is_chatting
-    assert dialogue.conv_state.chat_peers == set()
-    assert dialogue.conv_state.human_queue == []
+    assert dialogue.group_runtime_registry.get_existing(101) is None
+    assert dialogue.group_runtime_registry.get_existing(100) is None
     dialogue.get_group_member_name.assert_not_awaited()
     dialogue._start_conv_for_trigger.assert_not_called()
 
@@ -550,7 +878,7 @@ def test_get_human_message_stores_current_images_in_segment_order():
         side_effect=[_image_response("PNG"), _image_response("JPEG")]
     )
     dialogue.save_sandbox_user_image = AsyncMock(
-        side_effect=lambda _data, message_id, order, extension: (
+        side_effect=lambda _data, message_id, order, extension, *, group_id: (
             f"/tmp/hatsume-user-images/{message_id}-{order}.{extension}"
         )
     )
@@ -577,11 +905,17 @@ def test_get_human_message_stores_current_images_in_segment_order():
         1,
         "png",
     )
+    assert dialogue.save_sandbox_user_image.await_args_list[0].kwargs == {
+        "group_id": 7
+    }
     assert dialogue.save_sandbox_user_image.await_args_list[1].args[1:] == (
         321,
         2,
         "jpg",
     )
+    assert dialogue.save_sandbox_user_image.await_args_list[1].kwargs == {
+        "group_id": 7
+    }
 
 
 def test_get_human_message_reuses_reply_images_by_reply_message_id():
@@ -622,7 +956,13 @@ def test_get_human_message_reuses_reply_images_by_reply_message_id():
         " ![图片](/tmp/hatsume-user-images/900-2.webp) "
     )
     assert dialogue.find_sandbox_user_image.await_args_list[0].args == (900, 1)
+    assert dialogue.find_sandbox_user_image.await_args_list[0].kwargs == {
+        "group_id": 7
+    }
     assert dialogue.find_sandbox_user_image.await_args_list[1].args == (900, 2)
+    assert dialogue.find_sandbox_user_image.await_args_list[1].kwargs == {
+        "group_id": 7
+    }
     dialogue.requests.get.assert_not_called()
     dialogue.save_sandbox_user_image.assert_not_awaited()
     assert len(content) == 1
@@ -663,6 +1003,7 @@ def test_get_human_message_recovers_missing_reply_image_from_temp_url():
         1,
         "png",
     )
+    assert dialogue.save_sandbox_user_image.await_args.kwargs == {"group_id": 7}
 
 
 def test_get_human_message_recovers_reply_image_after_lookup_error():
@@ -770,17 +1111,19 @@ def test_non_peer_messages_always_enter_auxiliary_queue():
         get_session_id=lambda: "group_7_42",
     )
     matcher = types.SimpleNamespace(finish=AsyncMock())
+    dialogue.group_runtime_registry.clear_for_tests()
+    state = dialogue.group_runtime_registry.get_or_create(7).conversation
 
     for is_chatting in (False, True):
-        dialogue.conv_state.is_chatting = is_chatting
-        dialogue.conv_state.chat_peers = {"group_7_other"} if is_chatting else set()
+        state.is_chatting = is_chatting
+        state.chat_peers = {"group_7_other"} if is_chatting else set()
         asyncio.run(dialogue.user_chat_handle(MagicMock(), event, matcher))
 
     assert dialogue.append_auxiliary_message.call_count == 2
     dialogue.append_auxiliary_message.assert_called_with(normalized, [source])
-    assert dialogue.conv_state.idle_queue == []
-    assert dialogue.conv_state.pending_queue == []
-    assert dialogue.conv_state.human_queue == []
+    assert state.idle_queue == []
+    assert state.pending_queue == []
+    assert state.human_queue == []
 
 
 def test_user_chat_callback_sends_to_origin_group_without_matcher_context():
@@ -808,7 +1151,10 @@ def test_user_chat_callback_sends_to_origin_group_without_matcher_context():
     )
     bot = types.SimpleNamespace(send_group_msg=AsyncMock())
     matcher = types.SimpleNamespace(send=AsyncMock())
-    dialogue.conv_state.activate_chat(event.get_session_id())
+    dialogue.group_runtime_registry.clear_for_tests()
+    dialogue.group_runtime_registry.get_or_create(100).conversation.activate_chat(
+        event.get_session_id()
+    )
 
     async def invoke_ai_callback(_state, ai_callback, _configure_tools, **_kwargs):
         await ai_callback("answer")

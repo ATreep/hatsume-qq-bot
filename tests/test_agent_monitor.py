@@ -47,8 +47,14 @@ class TestAgentStateTracking:
 
     def test_set_and_get_agent_state(self):
         mod = _load_agents_module()
-        mod.set_agent_state("coding_agent", status="running", task="test task", user_id=123)
-        state = mod.get_agent_state("coding_agent")
+        mod.set_agent_state(
+            "coding_agent",
+            group_id=101,
+            status="running",
+            task="test task",
+            user_id=123,
+        )
+        state = mod.get_agent_state("coding_agent", 101)
         assert state is not None
         assert state["status"] == "running"
         assert state["task"] == "test task"
@@ -56,23 +62,26 @@ class TestAgentStateTracking:
 
     def test_is_agent_running(self):
         mod = _load_agents_module()
-        assert mod.is_agent_running("coding_agent") is False
-        mod.set_agent_state("coding_agent", status="running")
-        assert mod.is_agent_running("coding_agent") is True
-        mod.set_agent_state("coding_agent", status="done")
-        assert mod.is_agent_running("coding_agent") is False
-        mod.set_agent_state("coding_agent", status="idle")
-        assert mod.is_agent_running("coding_agent") is False
+        assert mod.is_agent_running("coding_agent", 101) is False
+        mod.set_agent_state("coding_agent", group_id=101, status="running")
+        assert mod.is_agent_running("coding_agent", 101) is True
+        assert mod.is_agent_running("coding_agent", 202) is False
+        mod.set_agent_state("coding_agent", group_id=101, status="done")
+        assert mod.is_agent_running("coding_agent", 101) is False
+        mod.set_agent_state("coding_agent", group_id=101, status="idle")
+        assert mod.is_agent_running("coding_agent", 101) is False
 
     def test_get_agent_state_unknown(self):
         mod = _load_agents_module()
-        assert mod.get_agent_state("nonexistent_agent") is None
+        assert mod.get_agent_state("nonexistent_agent", 101) is None
 
     def test_set_agent_state_preserves_fields(self):
         mod = _load_agents_module()
-        mod.set_agent_state("coding_agent", status="running", task="initial task")
-        mod.set_agent_state("coding_agent", result="some output")
-        state = mod.get_agent_state("coding_agent")
+        mod.set_agent_state(
+            "coding_agent", group_id=101, status="running", task="initial task"
+        )
+        mod.set_agent_state("coding_agent", group_id=101, result="some output")
+        state = mod.get_agent_state("coding_agent", 101)
         assert state["status"] == "running"
         assert state["task"] == "initial task"
         assert state["result"] == "some output"
@@ -80,8 +89,10 @@ class TestAgentStateTracking:
     def test_set_agent_state_records_started_at(self):
         mod = _load_agents_module()
         now = time.time()
-        mod.set_agent_state("generate_video", status="running", started_at=now)
-        state = mod.get_agent_state("generate_video")
+        mod.set_agent_state(
+            "generate_video", group_id=101, status="running", started_at=now
+        )
+        state = mod.get_agent_state("generate_video", 101)
         assert state["started_at"] == now
 
 

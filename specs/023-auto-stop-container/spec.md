@@ -12,7 +12,7 @@
 
 ### User Story 1 — Container Automatically Stops After Inactivity (Priority: P1)
 
-The bot operator wants the Docker sandbox container (`hatsume-space-kali`) to automatically stop when no commands have been executed inside it for a period of time, freeing system resources (RAM, CPU) without manual intervention.
+The bot operator wants the Docker sandbox container (`hatsume-space`) to automatically stop when no commands have been executed inside it for a period of time, freeing system resources (RAM, CPU) without manual intervention.
 
 **Why this priority**: This is the core value proposition — eliminating the need for the operator to manually run `/resetsandbox` to reclaim resources. Without this, the container runs indefinitely, wasting memory.
 
@@ -76,7 +76,7 @@ The bot operator wants the existing `/resetsandbox` command to continue working,
 - **FR-004**: System MUST, when the reference counter reaches zero, start a 5-minute grace period timer before stopping the container.
 - **FR-005**: System MUST cancel the grace period timer if a new subprocess starts before the timer expires.
 - **FR-006**: System MUST, after the grace period elapses, re-check that the reference counter is still zero before stopping the container (preventing race conditions).
-- **FR-007**: System MUST stop the Docker container (`docker stop hatsume-space-kali`) when the grace timer expires with refcount still at zero.
+- **FR-007**: System MUST stop the Docker container (`docker stop hatsume-space`) when the grace timer expires with refcount still at zero.
 - **FR-008**: System MUST cancel any pending grace timer when the manual container cleanup function (`cleanup_persistent_container`) is invoked.
 - **FR-009**: System MUST ensure the reference counter is decremented even when a synchronous command encounters a timeout or Docker HALT error (guaranteed cleanup on both success and error paths).
 - **FR-010**: System MUST handle `_release_subprocess` calls from both asynchronous and synchronous contexts without crashing.

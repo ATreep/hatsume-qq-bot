@@ -80,17 +80,18 @@ class TestStdinInjectionIntegration:
         """Simulate the full queue-based stdin request/response flow."""
         from hatsume.plugins.hatsume_plugin.graph.agents import (
             _stdin_queues,
-            _cleanup_stdin_queues,
+            pop_stdin_request,
+            register_stdin_request,
         )
 
         proc_id = "test_integration"
         request_id = f"stdin_{proc_id}_0"
 
         q: asyncio.Queue[str | None] = asyncio.Queue()
-        _stdin_queues[request_id] = q
+        register_stdin_request(request_id, 101, q)
 
         async def simulate_tool_response():
-            popped_q = _stdin_queues.pop(request_id, None)
+            popped_q = pop_stdin_request(request_id, 101)
             assert popped_q is not None
             await popped_q.put("my_secret_token")
             return "success"
@@ -115,16 +116,17 @@ class TestStdinInjectionIntegration:
         from hatsume.plugins.hatsume_plugin.graph.agents import (
             _stdin_queues,
             _cleanup_stdin_queues,
+            register_stdin_request,
         )
 
         proc_id = "test_cleanup"
         request_id = f"stdin_{proc_id}_0"
         q: asyncio.Queue[str | None] = asyncio.Queue()
-        _stdin_queues[request_id] = q
+        register_stdin_request(request_id, 101, q)
 
         async def wait_then_cleanup():
             await asyncio.sleep(0.05)
-            _cleanup_stdin_queues(proc_id)
+            _cleanup_stdin_queues(proc_id, 101)
 
         async def agent_wait():
             raw = await q.get()
@@ -140,3 +142,15 @@ class TestStdinInjectionIntegration:
         raw = asyncio.run(run())
         assert raw is None
         assert request_id not in _stdin_queues
+
+    def test_cross_group_response_does_not_consume_request(self):
+        from hatsume.plugins.hatsume_plugin.graph.agents import (
+            pop_stdin_request,
+            register_stdin_request,
+        )
+
+        queue: asyncio.Queue[str | None] = asyncio.Queue()
+        register_stdin_request("stdin_owned_0", 101, queue)
+
+        assert pop_stdin_request("stdin_owned_0", 202) is None
+        assert pop_stdin_request("stdin_owned_0", 101) is queue

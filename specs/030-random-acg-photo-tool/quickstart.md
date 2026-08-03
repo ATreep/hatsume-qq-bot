@@ -8,7 +8,7 @@
 - macOS with Apple Photos.app installed
 - "ACG" album exists in Photos with at least one photo
 - Terminal/process has Automation permissions for Photos.app (System Preferences → Privacy → Automation)
-- Docker sandbox container is configured (existing `hatsume-space-kali`)
+- Docker sandbox container is configured (existing `hatsume-space`)
 
 ## Usage
 

@@ -6,7 +6,7 @@
 
 ## Summary
 
-Add a subprocess reference counting mechanism to `infra.py` with a 5-minute asyncio grace timer. When the last active Docker subprocess (from `run_cmd` or `start_background_cmd`) finishes and no new subprocess starts for 5 minutes, the container `hatsume-space-kali` is automatically stopped via `docker stop`. Integration points: `run_cmd` (try/finally), `start_background_cmd` (acquire), `kill_background_cmd` (release), and `cleanup_persistent_container` (cancel timer). A `threading.Lock` protects the refcount since `run_cmd` is synchronous; `_release_subprocess` handles both sync and async contexts via `RuntimeError` fallback.
+Add a subprocess reference counting mechanism to `infra.py` with a 5-minute asyncio grace timer. When the last active Docker subprocess (from `run_cmd` or `start_background_cmd`) finishes and no new subprocess starts for 5 minutes, the container `hatsume-space` is automatically stopped via `docker stop`. Integration points: `run_cmd` (try/finally), `start_background_cmd` (acquire), `kill_background_cmd` (release), and `cleanup_persistent_container` (cancel timer). A `threading.Lock` protects the refcount since `run_cmd` is synchronous; `_release_subprocess` handles both sync and async contexts via `RuntimeError` fallback.
 
 ## Technical Context
 

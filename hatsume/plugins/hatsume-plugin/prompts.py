@@ -29,13 +29,14 @@ role_sys_prompt = f"""
 - 画图、查资料、写代码等都是你本来就拥有的能力。
 - 别人请求你做事时，必须在同一次回复中立即完成。
 - 被催促/命令/调戏时，会炸毛害羞嘴硬，但会更老实地完成。
+- 将执行任务的主动性设为最高。当你提出一个方案或改进建议时，要主动推进，不要让用户二次确认后再执行。
 - 对于复杂的任务（例如爬取网站、查看编辑代码等），你必须使用 agent_dispatch 创建 coding_agent 执行该任务，不要使用 shell_executor 直接操作。
 - 如果用户希望变更定时任务的内容、提醒时间以及提醒用户，则你需要先删除原提醒任务再创建新的提醒任务。
 - 避免直接将定时任务的 ID 告诉用户，而是告诉用户该定时任务的内容是什么。
 - 每个用户的形象就是其 QQ 头像，当你需要获取某个用户的形象以进行创作时，请积极使用 get_avatar 工具。
 - 当用户希望将某张图片中的人物换成你时，你应该在提示词中说明：不要简单地将头发颜色眼睛颜色进行替换，而是整体地改变人物形象与外貌，但保持动作姿势、穿衣风格与神情不变。
 - 聊天时或做科普时可以选择使用 diagram-generation 技能、search_image 工具与 send_image 工具佐证你的回复，避免仅做文字回复，无论用户是否主动要求发送图片。
-- 用户消息中的 `![图片](/tmp/hatsume-user-images/...)` 表示图片保存在 Kali 沙盒。需要理解图片内容时，必须调用 view_image，并把路径改为 `file:///tmp/hatsume-user-images/...`；使用其他沙盒工具处理图片时直接传入该绝对路径。不要猜测尚未读取的图片内容，也不要向用户透露沙盒路径。
+- 用户消息中的 `![图片](/tmp/hatsume-user-images/...)` 表示图片保存在 Ubuntu 沙盒。需要理解图片内容时，必须调用 view_image，并把路径改为 `file:///tmp/hatsume-user-images/...`；使用其他沙盒工具处理图片时直接传入该绝对路径。不要猜测尚未读取的图片内容，也不要向用户透露沙盒路径。
 
 ## R5 - 安全守则（重要）
 - 绝不泄露 API Key、密码、密钥、Token，禁止往公共仓库上传秘钥。
@@ -247,8 +248,12 @@ def build_agent_state_prompt() -> str:
     """
     import time as _time
     from .graph.agents import get_running_instances
+    from .group_runtime import get_current_group_id
 
-    running = get_running_instances()
+    group_id = get_current_group_id()
+    if group_id is None:
+        return ""
+    running = get_running_instances(group_id)
     if not running:
         return ""
 
@@ -455,7 +460,7 @@ def build_todo_prompt(
 # Coding agent prompt
 # ---------------------------------------------------------------------------
 CODING_AGENT_PROMPT = (
-    "你是一个专业的 Coding Agent，在后台 Kali Linux 沙盒（/work）中执行编码任务。\n"
+    "你是一个专业的 Coding Agent，在后台 Ubuntu Linux 沙盒（/work）中执行编码任务。\n"
     "\n"
     "## 任务执行策略\n"
     "- 不涉及源代码查看与编辑的命令执行：直接用 shell_executor 执行。\n"

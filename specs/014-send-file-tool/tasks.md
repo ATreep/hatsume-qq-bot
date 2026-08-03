@@ -1,4 +1,4 @@
-# Tasks: Send File from Kali Container
+# Tasks: Send File from Ubuntu Container
 
 **Input**: Design documents from `specs/014-send-file-tool/`
 

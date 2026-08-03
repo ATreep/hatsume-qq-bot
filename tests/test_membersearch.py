@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import contextlib
 import sys
 import types
 from pathlib import Path
@@ -13,6 +14,44 @@ ROOT = Path(__file__).resolve().parents[1]
 UTILS_PATH = ROOT / "hatsume/plugins/hatsume-plugin/utils/__init__.py"
 TOOLS_PATH = ROOT / "hatsume/plugins/hatsume-plugin/graph/tools.py"
 COMMANDS_PATH = ROOT / "hatsume/plugins/hatsume-plugin/handlers/tools.py"
+
+
+def _install_group_runtime_stub() -> None:
+    """Install the minimal task-local runtime API used by isolated loaders."""
+    runtimes = {}
+    current_runtime = [None]
+
+    def get_or_create(group_id):
+        group_id = int(group_id)
+        return runtimes.setdefault(group_id, types.SimpleNamespace(group_id=group_id))
+
+    def get_current_group_runtime(*, required=True):
+        runtime = current_runtime[0]
+        if runtime is None and required:
+            raise RuntimeError("group runtime is not bound")
+        return runtime
+
+    def set_current_group_runtime(runtime):
+        current_runtime[0] = runtime
+
+    @contextlib.contextmanager
+    def bind_group_runtime(runtime):
+        previous = current_runtime[0]
+        current_runtime[0] = runtime
+        try:
+            yield runtime
+        finally:
+            current_runtime[0] = previous
+
+    runtime_mod = types.ModuleType("hatsume.plugins.hatsume-plugin.group_runtime")
+    runtime_mod.group_runtime_registry = types.SimpleNamespace(
+        get_or_create=get_or_create,
+        get_bot=lambda _group_id: object(),
+    )
+    runtime_mod.get_current_group_runtime = get_current_group_runtime
+    runtime_mod.set_current_group_runtime = set_current_group_runtime
+    runtime_mod.bind_group_runtime = bind_group_runtime
+    sys.modules[runtime_mod.__name__] = runtime_mod
 
 
 def _load_utils_module():
@@ -350,6 +389,8 @@ def _load_tools_module_for_membersearch():
         mod.__path__ = [str(path)]
         sys.modules[name] = mod
 
+    _install_group_runtime_stub()
+
     nonebot_mod = types.ModuleType("nonebot")
     nonebot_mod.get_bot = lambda: None
     sys.modules["nonebot"] = nonebot_mod
@@ -429,6 +470,17 @@ def _load_tools_module_for_membersearch():
     infra_mod.run_cmd = lambda *a, **kw: ""
     infra_mod.ensure_container_running = lambda *a, **kw: None
     infra_mod.delete_container = lambda *a, **kw: None
+    async def _mock_read_sandbox_image_data_uri(*args, **kwargs):
+        return "data:image/png;base64,aW1hZ2U="
+
+    infra_mod.read_sandbox_image_data_uri = _mock_read_sandbox_image_data_uri
+    async def _mock_copy_host_file_to_sandbox(*args, **kwargs):
+        return None
+
+    infra_mod.copy_host_file_to_sandbox = _mock_copy_host_file_to_sandbox
+    infra_mod.container_name_for_group = (
+        lambda group_id: f"hatsume-space-{group_id}"
+    )
     infra_mod.render_html_to_image = lambda *a, **kw: b"fake_png"
     sys.modules["hatsume.plugins.hatsume-plugin.infra"] = infra_mod
 
@@ -558,6 +610,8 @@ def _load_commands_for_membersearch(patch_search=None):
         mod.__path__ = [str(path)]
         sys.modules[name] = mod
 
+    _install_group_runtime_stub()
+
     nonebot_mod = types.ModuleType("nonebot")
     sys.modules["nonebot"] = nonebot_mod
     adapters_mod = types.ModuleType("nonebot.adapters")
@@ -589,6 +643,9 @@ def _load_commands_for_membersearch(patch_search=None):
     infra_mod.run_cmd = lambda *a, **kw: ""
     infra_mod.delete_container = lambda *a, **kw: None
     infra_mod.cleanup_persistent_container = lambda: None
+    infra_mod.container_name_for_group = (
+        lambda group_id: f"hatsume-space-{group_id}"
+    )
     sys.modules["hatsume.plugins.hatsume-plugin.infra"] = infra_mod
 
     models_mod = types.ModuleType("hatsume.plugins.hatsume-plugin.models")

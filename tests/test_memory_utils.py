@@ -169,6 +169,7 @@ def load_memory_modules(
     config_mod.DOUBAO_2_LITE = ""
     config_mod.GPT_5_4_NANO = ""
     config_mod.BOT_QQ_ID = 0
+    config_mod.AUTO_RESPONSE_GROUP_ID = 12345
     sys.modules["hatsume.plugins.hatsume-plugin.config"] = config_mod
 
     state_mod = types.ModuleType("hatsume.plugins.hatsume-plugin.state")
@@ -180,12 +181,26 @@ def load_memory_modules(
     state_mod.ContentPart = dict
     sys.modules["hatsume.plugins.hatsume-plugin.state"] = state_mod
 
+    group_runtime_mod = types.ModuleType(
+        "hatsume.plugins.hatsume-plugin.group_runtime"
+    )
+
+    def _validate_group_id(group_id):
+        if isinstance(group_id, bool) or not isinstance(group_id, int) or group_id <= 0:
+            raise ValueError("group_id must be a positive integer")
+        return group_id
+
+    group_runtime_mod.validate_group_id = _validate_group_id
+    group_runtime_mod.get_current_group_id = lambda: 12345
+    sys.modules[group_runtime_mod.__name__] = group_runtime_mod
+
     # ------------------------------------------------------------------
     # Create in-memory SQLite DB for testing
     # ------------------------------------------------------------------
     _test_db_conn = sqlite3.connect(":memory:")
     _test_db_conn.execute("""CREATE TABLE IF NOT EXISTS memories (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        group_id INTEGER NOT NULL CHECK(group_id > 0),
         content TEXT NOT NULL, time INTEGER NOT NULL,
         people TEXT NOT NULL DEFAULT '[]', tokens TEXT NOT NULL DEFAULT '[]',
         embedding BLOB, created_at INTEGER NOT NULL DEFAULT 0
@@ -375,17 +390,21 @@ def test_init_tokenized_corpus_expires_old_memories_from_db(tmp_path: Path):
     recent_time = int(time.time())
 
     conn.execute(
-        "INSERT INTO memories (content, time, people, tokens) VALUES (?, ?, ?, ?)",
-        ("old-memory", old_time, '[]', '[]')
+        "INSERT INTO memories (group_id, content, time, people, tokens) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (12345, "old-memory", old_time, '[]', '[]')
     )
     conn.execute(
-        "INSERT INTO memories (content, time, people, tokens) VALUES (?, ?, ?, ?)",
-        ("recent-memory", recent_time, '[]', '[]')
+        "INSERT INTO memories (group_id, content, time, people, tokens) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (12345, "recent-memory", recent_time, '[]', '[]')
     )
     conn.commit()
-    deleted_vector_ids: list[int] = []
+    deleted_vectors: list[tuple[int, list[int]]] = []
     store._get_vector_store = lambda: types.SimpleNamespace(
-        delete=lambda memory_ids: deleted_vector_ids.extend(memory_ids),
+        delete=lambda memory_ids, *, group_id: deleted_vectors.append(
+            (group_id, memory_ids)
+        ),
         close=lambda: None,
     )
 
@@ -393,7 +412,7 @@ def test_init_tokenized_corpus_expires_old_memories_from_db(tmp_path: Path):
 
     rows = conn.execute("SELECT id, content FROM memories ORDER BY id").fetchall()
     assert rows == [(2, "recent-memory")]
-    assert deleted_vector_ids == [1]
+    assert deleted_vectors == [(12345, [1])]
 
 
 @pytest.mark.skip(reason="Pre-existing test infrastructure gap — ensure_embedding_model requires real credentials in engine.py")

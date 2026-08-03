@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add reference counting and a 5-minute grace-period timer so the Docker container `hatsume-space-kali` is automatically stopped when all active `run_cmd`/`start_background_cmd` subprocesses have finished and no new subprocess has started for 5 minutes.
+**Goal:** Add reference counting and a 5-minute grace-period timer so the Docker container `hatsume-space` is automatically stopped when all active `run_cmd`/`start_background_cmd` subprocesses have finished and no new subprocess has started for 5 minutes.
 
 **Architecture:** Three new functions (`_acquire_subprocess`, `_release_subprocess`, `_delayed_stop_container`) plus module-level state (`_subprocess_refcount`, `_subprocess_refcount_lock`, `_stop_timer_task`) are added to `infra.py`. Four existing functions (`run_cmd`, `start_background_cmd`, `kill_background_cmd`, `cleanup_persistent_container`) are modified with minimal integration calls. A `threading.Lock` protects refcount mutation since `run_cmd` is synchronous.
 

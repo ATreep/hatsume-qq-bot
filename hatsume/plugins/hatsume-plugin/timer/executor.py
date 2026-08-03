@@ -7,7 +7,7 @@ import time
 import traceback
 from collections import deque
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, Iterable
 
 from apscheduler.events import EVENT_JOB_MISSED, EVENT_JOB_SUBMITTED
 from apscheduler.triggers.calendarinterval import CalendarIntervalTrigger
@@ -17,7 +17,6 @@ from apscheduler.triggers.interval import IntervalTrigger
 from nonebot import require
 
 from ..config import (
-    AUTO_RESPONSE_GROUP_ID,
     AUTO_RESPONSE_MAX_INTERVAL_MINUTES,
     AUTO_RESPONSE_MIN_INTERVAL_MINUTES,
     AUTO_RESPONSE_QUIET_END_HOUR,
@@ -209,8 +208,9 @@ async def _execute_auto_response(
     task: dict[str, Any], store: TimerStore, *, triggered_at: float
 ) -> None:
     """Inject an internal auto-response and immediately schedule its successor."""
-    if AUTO_RESPONSE_GROUP_ID <= 0:
-        print("[auto_response] Skipped: AUTO_RESPONSE_GROUP_ID is not configured")
+    group_id = int(task["group_id"])
+    if group_id <= 0:
+        print(f"[auto_response] Skipped invalid group_id={group_id}")
         return
 
     try:
@@ -222,53 +222,117 @@ async def _execute_auto_response(
 
         inject_timer(
             user_id=0,
-            group_id=AUTO_RESPONSE_GROUP_ID,
+            group_id=group_id,
             timer_prompt=task["prompt"],
             start_conversation_cb=_timer_start_conv_cb,
         )
     finally:
-        reschedule_auto_response(store)
+        reschedule_auto_response(store, group_id)
 
 
-def reschedule_auto_response(store: TimerStore) -> None:
-    """Replace the internal task with one random future exact-time point."""
-    if AUTO_RESPONSE_GROUP_ID <= 0:
+def reschedule_auto_response(
+    store: TimerStore, group_id: int, *, register_job: bool = True
+) -> None:
+    """Replace one group's internal task with a random future exact-time point."""
+    task_id = store.upsert_auto_response(group_id, _random_response_trigger())
+    if register_job:
+        add_jobs_for_task(task_id, store)
+
+
+def ensure_auto_response_for_group(store: TimerStore, group_id: int) -> None:
+    """Ensure one group owns exactly one future auto-response point."""
+    point = store.get_auto_response_point(group_id)
+    if point is not None and float(point["exact_at"]) > time.time():
+        if scheduler.get_job(str(point["job_id"])) is None:
+            register_point(point, store)
         return
-    task_id = store.upsert_auto_response(_random_response_trigger())
-    add_jobs_for_task(task_id, store)
-
-
-async def refresh_auto_response(store: TimerStore) -> None:
-    """Ensure startup owns exactly one future auto-response point."""
-    point = store.get_auto_response_point()
-    if AUTO_RESPONSE_GROUP_ID <= 0:
-        if point is not None:
-            cancel_point_job(int(point["id"]))
-        store.delete_auto_response_tasks()
-        return
-
-    now = time.time()
-    if point is not None and float(point["exact_at"]) > now:
-        register_point(point, store)
-        return
-
     if point is not None:
         cancel_point_job(int(point["id"]))
-    store.delete_auto_response_tasks()
-    reschedule_auto_response(store)
+    store.delete_auto_response_tasks(group_id)
+    reschedule_auto_response(store, group_id)
+
+
+def _normalize_group_ids(group_ids: Iterable[int]) -> set[int]:
+    normalized: set[int] = set()
+    for group_id in group_ids:
+        if (
+            isinstance(group_id, bool)
+            or not isinstance(group_id, int)
+            or group_id <= 0
+        ):
+            raise ValueError("group_id must be a positive integer")
+        normalized.add(group_id)
+    return normalized
+
+
+def remove_ineligible_auto_response_groups(
+    store: TimerStore, group_ids: Iterable[int]
+) -> None:
+    """Delete auto-response tasks whose groups no longer own memory."""
+    eligible_group_ids = _normalize_group_ids(group_ids)
+    stored_group_ids = set(store.list_auto_response_group_ids())
+    for group_id in sorted(stored_group_ids - eligible_group_ids):
+        if group_id > 0:
+            point = store.get_auto_response_point(group_id)
+            if point is not None:
+                cancel_point_job(int(point["id"]))
+        store.delete_auto_response_tasks(group_id)
+
+
+async def refresh_auto_responses(
+    store: TimerStore,
+    group_ids: Iterable[int],
+    *,
+    routable_group_ids: Iterable[int] | None = None,
+) -> None:
+    """Synchronize per-group auto-response points with memory-owned groups."""
+    eligible_group_ids = _normalize_group_ids(group_ids)
+    routable = (
+        eligible_group_ids
+        if routable_group_ids is None
+        else _normalize_group_ids(routable_group_ids)
+    )
+    remove_ineligible_auto_response_groups(store, eligible_group_ids)
+
+    now = time.time()
+    for group_id in sorted(eligible_group_ids):
+        point = store.get_auto_response_point(group_id)
+        if point is not None and float(point["exact_at"]) > now:
+            if group_id in routable:
+                register_point(point, store)
+            continue
+        if point is not None:
+            cancel_point_job(int(point["id"]))
+        store.delete_auto_response_tasks(group_id)
+        reschedule_auto_response(
+            store,
+            group_id,
+            register_job=group_id in routable,
+        )
 
 
 async def reload_all_schedules(
-    store: TimerStore, *, now: float | None = None
+    store: TimerStore,
+    *,
+    now: float | None = None,
+    group_ids: Iterable[int] | None = None,
 ) -> None:
     """Recover incomplete points, compensating only the latest recent fire."""
     current = time.time() if now is None else now
     tolerance = TIMER_TOLERANCE_MINUTES * 60
+    routable_group_ids = (
+        None if group_ids is None else _normalize_group_ids(group_ids)
+    )
 
     for stored_point in store.list_incomplete_points():
         point_id = int(stored_point["id"])
         task = store.get_task(int(stored_point["task_id"]))
         if task is None:
+            continue
+        if (
+            routable_group_ids is not None
+            and int(task["group_id"]) not in routable_group_ids
+        ):
             continue
 
         due: list[float] = []
@@ -377,12 +441,15 @@ async def _execute_point(
     group_id = int(task["group_id"])
     user_name: str | None = None
     try:
-        from nonebot import get_bot
-
+        from ..group_runtime import group_runtime_registry
         from ..utils import get_group_member_name
 
         if user_id != 0:
-            user_name = await get_group_member_name(get_bot(), group_id, user_id)
+            user_name = await get_group_member_name(
+                group_runtime_registry.get_bot(group_id),
+                group_id,
+                user_id,
+            )
     except Exception:
         print(
             f"[timer-v2] Cannot resolve user {user_id} in group {group_id}; "

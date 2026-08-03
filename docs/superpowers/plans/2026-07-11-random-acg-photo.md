@@ -103,7 +103,7 @@ def _load_tools_module():
         cfg_mod.SHELL_MAX_OUTPUT = 1000
         cfg_mod.SHELL_TIMEOUT = 10
         cfg_mod.CONTEXT_QUEUE_LEN = 20
-        cfg_mod.CONTAINER_NAME = "hatsume-space-kali"
+        cfg_mod.CONTAINER_NAME = "hatsume-space"
 
     sys.modules["nonebot"] = types.ModuleType("nonebot")
     adapters_mod = types.ModuleType("nonebot.adapters")
@@ -176,7 +176,7 @@ def _load_tools_module():
     config_mod.GIITHUB_ACCOUNT = "test-account"
     config_mod.GITHUB_REPO = "test/repo"
     config_mod.CONTEXT_QUEUE_LEN = 20
-    config_mod.CONTAINER_NAME = "hatsume-space-kali"
+    config_mod.CONTAINER_NAME = "hatsume-space"
     sys.modules["hatsume.plugins.hatsume-plugin.config"] = config_mod
 
     models_mod = types.ModuleType("hatsume.plugins.hatsume-plugin.models")

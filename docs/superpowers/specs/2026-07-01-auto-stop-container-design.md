@@ -5,11 +5,11 @@
 
 ## Overview
 
-When `run_cmd` or `start_background_cmd` creates a subprocess that executes `docker exec` inside the persistent container `hatsume-space-kali`, the container is started lazily and remains running indefinitely. This design adds a reference-counting mechanism with a grace-period timer: when the last active subprocess finishes, the container is automatically stopped after 5 minutes of inactivity.
+When `run_cmd` or `start_background_cmd` creates a subprocess that executes `docker exec` inside the persistent container `hatsume-space`, the container is started lazily and remains running indefinitely. This design adds a reference-counting mechanism with a grace-period timer: when the last active subprocess finishes, the container is automatically stopped after 5 minutes of inactivity.
 
 ## Motivation
 
-The container `hatsume-space-kali` currently only stops when an admin manually runs `/resetsandbox`. This wastes resources when the bot is idle — the container sits in memory consuming RAM and CPU. However, during active use, the container should stay up to avoid the overhead of repeated `docker start`/`docker create` cycles.
+The container `hatsume-space` currently only stops when an admin manually runs `/resetsandbox`. This wastes resources when the bot is idle — the container sits in memory consuming RAM and CPU. However, during active use, the container should stay up to avoid the overhead of repeated `docker start`/`docker create` cycles.
 
 ## Design Decisions
 

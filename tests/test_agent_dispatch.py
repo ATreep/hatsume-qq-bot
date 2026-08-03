@@ -1,9 +1,12 @@
 """Tests for agent_dispatch tool and agents registry."""
 from __future__ import annotations
 
+import asyncio
 import sys
 import types
 from pathlib import Path
+
+import pytest
 
 # Set up package hierarchy so the real module can be imported
 ROOT = Path(__file__).resolve().parents[1]
@@ -184,14 +187,19 @@ class TestAgentContext:
             get_agent_context,
         )
 
-        add_agent_instance("test_ctx_agent", context="用户讨论性能优化", status="running")
-        assert get_agent_context("test_ctx_agent") == "用户讨论性能优化"
+        add_agent_instance(
+            "test_ctx_agent",
+            group_id=101,
+            context="用户讨论性能优化",
+            status="running",
+        )
+        assert get_agent_context("test_ctx_agent", 101) == "用户讨论性能优化"
 
     def test_get_agent_context_returns_empty_for_missing(self):
         """get_agent_context returns '' when agent has no state."""
         from hatsume.plugins.hatsume_plugin.graph.agents import get_agent_context
 
-        assert get_agent_context("nonexistent_ctx_agent") == ""
+        assert get_agent_context("nonexistent_ctx_agent", 101) == ""
 
     def test_get_agent_context_returns_empty_when_no_context_field(self):
         """get_agent_context returns '' when state exists but no context field."""
@@ -200,5 +208,101 @@ class TestAgentContext:
             get_agent_context,
         )
 
-        add_agent_instance("test_ctx_agent2", status="running")  # no context
-        assert get_agent_context("test_ctx_agent2") == ""
+        add_agent_instance("test_ctx_agent2", group_id=101, status="running")
+        assert get_agent_context("test_ctx_agent2", 101) == ""
+
+    def test_get_agent_context_is_group_isolated(self):
+        from hatsume.plugins.hatsume_plugin.graph.agents import (
+            add_agent_instance,
+            get_agent_context,
+        )
+
+        add_agent_instance(
+            "isolated_context",
+            group_id=101,
+            context="group 101",
+            status="running",
+        )
+        add_agent_instance(
+            "isolated_context",
+            group_id=202,
+            context="group 202",
+            status="running",
+        )
+        assert get_agent_context("isolated_context", 101) == "group 101"
+        assert get_agent_context("isolated_context", 202) == "group 202"
+
+
+def test_shutdown_group_agents_cancels_only_owner_resources():
+    from hatsume.plugins.hatsume_plugin.graph import agents
+
+    async def scenario():
+        agents._agent_tasks.clear()
+        agents._stdin_queues.clear()
+        agents._stdin_request_groups.clear()
+        first_started = asyncio.Event()
+        second_started = asyncio.Event()
+
+        async def wait_forever(started):
+            started.set()
+            await asyncio.Event().wait()
+
+        first_task = asyncio.create_task(wait_forever(first_started))
+        second_task = asyncio.create_task(wait_forever(second_started))
+        agents.track_agent_task("first", 101, first_task)
+        agents.track_agent_task("second", 202, second_task)
+        first_queue = asyncio.Queue()
+        second_queue = asyncio.Queue()
+        agents.register_stdin_request("stdin_first_0", 101, first_queue)
+        agents.register_stdin_request("stdin_second_0", 202, second_queue)
+
+        await asyncio.gather(first_started.wait(), second_started.wait())
+        await agents.shutdown_group_agents(101)
+
+        assert first_task.cancelled()
+        assert not second_task.done()
+        assert await first_queue.get() is None
+        assert "stdin_first_0" not in agents._stdin_queues
+        assert agents._stdin_queues["stdin_second_0"] is second_queue
+        assert agents._stdin_request_groups["stdin_second_0"] == 202
+
+        second_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await second_task
+        agents._agent_tasks.clear()
+        agents._stdin_queues.clear()
+        agents._stdin_request_groups.clear()
+
+    asyncio.run(scenario())
+
+
+def test_agent_instance_binding_and_duplicate_checks_are_group_isolated():
+    from hatsume.plugins.hatsume_plugin.graph import agents
+
+    agents._AGENT_STATES.clear()
+    first_id = agents.add_agent_instance(
+        "coding_agent",
+        group_id=101,
+        status="running",
+        task=" same task ",
+    )
+    second_id = agents.add_agent_instance(
+        "coding_agent",
+        group_id=202,
+        status="running",
+        task="same task",
+    )
+
+    assert agents.has_running_agent_task("coding_agent", 101, "same task")
+    assert agents.has_running_agent_task("coding_agent", 202, " same task ")
+    assert not agents.has_running_agent_task("coding_agent", 303, "same task")
+    assert agents.get_agent_instance("coding_agent", 101, first_id) is not None
+    assert agents.get_agent_instance("coding_agent", 202, first_id) is None
+
+    with agents.bind_agent_instance(first_id):
+        assert agents.get_current_agent_instance_id() == first_id
+        with agents.bind_agent_instance(second_id):
+            assert agents.get_current_agent_instance_id() == second_id
+        assert agents.get_current_agent_instance_id() == first_id
+    assert agents.get_current_agent_instance_id(required=False) is None
+    agents._AGENT_STATES.clear()

@@ -1,10 +1,9 @@
-"""LangGraph conversation nodes — merged into a single module.
+"""LangGraph nodes backed by the task-local per-group runtime.
 
-Previously split across ai.py / human.py / detect.py / finish.py. They share
-module-level state (the bound ConversationState, auxiliary queues, retrieved
-memory keys) and human/detect/finish are thin shells over ai's accessors, so
-keeping them in one module removes the cross-import churn without changing any
-behavior. All public symbols the graph builder and tests rely on live here.
+Human, detect, AI, and finish nodes share the runtime selected by the current
+graph invocation. Mutable queues, flags, callbacks, proxy state, and Skill state
+belong to that runtime; only node definitions and immutable tool topology are
+common across groups.
 """
 
 from __future__ import annotations
@@ -19,7 +18,6 @@ import time
 import traceback
 from typing import Any
 
-from nonebot import get_bot
 import nonebot_plugin_localstore as store
 from langchain.messages import AIMessage, HumanMessage, SystemMessage
 from langchain.agents import create_agent
@@ -28,6 +26,10 @@ from langgraph.graph import MessagesState
 from nonebot.adapters.onebot.v11 import MessageSegment
 
 from ..models import get_advance_model, get_code_model, get_lite_model, get_mini_model
+from ..group_runtime import (
+    get_current_group_runtime,
+    group_runtime_registry,
+)
 from ..prompts import (
     AUXILIARY_COMPACTION_PROMPT,
     CHAT_END_DETECT_PROMPT,
@@ -64,27 +66,21 @@ REPLY_DIRECTIVE_PATTERN = re.compile(r"\[[ \t]*reply:\s*([^\]\r\n]*)\]")
 SYSTEM_TRIGGER_KEY = "_hatsume_system_trigger"
 ADMIN_MODE_KEYWORD = "WORLDSKY"
 
-# ---------------------------------------------------------------------------
-# In-memory state (shared with tools.py via configure_tool_callbacks)
-# ---------------------------------------------------------------------------
-auxiliary_messages_queue: list[dict] = []
-auxiliary_source_queue: list[dict] = []
-_face_cooling_count: int = 0
-_current_memory_query_user_id: int | None = None
+def _runtime():
+    return get_current_group_runtime()
 
-# human-node bookkeeping (previously module-level in human.py)
-_last_was_auxiliary_only: bool = False
-_last_was_system_trigger: bool = False
 
-# ---------------------------------------------------------------------------
-# Shared bound ConversationState (set by handlers/chat.py via bind_state)
-# ---------------------------------------------------------------------------
-_state: Any = None
+def _conversation_state():
+    return _runtime().conversation
 
 
 def bind_state(conversation_state: Any) -> None:
-    global _state
-    _state = conversation_state
+    """Compatibility hook that binds a group-owned ConversationState."""
+    runtime = group_runtime_registry.get_or_create(int(conversation_state.group_id))
+    if runtime.conversation is not conversation_state:
+        runtime.conversation = conversation_state
+        runtime.reset_tool_callbacks()
+
 
 
 # ---------------------------------------------------------------------------
@@ -348,8 +344,10 @@ def inject_agent_notification(
 
     print(notify_msg)
 
-    if _state and _state.is_chatting:
-        _state.human_queue.append(make_system_trigger_message(notify_msg, "agent"))
+    runtime = group_runtime_registry.get_or_create(group_id)
+    state = runtime.conversation
+    if state.is_chatting:
+        state.human_queue.append(make_system_trigger_message(notify_msg, "agent"))
         print(f"🧩 [inject_agent_notification] Injected {agent_name} result into human_queue")
     else:
         if start_conversation_cb is not None:
@@ -385,8 +383,10 @@ def inject_timer(
         )
         print(f"⏰ [inject_timer] Timer message for user {user_id}: {timer_prompt[:80]}...")
 
-    if _state and _state.is_chatting:
-        _state.human_queue.append(make_system_trigger_message(timer_msg, "timer"))
+    runtime = group_runtime_registry.get_or_create(group_id)
+    state = runtime.conversation
+    if state.is_chatting:
+        state.human_queue.append(make_system_trigger_message(timer_msg, "timer"))
         print(f"⏰ [inject_timer] Injected timer into human_queue for user {user_id}")
     else:
         if start_conversation_cb is not None:
@@ -402,41 +402,14 @@ def _start_direct_conv(user_id: int, group_id: int, notify_msg: str) -> None:
     Used when no callback is registered (e.g., /autoresponse debug command).
     Sends messages to the target group via bot.send_group_msg().
     """
-    from nonebot import get_bot
-    from ..handlers.dialogue import (
-        _send_group_ai_message,
-        conv_state,
-        start_new_conversation,
+    from ..handlers.dialogue import _start_conv_for_trigger
+
+    _start_conv_for_trigger(
+        user_id,
+        group_id,
+        notify_msg,
+        trigger_type="timer",
     )
-    from .tools import configure_tool_callbacks as configure_tools
-
-    bot = get_bot()
-
-    async def _send_to_group(msg, reply_to_message_id=None):
-        if msg == "[CONVERSATION END]":
-            conv_state.end_conversation()
-            return
-        try:
-            await _send_group_ai_message(
-                bot,
-                group_id,
-                msg,
-                reply_to_message_id=reply_to_message_id,
-            )
-        except Exception as e:
-            print(f"❌ _send_to_group failed: group={group_id} err={e}")
-
-    conv_state.ai_answer = _send_to_group
-    conv_state.activate_chat(f"group_{group_id}_{user_id}")
-
-    asyncio.create_task(
-        start_new_conversation(
-            conv_state, _send_to_group, configure_tools,
-            user_id=user_id,
-            system_task_text=notify_msg,
-        )
-    )
-    print(f"🎨 [_start_direct_conv] Started conversation for user {user_id} in group {group_id}")
 
 
 # ---------------------------------------------------------------------------
@@ -451,10 +424,13 @@ def append_auxiliary_message(
 ) -> None:
     if len(messages) == 0:
         return
-    auxiliary_messages_queue.extend(messages)
-    auxiliary_source_queue.extend(source_entries or [])
+    runtime = _runtime()
+    queue = runtime.auxiliary_messages_queue
+    source_queue = runtime.auxiliary_source_queue
+    queue.extend(messages)
+    source_queue.extend(source_entries or [])
 
-    if len(auxiliary_messages_queue) > CONTEXT_QUEUE_LEN:
+    if len(queue) > CONTEXT_QUEUE_LEN:
         try:
             model_chosen = get_mini_model()
 
@@ -467,26 +443,30 @@ def append_auxiliary_message(
             summary = model_chosen.invoke(
                 [
                     SystemMessage(AUXILIARY_COMPACTION_PROMPT),
-                    HumanMessage(auxiliary_messages_queue),  # type: ignore
+                    HumanMessage(queue),  # type: ignore
                 ]
             ).content.__str__()
-            auxiliary_messages_queue.clear()
-            auxiliary_messages_queue.append(
+            queue.clear()
+            queue.append(
                 {"type": "text", "text": "### 历史聊天记录总结：" + summary}
             )
-            auxiliary_source_queue.clear()
+            source_queue.clear()
         except Exception:
             print("❌ Failed to summarize auxiliary messages")
             traceback.print_exc()
-            overflow = len(auxiliary_messages_queue) - CONTEXT_QUEUE_LEN
+            overflow = len(queue) - CONTEXT_QUEUE_LEN
             if overflow > 0:
-                del auxiliary_messages_queue[:overflow]
-            auxiliary_source_queue.clear()
+                del queue[:overflow]
+            source_queue.clear()
 
 
 def _snapshot_auxiliary_queue() -> tuple[list[dict], list[dict]]:
     """Return a non-destructive snapshot of the auxiliary queues."""
-    return auxiliary_messages_queue.copy(), auxiliary_source_queue.copy()
+    runtime = _runtime()
+    return (
+        runtime.auxiliary_messages_queue.copy(),
+        runtime.auxiliary_source_queue.copy(),
+    )
 
 
 
@@ -495,29 +475,25 @@ def _snapshot_auxiliary_queue() -> tuple[list[dict], list[dict]]:
 # Shared state accessors
 # ---------------------------------------------------------------------------
 def _get_ai_answer() -> Any:
-    return _state.ai_answer if _state else None
+    return _conversation_state().ai_answer
 
 
 def _get_human_queue() -> list[dict]:
-    return _state.human_queue if _state else []
+    return _conversation_state().human_queue
 
 
 def _clear_human_queue() -> None:
-    if _state:
-        _state.human_queue.clear()
-        _state.human_source_queue.clear()
+    state = _conversation_state()
+    state.human_queue.clear()
+    state.human_source_queue.clear()
 
 
 def _set_graph_running(value: bool) -> None:
-    if _state:
-        _state.is_graph_running = value
+    _conversation_state().is_graph_running = value
 
 
 def _set_current_query_user_id(uid: int | None) -> None:
-    global _current_memory_query_user_id
-    _current_memory_query_user_id = uid
-    if _state:
-        _state.current_query_user_id = uid
+    _conversation_state().current_query_user_id = uid
 
 
 def set_current_query_user_id(uid: int | None) -> None:
@@ -554,8 +530,8 @@ def _build_current_todo_prompt() -> str:
 # ---------------------------------------------------------------------------
 async def ai_node(state: MessagesState) -> dict:
     """Generate AI response using LLM with tools and memory."""
-    global _face_cooling_count
-
+    runtime = _runtime()
+    conversation_state = runtime.conversation
     print("Enter ai_node")
     reset_capture_flag()
     t_start = time.time()
@@ -630,10 +606,10 @@ async def ai_node(state: MessagesState) -> dict:
 
     # ── Face injection gate ──
 
-    _face_cooling_count += 1
+    runtime.face_cooling_count += 1
     _face_allowed = (
         random.randint(0, 1) == 0
-        and _face_cooling_count >= 1
+        and runtime.face_cooling_count >= 1
     )
     _face_dict: dict[str, list[str]] = {}
     if _face_allowed:
@@ -651,7 +627,7 @@ async def ai_node(state: MessagesState) -> dict:
             if face_prompt:
                 sys_prompt += face_prompt
                 print(f"[face] Injected face prompt with {len(emotions)} emotions")
-        _face_cooling_count = 0
+        runtime.face_cooling_count = 0
 
     sys_prompt += f"\n\n# 当前日期与时间\n{get_date()}"
 
@@ -738,9 +714,7 @@ async def ai_node(state: MessagesState) -> dict:
         print("[memory] Extracted memory record from AI response")
 
     ai_text_clean = ai_text_clean.strip()
-    end_requested = bool(
-        _state is not None and getattr(_state, "end_requested", False)
-    )
+    end_requested = conversation_state.end_requested
     if end_requested:
         print("[end_conversation] Suppressed the final AI reply.")
     elif ai_text_clean:
@@ -769,7 +743,7 @@ async def ai_node(state: MessagesState) -> dict:
             current_group_id = get_current_group_id()
             if qq_numbers and current_group_id is not None:
                 try:
-                    bot = get_bot()
+                    bot = group_runtime_registry.get_bot(current_group_id)
                     for qq in qq_numbers:
                         user_name = await get_group_member_name(
                             bot, current_group_id, qq
@@ -805,27 +779,32 @@ async def ai_node(state: MessagesState) -> dict:
 # Human node
 # ---------------------------------------------------------------------------
 async def human_node(state: MessagesState) -> dict:
-    global _last_was_auxiliary_only, _last_was_system_trigger
+    runtime = _runtime()
+    conversation_state = runtime.conversation
     print("Enter human_node")
 
-    if _state is not None and getattr(_state, "end_requested", False):
-        _last_was_auxiliary_only = False
-        _last_was_system_trigger = False
+    if conversation_state.end_requested:
+        runtime.last_was_auxiliary_only = False
+        runtime.last_was_system_trigger = False
         return {"messages": [SystemMessage("__end__")]}
 
     t_start = time.time()
     while not _get_human_queue():
         await asyncio.sleep(0.3)
         if time.time() - t_start >= 60 * 5:
-            _last_was_auxiliary_only = not _get_human_queue() and bool(auxiliary_messages_queue)
-            _last_was_system_trigger = False
+            runtime.last_was_auxiliary_only = (
+                not _get_human_queue() and bool(runtime.auxiliary_messages_queue)
+            )
+            runtime.last_was_system_trigger = False
             return {"messages": [SystemMessage("__end__")]}
 
     human_queue = _get_human_queue().copy()
     _clear_human_queue()
 
-    _last_was_auxiliary_only = not human_queue and bool(auxiliary_messages_queue)
-    _last_was_system_trigger = any(
+    runtime.last_was_auxiliary_only = (
+        not human_queue and bool(runtime.auxiliary_messages_queue)
+    )
+    runtime.last_was_system_trigger = any(
         isinstance(part, dict) and SYSTEM_TRIGGER_KEY in part
         for part in human_queue
     )
@@ -845,7 +824,7 @@ async def human_node(state: MessagesState) -> dict:
 async def chat_end_detect_node(state: MessagesState) -> dict:
     print("Enter chat_end_detect_node")
 
-    if _last_was_system_trigger:
+    if _runtime().last_was_system_trigger:
         return {"messages": []}
 
     from ..character_proxy import message_mentions_character_proxy
@@ -921,14 +900,13 @@ async def chat_end_detect_node(state: MessagesState) -> dict:
 # Finish node
 # ---------------------------------------------------------------------------
 async def finish_conversation_node(state: MessagesState) -> dict:
-    global _last_was_system_trigger
+    runtime = _runtime()
     print("Enter finish_conversation_node")
 
-    _last_was_system_trigger = False
+    runtime.last_was_system_trigger = False
     _set_graph_running(False)
     _clear_human_queue()
-    if _state is not None:
-        _state.end_requested = False
+    runtime.conversation.end_requested = False
 
     # Container auto-stop is handled by infra's reference counting; finish does
     # not forcefully tear it down here.

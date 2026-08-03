@@ -43,6 +43,17 @@ def _setup_package_hierarchy():
     config_mod.DOCKER_ENV_PATH = Path("/tmp/test_docker")
     config_mod.SHELL_MAX_OUTPUT = 1000
     config_mod.SHELL_TIMEOUT = 10
+    config_mod.CONTAINER_NAME_BASE = "hatsume-space"
+
+    runtime_name = "hatsume.plugins.hatsume_plugin.group_runtime"
+    runtime_mod = types.ModuleType(runtime_name)
+    runtime_mod.get_current_group_id = lambda: 101
+    runtime_mod.validate_group_id = lambda group_id: (
+        group_id
+        if isinstance(group_id, int) and not isinstance(group_id, bool) and group_id > 0
+        else (_ for _ in ()).throw(ValueError("invalid group"))
+    )
+    sys.modules[runtime_name] = runtime_mod
 
     # Load infra module from actual file
     import importlib.util
@@ -62,10 +73,22 @@ _setup_package_hierarchy()
 @pytest.fixture(autouse=True)
 def _reset_background_procs():
     """Reset _background_procs before each test to prevent cross-test pollution."""
-    from hatsume.plugins.hatsume_plugin.infra import _background_procs
+    from hatsume.plugins.hatsume_plugin.infra import (
+        _background_proc_groups,
+        _background_procs,
+        _container_states,
+    )
     _background_procs.clear()
+    _background_proc_groups.clear()
+    _container_states.clear()
     yield
+    for proc, _path in _background_procs.values():
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
     _background_procs.clear()
+    _background_proc_groups.clear()
+    _container_states.clear()
 
 
 # -----------------------------------------------------------------------
@@ -144,12 +167,13 @@ class TestKillBackgroundCmd:
         """Returns None when proc_id is not in _background_procs."""
         from hatsume.plugins.hatsume_plugin.infra import kill_background_cmd
 
-        result = kill_background_cmd("nonexistent_proc_xyz")
+        result = kill_background_cmd("nonexistent_proc_xyz", group_id=101)
         assert result is None
 
     def test_kills_running_process_and_cleans_up(self):
         """kill_background_cmd terminates the process, removes tmp file, returns output."""
         from hatsume.plugins.hatsume_plugin.infra import (
+            _background_proc_groups,
             _background_procs,
             kill_background_cmd,
         )
@@ -168,8 +192,9 @@ class TestKillBackgroundCmd:
         log_file.close()
         proc_id = "test_proc_kill_1"
         _background_procs[proc_id] = (proc, tmp)
+        _background_proc_groups[proc_id] = 101
 
-        remaining = kill_background_cmd(proc_id)
+        remaining = kill_background_cmd(proc_id, group_id=101)
 
         # Process should be dead
         assert proc.poll() is not None
@@ -181,6 +206,7 @@ class TestKillBackgroundCmd:
     def test_removes_entry_from_background_procs(self):
         """After kill_background_cmd, the proc_id is removed from the dict."""
         from hatsume.plugins.hatsume_plugin.infra import (
+            _background_proc_groups,
             _background_procs,
             kill_background_cmd,
         )
@@ -193,7 +219,25 @@ class TestKillBackgroundCmd:
         log_file.close()
         proc_id = "test_proc_kill_2"
         _background_procs[proc_id] = (proc, tmp)
+        _background_proc_groups[proc_id] = 101
 
         assert proc_id in _background_procs
-        kill_background_cmd(proc_id)
+        kill_background_cmd(proc_id, group_id=101)
         assert proc_id not in _background_procs
+
+    def test_other_group_cannot_kill_process(self):
+        from hatsume.plugins.hatsume_plugin.infra import (
+            _background_proc_groups,
+            _background_procs,
+            kill_background_cmd,
+        )
+
+        tmp = Path(tempfile.mkstemp(suffix=".log")[1])
+        proc = subprocess.Popen(["sleep", "60"], stdout=subprocess.DEVNULL)
+        _background_procs["owned"] = (proc, tmp)
+        _background_proc_groups["owned"] = 101
+
+        assert kill_background_cmd("owned", group_id=202) is None
+        assert proc.poll() is None
+
+        kill_background_cmd("owned", group_id=101)

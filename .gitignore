@@ -42,5 +42,5 @@ node_modules/
 
 # Runtime and private data
 /data/
-/hatsume/plugins/hatsume-plugin/virtual/hatsume-space-kali-image.tar.zst
+/hatsume/plugins/hatsume-plugin/virtual/hatsume-space-image.tar.zst
 /hatsume/plugins/hatsume-plugin/virtual/script.sh

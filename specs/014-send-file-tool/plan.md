@@ -1,4 +1,4 @@
-# Implementation Plan: Send File from Kali Container
+# Implementation Plan: Send File from Ubuntu Container
 
 **Branch**: `main` | **Date**: 2026-06-25 | **Spec**: [spec.md](./spec.md)
 
@@ -6,7 +6,7 @@
 
 ## Summary
 
-Add a `send_file` LangChain tool that extracts files from the Kali Docker container `/work/` directory and sends them to QQ group chat as group file attachments via OneBot V11 `MessageSegment.file()`. The tool validates paths to prevent directory traversal, enforces a 10 MB size limit, and only sends files when explicitly requested by the user.
+Add a `send_file` LangChain tool that extracts files from the Ubuntu Docker container `/work/` directory and sends them to QQ group chat as group file attachments via OneBot V11 `MessageSegment.file()`. The tool validates paths to prevent directory traversal, enforces a 10 MB size limit, and only sends files when explicitly requested by the user.
 
 ## Technical Context
 

@@ -2,7 +2,12 @@
 
 set -e
 
-CONTAINER_NAME="hatsume-space-kali"
+CONTAINER_NAME="${1:-}"
+
+if [[ ! "${CONTAINER_NAME}" =~ ^hatsume-space-[1-9][0-9]*$ ]]; then
+    echo "[HALT] Invalid container name."
+    exit 2
+fi
 
 if ! docker info > /dev/null 2>&1; then
     echo "[HALT] Docker not running."

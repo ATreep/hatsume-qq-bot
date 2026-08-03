@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 import time
 import types
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -79,7 +80,7 @@ def _setup_package_hierarchy() -> None:
         infra.run_cmd = lambda *a, **kw: ""
         infra.run_cmd_async = AsyncMock(return_value="")
         infra.delete_container = lambda: None
-        infra.cleanup_persistent_container = lambda: None
+        infra.cleanup_persistent_container = AsyncMock(return_value=False)
         infra.ensure_container_running = lambda: None
         infra.render_html_to_image = AsyncMock(return_value=b"")
         sys.modules[infra_name] = infra
@@ -104,6 +105,20 @@ def _setup_package_hierarchy() -> None:
         config.SKILLS_DIR = PLUGIN_DIR / "data" / "skills"
         sys.modules[config_name] = config
         sys.modules["hatsume.plugins.hatsume_plugin.config"] = config
+
+    runtime_name = "hatsume.plugins.hatsume_plugin.group_runtime"
+    runtime = types.ModuleType(runtime_name)
+
+    @contextmanager
+    def bind_group_runtime(value):
+        yield value
+
+    runtime.bind_group_runtime = bind_group_runtime
+    runtime.group_runtime_registry = types.SimpleNamespace(
+        get_or_create=lambda group_id: types.SimpleNamespace(group_id=group_id),
+        get_existing=lambda _group_id: None,
+    )
+    sys.modules[runtime_name] = runtime
 
     # Stub state module
     state_name = "hatsume.plugins.hatsume-plugin.state"
@@ -159,6 +174,23 @@ def _get_commands_module():
         sys.modules[v11_name].MessageSegment = types.SimpleNamespace(text=lambda s: s, image=lambda *a, **kw: None)
     if not hasattr(sys.modules[v11_name], "PokeNotifyEvent"):
         sys.modules[v11_name].PokeNotifyEvent = type("PokeNotifyEvent", (), {})
+    runtime_name = "hatsume.plugins.hatsume_plugin.group_runtime"
+    runtime = sys.modules.setdefault(runtime_name, types.ModuleType(runtime_name))
+
+    @contextmanager
+    def bind_group_runtime(value):
+        yield value
+
+    runtime.bind_group_runtime = bind_group_runtime
+    runtime.group_runtime_registry = types.SimpleNamespace(
+        get_or_create=lambda group_id: types.SimpleNamespace(group_id=group_id),
+        get_existing=lambda _group_id: None,
+    )
+    for config_name in (
+        "hatsume.plugins.hatsume-plugin.config",
+        "hatsume.plugins.hatsume_plugin.config",
+    ):
+        sys.modules[config_name].ADMIN_QQ_ID = "12345"
     # Reload the module
     import importlib.util
     full_name = "hatsume.plugins.hatsume_plugin.handlers.tools"
@@ -172,15 +204,22 @@ def _get_commands_module():
     return sys.modules[full_name]
 
 
-def _run_and_capture_msg(matcher) -> str:
+def _run_and_capture_msg(
+    matcher,
+    *,
+    args_text: str = "",
+    user_id: str = "77",
+) -> str:
     """Run handle_agents, catch MockFinished, return the finish message."""
     import asyncio
     cmd = _get_commands_module()
+    event = types.SimpleNamespace(group_id=101, get_user_id=lambda: user_id)
+    args = types.SimpleNamespace(extract_plain_text=lambda: args_text)
     try:
-        asyncio.run(cmd.handle_agents(matcher))
+        asyncio.run(cmd.handle_agents(event, matcher, args))
     except MockFinished:
         pass
-    matcher.finish.assert_called_once()
+    matcher.finish.assert_awaited_once()
     return matcher.finish.call_args[0][0]
 
 
@@ -198,7 +237,7 @@ class TestHandleAgents:
 
         try:
             matcher = MagicMock()
-            matcher.finish = MagicMock(side_effect=_finish_that_stops)
+            matcher.finish = AsyncMock(side_effect=_finish_that_stops)
             msg = _run_and_capture_msg(matcher)
             assert "没有已注册的 Agent" in msg or "没有" in msg
         finally:
@@ -212,7 +251,7 @@ class TestHandleAgents:
 
         try:
             matcher = MagicMock()
-            matcher.finish = MagicMock(side_effect=_finish_that_stops)
+            matcher.finish = AsyncMock(side_effect=_finish_that_stops)
             msg = _run_and_capture_msg(matcher)
             assert "当前没有正在运行的 Agent" in msg
         finally:
@@ -223,11 +262,17 @@ class TestHandleAgents:
         ag = _get_agents_module()
         ag._AGENT_STATES.clear()
         now = time.time()
-        ag.set_agent_state("coding_agent", status="running", task="fix login bug", started_at=now)
+        ag.set_agent_state(
+            "coding_agent",
+            group_id=101,
+            status="running",
+            task="fix login bug",
+            started_at=now,
+        )
 
         try:
             matcher = MagicMock()
-            matcher.finish = MagicMock(side_effect=_finish_that_stops)
+            matcher.finish = AsyncMock(side_effect=_finish_that_stops)
             msg = _run_and_capture_msg(matcher)
             assert "coding_agent" in msg
             assert "执行中" in msg
@@ -240,12 +285,16 @@ class TestHandleAgents:
         ag = _get_agents_module()
         ag._AGENT_STATES.clear()
         ag.set_agent_state(
-            "coding_agent", status="done", task="refactor module", result="success"
+            "coding_agent",
+            group_id=101,
+            status="done",
+            task="refactor module",
+            result="success",
         )
 
         try:
             matcher = MagicMock()
-            matcher.finish = MagicMock(side_effect=_finish_that_stops)
+            matcher.finish = AsyncMock(side_effect=_finish_that_stops)
             msg = _run_and_capture_msg(matcher)
             # Done agents are not running, so the no-running message is expected
             assert "当前没有正在运行的 Agent" in msg
@@ -256,12 +305,24 @@ class TestHandleAgents:
         """Only running agents are shown; non-running agents are omitted."""
         ag = _get_agents_module()
         ag._AGENT_STATES.clear()
-        ag.set_agent_state("coding_agent", status="running", task="task A", started_at=time.time())
-        ag.set_agent_state("generate_video", status="done", task="task B", result="video ok")
+        ag.set_agent_state(
+            "coding_agent",
+            group_id=101,
+            status="running",
+            task="task A",
+            started_at=time.time(),
+        )
+        ag.set_agent_state(
+            "generate_video",
+            group_id=101,
+            status="done",
+            task="task B",
+            result="video ok",
+        )
 
         try:
             matcher = MagicMock()
-            matcher.finish = MagicMock(side_effect=_finish_that_stops)
+            matcher.finish = AsyncMock(side_effect=_finish_that_stops)
             msg = _run_and_capture_msg(matcher)
             assert "coding_agent" in msg
             assert "执行中" in msg
@@ -269,3 +330,54 @@ class TestHandleAgents:
             assert "generate_video" not in msg
         finally:
             ag._AGENT_STATES.clear()
+
+    def test_admin_can_select_another_group_without_leaking_current_group(self):
+        ag = _get_agents_module()
+        ag._AGENT_STATES.clear()
+        ag.set_agent_state(
+            "coding_agent",
+            group_id=101,
+            status="running",
+            task="current group task",
+            started_at=time.time(),
+        )
+        ag.set_agent_state(
+            "coding_agent",
+            group_id=202,
+            status="running",
+            task="selected group task",
+            started_at=time.time(),
+        )
+        matcher = MagicMock()
+        matcher.finish = AsyncMock(side_effect=_finish_that_stops)
+
+        try:
+            msg = _run_and_capture_msg(
+                matcher,
+                args_text="202",
+                user_id="12345",
+            )
+            assert "selected group task" in msg
+            assert "current group task" not in msg
+        finally:
+            ag._AGENT_STATES.clear()
+
+    def test_non_admin_cannot_select_another_group(self):
+        matcher = MagicMock()
+        matcher.finish = AsyncMock(side_effect=_finish_that_stops)
+
+        msg = _run_and_capture_msg(matcher, args_text="202", user_id="77")
+
+        assert msg == "只有管理员可以访问其他群的数据。"
+
+    def test_invalid_group_argument_is_rejected(self):
+        matcher = MagicMock()
+        matcher.finish = AsyncMock(side_effect=_finish_that_stops)
+
+        msg = _run_and_capture_msg(
+            matcher,
+            args_text="202 extra",
+            user_id="12345",
+        )
+
+        assert "群号必须是正整数" in msg

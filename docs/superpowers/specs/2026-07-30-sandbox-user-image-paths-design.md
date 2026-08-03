@@ -2,7 +2,7 @@
 
 ## Goal
 
-Make ordinary QQ images available to Hatsume's persistent Kali sandbox and
+Make ordinary QQ images available to Hatsume's persistent Ubuntu sandbox and
 represent them in the normalized human message as deterministic absolute paths.
 The chat model will no longer receive inline base64 image content blocks. It can
 inspect a saved image through `view_image` or operate on it with sandbox tools.
@@ -76,7 +76,7 @@ interpolated into a sandbox command or destination path.
 ### Role prompt
 
 `prompts.py` will explain that Markdown targets under
-`/tmp/hatsume-user-images` are files inside the Kali sandbox. To inspect an
+`/tmp/hatsume-user-images` are files inside the Ubuntu sandbox. To inspect an
 image, the model must call `view_image` with the `file://` form of the absolute
 path, such as `file:///tmp/hatsume-user-images/123456-1.png`. Shell and media
 tools may use the corresponding sandbox path according to their existing
@@ -101,7 +101,7 @@ URL. If recovery also fails, the reply keeps that temporary URL.
 
 The application does not delete files from `/tmp/hatsume-user-images` on
 conversation finish, `/clear`, delayed container stop, or process shutdown. The
-Kali environment or `/resetsandbox` may remove them as part of the existing
+Ubuntu environment or `/resetsandbox` may remove them as part of the existing
 container lifecycle.
 
 ## Concurrency and Ordering

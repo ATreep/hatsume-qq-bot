@@ -2,7 +2,7 @@
 
 ## 这是什么
 
-Hatsume 是一个面向 QQ 群聊的 AI 机器人，运行于 Python 3.12+，以 NoneBot2 插件形式通过 OneBot V11 接入 QQ。项目使用 LangGraph 编排多轮对话，使用 SQLite 保存长期记忆与定时任务，并提供多模态消息、联网搜索、图片与视频生成、Docker 沙盒、后台 Agent、运行时 Skill、群成员搜索和群聊互动等能力。
+Hatsume 是一个面向 QQ 群聊的 AI 机器人，运行于 Python 3.12+，以 NoneBot2 插件形式通过 OneBot V11 接入 QQ。项目使用 LangGraph 编排多轮对话：同一群内串行处理，不同群可并行；长期记忆、自动回复 Timer、可变 Skill、角色代理、后台 Agent、点赞和 Docker 沙盒均按群隔离。SQLite 保存长期记忆与定时任务，机器人还提供多模态消息、联网搜索、图片与视频生成、群成员搜索和白名单群聊互动等能力。
 
 核心代码位于 `hatsume/plugins/hatsume-plugin/`。完整功能、运行流程、模块职责和测试索引见 `docs/arch.md`。
 

@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import base64
-import time
+from datetime import datetime
 
 from nonebot.adapters import Bot
 from nonebot.adapters.onebot.v11 import Message, MessageSegment, PokeNotifyEvent
 
+from ..config import ADMIN_QQ_ID
+from ..group_runtime import bind_group_runtime, group_runtime_registry
 from ..infra import cleanup_persistent_container, run_cmd
-from ..models import choose_video_model, generate_video_for
-from ..state import ConversationState
 
 
 # ---- Section 1: Poke Handler ----
@@ -22,39 +22,78 @@ async def handle_poke(bot: Bot, event: PokeNotifyEvent) -> None:
     Silently ignores errors (Photos not running, album empty, etc.) to avoid
     spamming the group chat on every poke.
     """
-    from ..graph.tools import _export_random_acg_photo
+    group_id = int(getattr(event, "group_id", 0))
+    if group_id <= 0:
+        return
+    from ..config import POKE_GROUP_WHITELIST
 
-    host_file = await _export_random_acg_photo()
+    if group_id not in POKE_GROUP_WHITELIST:
+        return
+
+    from ..graph.tools import (
+        _cleanup_exported_acg_photo,
+        _export_random_acg_photo,
+    )
+
+    runtime = group_runtime_registry.bind_bot(group_id, bot)
+    with bind_group_runtime(runtime):
+        host_file = await _export_random_acg_photo()
     if host_file.startswith("❌"):
         # All failures are silent — don't spam the chat
         return
 
     try:
-        with open(host_file, "rb") as f:
-            img_data = f.read()
-        b64 = base64.b64encode(img_data).decode("ascii")
-        await bot.send(event, MessageSegment.image(f"base64://{b64}"))
-    except Exception:
-        # File read / network errors: also silent
-        return
+        try:
+            with open(host_file, "rb") as f:
+                img_data = f.read()
+            b64 = base64.b64encode(img_data).decode("ascii")
+            await bot.send(event, MessageSegment.image(f"base64://{b64}"))
+        except Exception:
+            # File read / network errors: also silent
+            return
+    finally:
+        _cleanup_exported_acg_photo(host_file)
 
 
 # ---- Section 2: Command Handlers ----
 
-_conv_state: ConversationState | None = None
+
+async def _resolve_target_group(
+    event,
+    matcher,
+    args: Message,
+    *,
+    usage: str,
+    allow_cross_group: bool = True,
+) -> int:
+    text = args.extract_plain_text().strip()
+    if not text:
+        return int(event.group_id)
+    parts = text.split()
+    try:
+        if len(parts) != 1:
+            raise ValueError
+        group_id = int(parts[0])
+        if group_id <= 0:
+            raise ValueError
+    except ValueError:
+        await matcher.finish(f"群号必须是正整数。\n用法：{usage}")
+        return int(event.group_id)
+
+    if group_id != int(event.group_id):
+        if not allow_cross_group or str(event.get_user_id()) != str(ADMIN_QQ_ID):
+            await matcher.finish("只有管理员可以访问其他群的数据。")
+            return int(event.group_id)
+    return group_id
 
 
-def _wire_conv_state(state: ConversationState) -> None:
-    """Wire the shared ConversationState for rate limiting."""
-    global _conv_state
-    _conv_state = state
-
-
-async def handle_shell(matcher, args: Message) -> None:
+async def handle_shell(event, matcher, args: Message) -> None:
     cmd = args.extract_plain_text()
-    print("Start running shell.")
-    out = await run_cmd(cmd)
-    print("Running finished.")
+    runtime = group_runtime_registry.get_or_create(event.group_id)
+    with bind_group_runtime(runtime):
+        print("Start running shell.")
+        out = await run_cmd(cmd, group_id=event.group_id)
+        print("Running finished.")
     await matcher.finish(out)
 
 
@@ -78,11 +117,77 @@ async def handle_model(matcher, args: Message) -> None:
     )
 
 
+async def handle_todo(event, matcher, args: Message) -> None:
+    """List active todos for the current group or an admin-selected group."""
+    text = args.extract_plain_text().strip()
+    target_group_id = event.group_id
+    if text:
+        parts = text.split()
+        try:
+            if len(parts) != 1:
+                raise ValueError
+            target_group_id = int(parts[0])
+            if target_group_id <= 0:
+                raise ValueError
+        except ValueError:
+            await matcher.finish("群号必须是正整数。\n用法：/todo [群号]")
+            return
+
+        if target_group_id != event.group_id:
+            from ..config import ADMIN_QQ_ID
+
+            if str(event.get_user_id()) != str(ADMIN_QQ_ID):
+                await matcher.finish("只有管理员可以查看其他群的待办。")
+                return
+
+    from ..todo import get_store
+
+    try:
+        store = get_store()
+        store.delete_expired()
+        items = store.list_items(target_group_id)
+    except Exception as exc:
+        print(f"❌ todo command failed: {exc}")
+        await matcher.finish("❌ 待办数据库暂时不可用。")
+        return
+
+    is_current_group = target_group_id == event.group_id
+    scope = "当前群" if is_current_group else f"群 {target_group_id}"
+    separator = "" if is_current_group else " "
+    if not items:
+        await matcher.finish(f"{scope}{separator}没有活动待办。")
+        return
+
+    lines = [f"{scope}{separator}活动待办（{len(items)} 项）："]
+    for index, item in enumerate(items, start=1):
+        created_at = datetime.fromtimestamp(float(item["created_at"])).strftime(
+            "%Y/%m/%d %H:%M:%S"
+        )
+        lines.extend(
+            [
+                "",
+                f"{index}. 待办 ID：{item['id']}",
+                "发起人："
+                f"{item['initiator_group_name']}（QQ：{item['initiator_qq_id']}）",
+                f"创建时间：{created_at}",
+                f"待办内容：{item['content']}",
+                f"完成条件：\n{item['finish_condition']}",
+            ]
+        )
+
+    await matcher.finish("\n".join(lines))
+
+
 async def handle_proxy_command(event, matcher, args: Message) -> None:
     """Create, inspect, or terminate the single RAM character proxy."""
+    runtime = group_runtime_registry.get_or_create(event.group_id)
+    with bind_group_runtime(runtime):
+        await _handle_proxy_command_bound(event, matcher, args)
+
+
+async def _handle_proxy_command_bound(event, matcher, args: Message) -> None:
     from ..graph.tools import (
         create_character_proxy,
-        set_current_group_id,
         terminate_character_proxy,
     )
 
@@ -112,7 +217,6 @@ async def handle_proxy_command(event, matcher, args: Message) -> None:
             await matcher.finish("QQ号必须是正整数。")
             return
 
-        set_current_group_id(event.group_id)
         tool_input = {"proxied_user_id": proxied_user_id}
         if during_time is not None:
             tool_input["during_time"] = during_time
@@ -146,42 +250,19 @@ async def handle_proxy_command(event, matcher, args: Message) -> None:
     await matcher.finish(help_text)
 
 
-async def handle_generate_video(matcher, args: Message) -> None:
-    prompt = args.extract_plain_text()
-
-    input_img: str | None = None
-    if args.count("image") > 0:
-        first_img = next(args.include("image")) # type: ignore
-        url = first_img.data.get("url")
-        if url:
-            input_img = url
-
-    if _conv_state is not None and _conv_state.is_video_rate_limited():
-        await matcher.finish("❌ 视频生成请求过于频繁，稍后再试。")
-
-    print("Generate video: ", prompt)
-    try:
-        url = await generate_video_for(
-            prompt, image_url=input_img, model=choose_video_model()
-        )
-        if _conv_state is not None:
-            _conv_state.last_video_time = time.time()
-    except Exception as e:
-        await matcher.finish("❌ 视频生成失败。\n" + str(e))
-    else:
-        if url is None:
-            await matcher.finish("❌ 视频生成失败，请稍后再试。")
-        await matcher.finish(MessageSegment.video(file=url)) # type: ignore
-
-
 async def handle_timer(bot, event, matcher, args: Message) -> None:
+    runtime = group_runtime_registry.bind_bot(event.group_id, bot)
+    with bind_group_runtime(runtime):
+        await _handle_timer_bound(bot, event, matcher, args)
+
+
+async def _handle_timer_bound(bot, event, matcher, args: Message) -> None:
     """Handle /timer command: list, delete, update."""
-    from ..graph.tools import get_timer_overview, set_current_group_id
+    from ..graph.tools import get_timer_overview
     from ..timer import get_store
     from ..timer.executor import add_jobs_for_task, cancel_task_jobs
     from ..timer.schedule import ScheduleValidationError, build_at_plan
 
-    set_current_group_id(event.group_id)
     store = get_store()
     text = args.extract_plain_text().strip()
     parts = text.split() if text else []
@@ -307,15 +388,23 @@ async def handle_timer(bot, event, matcher, args: Message) -> None:
         await matcher.finish(HELP)
 
 
-async def handle_list_skills(matcher, args: Message) -> None:
-    """Handle /skills command: list all available skills."""
+async def handle_list_skills(event, matcher, args: Message) -> None:
+    """Handle /skills [group_id] without creating target-group resources."""
     from ..skills import get_skill_manager
 
-    skills = get_skill_manager().list_skills()
+    target_group_id = await _resolve_target_group(
+        event,
+        matcher,
+        args,
+        usage="/skills [群号]",
+    )
+    skills = get_skill_manager(target_group_id, create_local=False).list_skills()
     if not skills:
         await matcher.finish("当前没有可用技能。")
+        return
 
-    lines = ["当前可用技能："]
+    scope = "当前群" if target_group_id == event.group_id else f"群 {target_group_id}"
+    lines = [f"{scope}可用技能："]
     for s in skills:
         lines.append(f"- {s['name']}: {s['description']}")
     await matcher.finish("\n\n".join(lines))
@@ -354,24 +443,47 @@ async def handle_membersearch(bot, event, matcher, args: Message) -> None:
     await matcher.finish("\n".join(lines))
 
 
-async def handle_resetsandbox(matcher) -> None:
-    """Handle /resetsandbox command: cleanup the persistent Docker sandbox."""
-    cleanup_persistent_container()
-    await matcher.finish("✅ Sandbox 容器已重置。")
+async def handle_resetsandbox(event, matcher, args: Message) -> None:
+    """Reset only the admin-selected group's existing Docker sandbox."""
+    if str(event.get_user_id()) != str(ADMIN_QQ_ID):
+        await matcher.finish("只有管理员可以重置 Sandbox。")
+        return
+    target_group_id = await _resolve_target_group(
+        event,
+        matcher,
+        args,
+        usage="/resetsandbox [群号]",
+    )
+    from ..graph.agents import shutdown_group_agents
+
+    await shutdown_group_agents(target_group_id)
+    removed = await cleanup_persistent_container(target_group_id)
+    if not removed:
+        await matcher.finish(f"群 {target_group_id} 当前没有 Sandbox 容器。")
+        return
+    await matcher.finish(f"✅ 群 {target_group_id} 的 Sandbox 容器已重置。")
 
 
-async def handle_agents(matcher) -> None:
-    """Handle /agents command: display only currently running agents."""
+async def handle_agents(event, matcher, args: Message) -> None:
+    """Handle /agents [group_id] with group-filtered state."""
     from datetime import datetime, timedelta, timezone
 
     from ..graph.agents import get_running_instances
 
-    running = get_running_instances()
+    target_group_id = await _resolve_target_group(
+        event,
+        matcher,
+        args,
+        usage="/agents [群号]",
+    )
+    running = get_running_instances(target_group_id)
     if not running:
         await matcher.finish("当前没有正在运行的 Agent。")
+        return
 
     tz_shanghai = timezone(timedelta(hours=8))
-    lines = ["🤖 当前正在运行的 Agent："]
+    scope = "当前群" if target_group_id == event.group_id else f"群 {target_group_id}"
+    lines = [f"🤖 {scope}正在运行的 Agent："]
 
     for inst in running:
         name = inst.get("name", "unknown")
@@ -388,49 +500,6 @@ async def handle_agents(matcher) -> None:
     await matcher.finish("\n".join(lines))
 
 
-async def handle_clear(matcher) -> None:
-    """Handle /clear command: forcibly end the current conversation and clear all queues."""
-    if _conv_state is None:
-        await matcher.finish("❌ 对话状态未初始化，无法清除。")
-        return
-
-    was_chatting = _conv_state.is_chatting
-
-    # Cancel any pending debounce timer
-    if _conv_state._debounce_cancel is not None:
-        _conv_state._debounce_cancel.set()
-        _conv_state._debounce_cancel = None
-
-    # Cancel the running graph task if active
-    if _conv_state._graph_task is not None and not _conv_state._graph_task.done():
-        _conv_state._graph_task.cancel()
-        print("🛑 [clear] Graph task cancelled")
-
-    # End the conversation (sets is_chatting=False, clears chat_peers)
-    _conv_state.end_conversation()
-
-    # Clear all message queues — always, regardless of conversation state
-    _conv_state.idle_queue.clear()
-    _conv_state.idle_source_queue.clear()
-    _conv_state.pending_queue.clear()
-    _conv_state.pending_source_queue.clear()
-    _conv_state.human_queue.clear()
-    _conv_state.human_source_queue.clear()
-
-    # Reset memory recording context
-    _conv_state.transcript.clear()
-    _conv_state.source_map.clear()
-
-    # Reset runtime flags
-    _conv_state.is_graph_running = False
-    _conv_state.face_cooling_count = 0
-
-    if was_chatting:
-        await matcher.finish("✅ 对话已强制结束，上下文已清除。")
-    else:
-        await matcher.finish("✅ 上下文已清除。（当前无活跃对话）")
-
-
 async def handle_autoresponse(bot, event, matcher, args: Message) -> None:
     """Immediately trigger an auto-response execution (debug command).
 
@@ -445,6 +514,7 @@ async def handle_autoresponse(bot, event, matcher, args: Message) -> None:
 
     custom_prompt = args.extract_plain_text().strip()
     group_id = event.group_id
+    group_runtime_registry.bind_bot(event.group_id, bot)
     if args.extract_plain_text().strip() == "prod":
         prompt = get_auto_response_prompt()
         group_id = AUTO_RESPONSE_GROUP_ID

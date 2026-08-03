@@ -23,6 +23,7 @@ from .config import (
 class ConversationState:
     """Encapsulates all mutable conversation state."""
 
+    group_id: int
     is_chatting: bool = False
     chat_peers: set[str] = field(default_factory=set)
     end_requested: bool = False
@@ -76,8 +77,14 @@ class ConversationState:
     def is_video_rate_limited(self) -> bool:
         return time.time() - self.last_video_time < VIDEO_RATE_LIMIT_SECONDS
 
+    def update_video_time(self) -> None:
+        self.last_video_time = time.time()
+
     def is_generate_image_rate_limited(self) -> bool:
         return time.time() - self.last_generate_image_time < GENERATE_IMAGE_RATE_LIMIT_SECONDS
+
+    def update_generate_image_time(self) -> None:
+        self.last_generate_image_time = time.time()
 
     def flush_idle_to_auxiliary(self) -> tuple[list[dict], list[dict]]:
         messages = self.idle_queue.copy()

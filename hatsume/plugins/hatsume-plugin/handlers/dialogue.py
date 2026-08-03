@@ -29,15 +29,18 @@ from ..config import (
     USER_INPUT_CONFIRM_DURING_TIME,
 )
 from ..graph.builder import graph
+from ..group_runtime import (
+    GroupRuntime,
+    bind_group_runtime,
+    group_runtime_registry,
+)
 from ..infra import find_sandbox_user_image, save_sandbox_user_image
 from ..graph.nodes import (
     append_auxiliary_message,
-    bind_state,
     get_role_sys_prompt,
     make_system_trigger_message,
     set_current_query_user_id,
 )
-from ..state import ConversationState
 from ..utils import (
     CQ_AT_PATTERN,
     build_forward_json,
@@ -74,6 +77,8 @@ async def _store_user_image(
     url: str,
     message_id: int,
     image_order: int,
+    *,
+    group_id: int,
 ) -> str:
     response = requests.get(url, timeout=10)
     response.raise_for_status()
@@ -97,6 +102,7 @@ async def _store_user_image(
         message_id,
         image_order,
         extension,
+        group_id=group_id,
     )
 
 
@@ -106,12 +112,17 @@ async def _resolve_user_image_markdown(
     image_order: int,
     *,
     find_existing: bool,
+    group_id: int,
 ) -> str:
     temporary_markdown = f" ![图片（临时链接）]({url}) "
 
     if find_existing:
         try:
-            existing_path = await find_sandbox_user_image(message_id, image_order)
+            existing_path = await find_sandbox_user_image(
+                message_id,
+                image_order,
+                group_id=group_id,
+            )
             if existing_path is not None:
                 return f" ![图片]({existing_path}) "
         except Exception as exc:
@@ -119,7 +130,12 @@ async def _resolve_user_image_markdown(
             traceback.print_exc()
 
     try:
-        sandbox_path = await _store_user_image(url, message_id, image_order)
+        sandbox_path = await _store_user_image(
+            url,
+            message_id,
+            image_order,
+            group_id=group_id,
+        )
     except Exception as exc:
         print("❌ Cannot save image to sandbox: ", exc)
         traceback.print_exc()
@@ -169,7 +185,9 @@ def _format_forward_for_reply(messages: list[dict[str, Any]], max_items: int = 1
 
 async def get_human_message(bot: Bot, event: MessageEvent) -> tuple[list[dict], dict]:
     """Parse a QQ event into (content_parts, source_entry)."""
-    group_id = event.group_id if isinstance(event, GroupMessageEvent) else None
+    if not isinstance(event, GroupMessageEvent):
+        raise ValueError("Hatsume only accepts group messages")
+    group_id = event.group_id
     user_name = await get_group_member_name(bot, group_id, event.user_id)
     msg = event.original_message
 
@@ -219,6 +237,7 @@ async def get_human_message(bot: Bot, event: MessageEvent) -> tuple[list[dict], 
                         event.reply.message_id,
                         reply_image_order,
                         find_existing=True,
+                        group_id=group_id,
                     )
                 case "forward":
                     reply_has_forward = True
@@ -271,6 +290,7 @@ async def get_human_message(bot: Bot, event: MessageEvent) -> tuple[list[dict], 
                     event.message_id,
                     image_order,
                     find_existing=False,
+                    group_id=group_id,
                 )
             case "forward":
                 forward_id_in_loop = msg_seg.data.get("id", "")
@@ -341,16 +361,13 @@ async def get_human_message(bot: Bot, event: MessageEvent) -> tuple[list[dict], 
 
 # ---- Section 3: Conversation Orchestration ----
 
-# Module-level conversation state
-conv_state = ConversationState()
-
-# Wire commands module to share the same state
-from .tools import _wire_conv_state  # noqa: E402
-_wire_conv_state(conv_state)
-
-
 def _start_conv_for_trigger(
-    user_id: int, group_id: int, notify_msg: str, *, trigger_type: str = "agent",
+    user_id: int,
+    group_id: int,
+    notify_msg: str,
+    *,
+    trigger_type: str = "agent",
+    bot: Bot | None = None,
 ) -> None:
     """Start a new conversation for an external trigger when not currently chatting.
 
@@ -359,14 +376,15 @@ def _start_conv_for_trigger(
     Agent triggers use user_id=None when user_id==0 (no specific user to notify).
     Timer triggers always pass the effective user_id.
     """
-    from nonebot import get_bot
-    from ..graph.tools import (
-        configure_tool_callbacks as configure_tools,
-        set_current_group_id,
-    )
+    from ..graph.tools import configure_tool_callbacks as configure_tools
 
-    bot = get_bot()
-    set_current_group_id(group_id)
+    runtime = (
+        group_runtime_registry.bind_bot(group_id, bot)
+        if bot is not None
+        else group_runtime_registry.get_or_create(group_id)
+    )
+    target_bot = bot if bot is not None else group_runtime_registry.get_bot(group_id)
+    conv_state = runtime.conversation
 
     async def _send_to_group(msg, reply_to_message_id=None):
         if msg == "[CONVERSATION END]":
@@ -374,7 +392,7 @@ def _start_conv_for_trigger(
             return
         try:
             await _send_group_ai_message(
-                bot,
+                target_bot,
                 group_id,
                 msg,
                 reply_to_message_id=reply_to_message_id,
@@ -388,13 +406,17 @@ def _start_conv_for_trigger(
     if trigger_type == "agent" and user_id == 0:
         effective_user_id = None
 
-    asyncio.create_task(
-        start_new_conversation(
-            conv_state, _send_to_group, configure_tools,
-            user_id=effective_user_id,
-            system_task_text=notify_msg,
-        )
-    )
+    async def _run() -> None:
+        with bind_group_runtime(runtime):
+            await start_new_conversation(
+                runtime,
+                _send_to_group,
+                configure_tools,
+                user_id=effective_user_id,
+                system_task_text=notify_msg,
+            )
+
+    asyncio.create_task(_run())
 
 
 # Register the callback with tools.py (must happen after imports resolve)
@@ -447,6 +469,8 @@ async def handle_group_increase(
         get_qq_avatar_url(event.user_id),
     )
 
+    runtime = group_runtime_registry.bind_bot(event.group_id, bot)
+    conv_state = runtime.conversation
     conversation_exists = conv_state.is_chatting or conv_state.is_graph_running
     conv_state.activate_chat(event.get_session_id())
 
@@ -461,6 +485,7 @@ async def handle_group_increase(
         event.group_id,
         prompt,
         trigger_type="group_increase",
+        bot=bot,
     )
 
 
@@ -468,7 +493,7 @@ async def handle_group_increase(
 # Conversation startup (merged from handlers/conversation.py)
 # ---------------------------------------------------------------------------
 async def start_new_conversation(
-    conv_state: ConversationState,
+    runtime: GroupRuntime,
     ai_callback,
     configure_tools_fn,
     *,
@@ -481,52 +506,61 @@ async def start_new_conversation(
     """Set up and invoke the LangGraph conversation from scratch."""
     from langchain.messages import SystemMessage
 
-    bind_state(conv_state)
-    conv_state.end_requested = False
+    conv_state = runtime.conversation
+    with bind_group_runtime(runtime):
+        async with runtime.graph_start_lock:
+            conv_state.end_requested = False
 
-    configure_tools_fn(
-        user_id,
-        answer_fn=ai_callback,
-        is_video_rate_limited=conv_state.is_video_rate_limited,
-        update_video_time=lambda: setattr(conv_state, "last_video_time", time.time()),
-        is_generate_image_rate_limited=conv_state.is_generate_image_rate_limited,
-        update_generate_image_time=lambda: setattr(conv_state, "last_generate_image_time", time.time()),
-        end_conversation_fn=conv_state.request_end_conversation,
-    )
+            configure_tools_fn(
+                user_id,
+                answer_fn=ai_callback,
+                is_video_rate_limited=conv_state.is_video_rate_limited,
+                update_video_time=conv_state.update_video_time,
+                is_generate_image_rate_limited=conv_state.is_generate_image_rate_limited,
+                update_generate_image_time=conv_state.update_generate_image_time,
+                end_conversation_fn=conv_state.request_end_conversation,
+            )
 
-    if flush_idle:
-        idle_msgs, idle_srcs = conv_state.flush_idle_to_auxiliary()
-        append_auxiliary_message(idle_msgs, idle_srcs)
+            if flush_idle:
+                idle_msgs, idle_srcs = conv_state.flush_idle_to_auxiliary()
+                append_auxiliary_message(idle_msgs, idle_srcs)
 
-    if messages is not None:
-        conv_state.human_queue.extend(messages)
-        conv_state.human_source_queue.extend(sources or [])
+            if messages is not None:
+                conv_state.human_queue.extend(messages)
+                conv_state.human_source_queue.extend(sources or [])
 
-    if system_task_text is not None:
-        conv_state.human_queue.append(
-            make_system_trigger_message(system_task_text, "system_task")
-        )
+            if system_task_text is not None:
+                conv_state.human_queue.append(
+                    make_system_trigger_message(system_task_text, "system_task")
+                )
 
-    if user_id is not None:
-        set_current_query_user_id(user_id)
+            existing_task = conv_state._graph_task
+            if isinstance(existing_task, asyncio.Task) and not existing_task.done():
+                return
 
-    conv_state.is_graph_running = True
+            if user_id is not None:
+                set_current_query_user_id(user_id)
 
-    # Run graph in a cancellable task so /clear can stop it
-    loop = asyncio.get_running_loop()
-    conv_state._graph_task = loop.create_task(
-        graph.ainvoke(
-            {"messages": [SystemMessage(get_role_sys_prompt())]},
-            {"recursion_limit": 100},
-        )
-    )
-    try:
-        await conv_state._graph_task
-    except asyncio.CancelledError:
-        print("🛑 [graph] Conversation cancelled by /clear")
-    finally:
-        conv_state._graph_task = None
-        conv_state.is_graph_running = False
+            conv_state.is_graph_running = True
+
+            async def _invoke_graph() -> None:
+                with bind_group_runtime(runtime):
+                    await graph.ainvoke(
+                        {"messages": [SystemMessage(get_role_sys_prompt())]},
+                        {"recursion_limit": 100},
+                    )
+
+            graph_task = asyncio.create_task(_invoke_graph())
+            conv_state._graph_task = graph_task
+
+        try:
+            await graph_task
+        except asyncio.CancelledError:
+            print(f"🛑 [graph:{runtime.group_id}] Conversation cancelled")
+        finally:
+            if conv_state._graph_task is graph_task:
+                conv_state._graph_task = None
+                conv_state.is_graph_running = False
 
 
 # ---------------------------------------------------------------------------
@@ -677,7 +711,9 @@ async def handle_ai_message(
         return
 
     if msg == "[CONVERSATION END]":
-        conv_state.end_conversation()
+        runtime = group_runtime_registry.get_existing(group_id)
+        if runtime is not None:
+            runtime.conversation.end_conversation()
         print("Current conversation ends")
         return
 
@@ -711,83 +747,92 @@ async def handle_ai_message(
 # ---------------------------------------------------------------------------
 # Chat entry points
 # ---------------------------------------------------------------------------
-async def start_chat(matcher, event: GroupMessageEvent) -> None:
+async def start_chat(bot: Bot, matcher, event: GroupMessageEvent) -> None:
     print("call start_chat")
-    conv_state.activate_chat(event.get_session_id())
+    runtime = group_runtime_registry.bind_bot(event.group_id, bot)
+    runtime.conversation.activate_chat(event.get_session_id())
     await matcher.finish()
 
 
 async def user_chat_handle(bot: Bot, event: GroupMessageEvent, user_chat_matcher) -> None:
     print("call user_chat")
-    from ..graph.tools import set_current_group_id
-    set_current_group_id(event.group_id)
+    runtime = group_runtime_registry.bind_bot(event.group_id, bot)
+    conv_state = runtime.conversation
+    with bind_group_runtime(runtime):
+        from ..character_proxy import activate_character_proxy_peer
 
-    from ..character_proxy import activate_character_proxy_peer
+        activate_character_proxy_peer(
+            conv_state,
+            message=event.original_message,
+            sender_id=event.user_id,
+            session_id=event.get_session_id(),
+        )
 
-    activate_character_proxy_peer(
-        conv_state,
-        message=event.original_message,
-        sender_id=event.user_id,
-        session_id=event.get_session_id(),
-    )
-
-    session_id = event.get_session_id()
-    if session_id not in conv_state.chat_peers:
-        auxiliary_messages, auxiliary_source_entry = await get_human_message(bot, event)
-        append_auxiliary_message(auxiliary_messages, [auxiliary_source_entry])
-        print("Collected this auxiliary message.")
-        return
-    print("Detected chat peers.")
-
-    pending_messages, pending_source_entry = await get_human_message(bot, event)
-    conv_state.pending_queue.extend(pending_messages)
-    conv_state.pending_source_queue.append(pending_source_entry)
-    print("💬 Added a new message into pending queue")
-
-    async def send():
-        debounce_event = asyncio.Event()
-        conv_state._debounce_cancel = debounce_event
-        try:
-            print(f"⏱️ Waiting for user input confirmation for {USER_INPUT_CONFIRM_DURING_TIME} seconds...")
-            await asyncio.wait_for(debounce_event.wait(), timeout=USER_INPUT_CONFIRM_DURING_TIME)
+        session_id = event.get_session_id()
+        if session_id not in conv_state.chat_peers:
+            auxiliary_messages, auxiliary_source_entry = await get_human_message(bot, event)
+            append_auxiliary_message(auxiliary_messages, [auxiliary_source_entry])
+            print("Collected this auxiliary message.")
             return
-        except asyncio.TimeoutError:
-            pass
+        print("Detected chat peers.")
 
+        pending_messages, pending_source_entry = await get_human_message(bot, event)
+        conv_state.pending_queue.extend(pending_messages)
+        conv_state.pending_source_queue.append(pending_source_entry)
+        print("💬 Added a new message into pending queue")
 
-        try:
-            print("💬 Flush pending queue and enter LangGraph.")
-            pending_msgs, pending_srcs = conv_state.flush_pending()
-
-            if conv_state.is_graph_running:
-                print("Graph already running, feeding messages to queue...")
-                conv_state.human_queue.extend(pending_msgs)
-                conv_state.human_source_queue.extend(pending_srcs)
-                return
-
-            from ..graph.tools import configure_tool_callbacks as configure_tools
-
-            async def ai_cb(msg, reply_to_message_id=None):
-                await handle_ai_message(
-                    msg,
-                    bot,
-                    group_id=event.group_id,
-                    reply_to_message_id=reply_to_message_id,
+        async def send():
+            debounce_event = asyncio.Event()
+            conv_state._debounce_cancel = debounce_event
+            try:
+                print(
+                    "⏱️ Waiting for user input confirmation for "
+                    f"{USER_INPUT_CONFIRM_DURING_TIME} seconds..."
                 )
+                await asyncio.wait_for(
+                    debounce_event.wait(),
+                    timeout=USER_INPUT_CONFIRM_DURING_TIME,
+                )
+                return
+            except asyncio.TimeoutError:
+                pass
 
-            conv_state.ai_answer = ai_cb
-            await start_new_conversation(
-                conv_state, ai_cb, configure_tools,
-                user_id=event.user_id, flush_idle=True,
-                messages=pending_msgs, sources=pending_srcs,
-            )
-        except Exception as e:
-            print(f"Error in send() task: {e}")
-            import traceback
-            traceback.print_exc()
+            try:
+                print("💬 Flush pending queue and enter LangGraph.")
+                pending_msgs, pending_srcs = conv_state.flush_pending()
 
-    if conv_state._debounce_cancel is not None:
-        conv_state._debounce_cancel.set()
+                if conv_state.is_graph_running:
+                    print("Graph already running, feeding messages to queue...")
+                    conv_state.human_queue.extend(pending_msgs)
+                    conv_state.human_source_queue.extend(pending_srcs)
+                    return
 
-    print("create task: send")
-    await send()
+                from ..graph.tools import configure_tool_callbacks as configure_tools
+
+                async def ai_cb(msg, reply_to_message_id=None):
+                    await handle_ai_message(
+                        msg,
+                        bot,
+                        group_id=event.group_id,
+                        reply_to_message_id=reply_to_message_id,
+                    )
+
+                conv_state.ai_answer = ai_cb
+                await start_new_conversation(
+                    runtime,
+                    ai_cb,
+                    configure_tools,
+                    user_id=event.user_id,
+                    flush_idle=True,
+                    messages=pending_msgs,
+                    sources=pending_srcs,
+                )
+            except Exception as e:
+                print(f"Error in send() task: {e}")
+                traceback.print_exc()
+
+        if conv_state._debounce_cancel is not None:
+            conv_state._debounce_cancel.set()
+
+        print("create task: send")
+        await send()

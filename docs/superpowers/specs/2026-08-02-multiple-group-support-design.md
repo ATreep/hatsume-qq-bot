@@ -30,7 +30,7 @@ and Todos will retain their existing group-scoped persistence.
   memory, Skills, Agents, proxy state, media limits, or sandbox resources from
   crossing group boundaries.
 - Give every group a Docker container named
-  `hatsume-space-kali-<group-id>`.
+  `hatsume-space-<group-id>`.
 - Preserve one common model/configuration layer, immutable graph topology,
   immutable tool and Agent definitions, common read-only Skills, scheduler, and
   storage engines.
@@ -226,7 +226,6 @@ There is no `/clear` command. The existing conversation finish path and
 | `utils/security.py` | Pure credential masking |
 | `virtual/image/Dockerfile` | All groups use the same immutable image |
 | `virtual/image_pack.sh` | Builds the common image |
-| `virtual/install_necessaries.sh` | Defines common image dependencies |
 
 Updated modules are still common Python code. The distinction is that they will
 own, resolve, or enforce group-isolated data after the change. Intentionally
@@ -405,10 +404,10 @@ IDs or counters in command output.
 The container name is derived only from a validated positive integer group ID:
 
 ```text
-hatsume-space-kali-<group-id>
+hatsume-space-<group-id>
 ```
 
-All groups use the same immutable `hatsume-space-kali:1.0` image. No container
+All groups use the same immutable `hatsume-space:1.0` image. No container
 filesystem or writable volume is shared between groups.
 
 ### Container Runtime State
@@ -447,7 +446,7 @@ container filesystems.
 2. Look up existing container state without starting it.
 3. Cancel tracked foreground/background processes and stdin waiters.
 4. Cancel its delayed-stop task and clear its refcount.
-5. Remove only `hatsume-space-kali-<group-id>`.
+5. Remove only `hatsume-space-<group-id>`.
 6. Remove its in-process container state.
 
 Other groups continue running. A missing container returns a clear no-sandbox
@@ -527,7 +526,7 @@ Tests remain offline and deterministic. Async concurrency tests use
 ### Container And Command Tests
 
 - Every Docker command receiving exactly
-  `hatsume-space-kali-<group-id>`.
+  `hatsume-space-<group-id>`.
 - Independent start locks, active flags, reference counts, stop tasks, processes,
   logs, files, and user-image copy targets.
 - No read or write of `virtual/script.sh` during concurrent foreground or

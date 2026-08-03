@@ -143,6 +143,7 @@ REPLY_MAX_LENGTH: int = 200
 MAX_FORWARD_DEPTH: int = 3
 FORWARD_API_TIMEOUT_SECONDS: int = 10
 LONG_MSG_THRESHOLD: int = 500
+POKE_GROUP_WHITELIST: frozenset[int] = frozenset({738458661})
 
 # ---------------------------------------------------------------------------
 # Todo list
@@ -186,5 +187,7 @@ TIMER_MAX_EXACT_POINTS: int = 10
 # Skill module
 # ---------------------------------------------------------------------------
 SKILLS_DIR: Path = Path(__file__).resolve().parents[3] / "data" / "hatsume-plugin" / "skills"
+COMMON_SKILLS_DIR: Path = SKILLS_DIR
+GROUP_SKILLS_DIR: Path = SKILLS_DIR / "groups"
 
-CONTAINER_NAME="hatsume-space-kali"
+CONTAINER_NAME_BASE = "hatsume-space"

@@ -5,27 +5,75 @@ from __future__ import annotations
 import asyncio
 import subprocess
 import uuid
-from typing import Any, Callable, Coroutine
+from contextlib import contextmanager
+from contextvars import ContextVar, Token
+from typing import Any, Callable, Coroutine, Iterator, Literal, overload
 
 # Handler: async (task: str, user_id: int) -> str
 AgentHandler = Callable[[str, int], Coroutine[Any, Any, str]]
+
+
+def _validate_agent_group_id(group_id: int) -> int:
+    if isinstance(group_id, bool) or not isinstance(group_id, int) or group_id <= 0:
+        raise ValueError("group_id must be a positive integer")
+    return group_id
 
 # ---------------------------------------------------------------------------
 # Agent state tracking (in-memory)
 # ---------------------------------------------------------------------------
 _AGENT_STATES: dict[str, list[dict]] = {}
+_current_agent_instance_id: ContextVar[str | None] = ContextVar(
+    "hatsume_current_agent_instance_id",
+    default=None,
+)
 
 
-def add_agent_instance(name: str, **kwargs: Any) -> str:
+@contextmanager
+def bind_agent_instance(instance_id: str) -> Iterator[str]:
+    """Bind the owning Agent instance for the current task."""
+    token: Token[str | None] = _current_agent_instance_id.set(instance_id)
+    try:
+        yield instance_id
+    finally:
+        _current_agent_instance_id.reset(token)
+
+
+@overload
+def get_current_agent_instance_id(*, required: Literal[True] = True) -> str: ...
+
+
+@overload
+def get_current_agent_instance_id(*, required: Literal[False]) -> str | None: ...
+
+
+def get_current_agent_instance_id(*, required: bool = True) -> str | None:
+    instance_id = _current_agent_instance_id.get()
+    if instance_id is None and required:
+        raise RuntimeError("Agent instance is not bound")
+    return instance_id
+
+
+def add_agent_instance(name: str, *, group_id: int, **kwargs: Any) -> str:
     """Create a new agent instance and return its instance_id."""
+    resolved_group_id = _validate_agent_group_id(group_id)
     instance_id = f"{name}_{uuid.uuid4().hex[:8]}"
-    state: dict[str, Any] = {"instance_id": instance_id, "name": name}
+    state: dict[str, Any] = {
+        "instance_id": instance_id,
+        "name": name,
+        "group_id": resolved_group_id,
+    }
     state.update(kwargs)
     _AGENT_STATES.setdefault(name, []).append(state)
     return instance_id
 
 
-def set_agent_state(name: str, instance_id: str | None = None, **kwargs: Any) -> str:
+def set_agent_state(
+    name: str,
+    *,
+    group_id: int,
+    instance_id: str | None = None,
+    **kwargs: Any,
+) -> str:
     """Create or update agent instance state. Returns instance_id.
 
     If instance_id is provided, updates that specific instance.
@@ -34,56 +82,104 @@ def set_agent_state(name: str, instance_id: str | None = None, **kwargs: Any) ->
     _run_and_notify already created the instance).
     Otherwise creates a new instance.
     """
+    resolved_group_id = _validate_agent_group_id(group_id)
     instances = _AGENT_STATES.setdefault(name, [])
 
     if instance_id is not None:
         for inst in instances:
-            if inst.get("instance_id") == instance_id:
+            if (
+                inst.get("instance_id") == instance_id
+                and inst.get("group_id") == resolved_group_id
+            ):
                 inst.update(kwargs)
                 return instance_id
         # instance_id not found — create a new one with this id
-        state = {"instance_id": instance_id, "name": name}
+        state = {
+            "instance_id": instance_id,
+            "name": name,
+            "group_id": resolved_group_id,
+        }
         state.update(kwargs)
         instances.append(state)
         return instance_id
 
     # If a running instance exists, update the latest one (upsert)
     for inst in reversed(instances):
-        if inst.get("status") == "running":
+        if (
+            inst.get("status") == "running"
+            and inst.get("group_id") == resolved_group_id
+        ):
             inst.update(kwargs)
             return str(inst["instance_id"])
 
     # Otherwise create a new instance
-    return add_agent_instance(name, **kwargs)
+    return add_agent_instance(name, group_id=resolved_group_id, **kwargs)
 
 
-def get_agent_state(name: str) -> dict | None:
+def get_agent_state(name: str, group_id: int) -> dict | None:
     """Return the most recently added state for an agent name, or None."""
-    instances = _AGENT_STATES.get(name, [])
+    resolved_group_id = _validate_agent_group_id(group_id)
+    instances = [
+        instance
+        for instance in _AGENT_STATES.get(name, [])
+        if instance.get("group_id") == resolved_group_id
+    ]
     return instances[-1] if instances else None
 
 
-def get_running_instances() -> list[dict]:
-    """Return all currently running agent instances across all agent types."""
+def get_agent_instance(name: str, group_id: int, instance_id: str) -> dict | None:
+    """Return one exact Agent instance without crossing group ownership."""
+    resolved_group_id = _validate_agent_group_id(group_id)
+    return next(
+        (
+            instance
+            for instance in _AGENT_STATES.get(name, [])
+            if instance.get("group_id") == resolved_group_id
+            and instance.get("instance_id") == instance_id
+        ),
+        None,
+    )
+
+
+def has_running_agent_task(name: str, group_id: int, task: str) -> bool:
+    """Return whether this group already runs the same normalized task."""
+    normalized_task = str(task).strip()
+    resolved_group_id = _validate_agent_group_id(group_id)
+    return any(
+        instance.get("status") == "running"
+        and instance.get("group_id") == resolved_group_id
+        and str(instance.get("task", "")).strip() == normalized_task
+        for instance in _AGENT_STATES.get(name, [])
+    )
+
+
+def get_running_instances(group_id: int) -> list[dict]:
+    """Return currently running Agent instances owned by one group."""
+    resolved_group_id = _validate_agent_group_id(group_id)
     result: list[dict] = []
     for instances in _AGENT_STATES.values():
         for inst in instances:
-            if inst.get("status") == "running":
+            if (
+                inst.get("status") == "running"
+                and inst.get("group_id") == resolved_group_id
+            ):
                 result.append(inst)
     return result
 
 
-def is_agent_running(name: str) -> bool:
+def is_agent_running(name: str, group_id: int) -> bool:
     """Return True if at least one instance of this agent is running."""
+    resolved_group_id = _validate_agent_group_id(group_id)
     return any(
         inst.get("status") == "running"
+        and inst.get("group_id") == resolved_group_id
         for inst in _AGENT_STATES.get(name, [])
     )
 
 
-def get_agent_context(name: str) -> str:
+def get_agent_context(name: str, group_id: int) -> str:
     """Return the context string from the latest agent instance, or empty str."""
-    state = get_agent_state(name)
+    state = get_agent_state(name, group_id)
     if state is None:
         return ""
     return str(state.get("context", ""))
@@ -93,6 +189,32 @@ def get_agent_context(name: str) -> str:
 # Stdin injection infrastructure (for background_shell agent)
 # ---------------------------------------------------------------------------
 _stdin_queues: dict[str, asyncio.Queue[str | None]] = {}
+_stdin_request_groups: dict[str, int] = {}
+_agent_tasks: dict[str, tuple[int, asyncio.Task[Any]]] = {}
+
+
+def register_stdin_request(
+    request_id: str,
+    group_id: int,
+    queue: asyncio.Queue[str | None],
+) -> None:
+    _stdin_queues[request_id] = queue
+    _stdin_request_groups[request_id] = _validate_agent_group_id(group_id)
+
+
+def pop_stdin_request(
+    request_id: str,
+    group_id: int,
+) -> asyncio.Queue[str | None] | None:
+    if _stdin_request_groups.get(request_id) != _validate_agent_group_id(group_id):
+        return None
+    _stdin_request_groups.pop(request_id, None)
+    return _stdin_queues.pop(request_id, None)
+
+
+def _discard_stdin_request(request_id: str) -> None:
+    _stdin_request_groups.pop(request_id, None)
+    _stdin_queues.pop(request_id, None)
 
 
 def _write_stdin(proc: subprocess.Popen, text: str) -> bool:
@@ -113,20 +235,68 @@ def _write_stdin(proc: subprocess.Popen, text: str) -> bool:
         return False
 
 
-def _cleanup_stdin_queues(proc_id: str) -> None:
+def _cleanup_stdin_queues(proc_id: str, group_id: int) -> None:
     """Wake all pending stdin queue waiters for the given proc_id.
 
     Called during agent shutdown to prevent dangling awaiters.
     """
     prefix = f"stdin_{proc_id}_"
     for rid in list(_stdin_queues.keys()):
-        if rid.startswith(prefix):
+        if (
+            rid.startswith(prefix)
+            and _stdin_request_groups.get(rid) == _validate_agent_group_id(group_id)
+        ):
             q = _stdin_queues.pop(rid, None)
+            _stdin_request_groups.pop(rid, None)
             if q is not None:
                 try:
                     q.put_nowait(None)
                 except asyncio.QueueFull:
                     pass
+
+
+def track_agent_task(
+    instance_id: str,
+    group_id: int,
+    task: asyncio.Task[Any],
+) -> None:
+    resolved_group_id = _validate_agent_group_id(group_id)
+    _agent_tasks[instance_id] = (resolved_group_id, task)
+
+    def _forget(done_task: asyncio.Task[Any]) -> None:
+        current = _agent_tasks.get(instance_id)
+        if current is not None and current[1] is done_task:
+            _agent_tasks.pop(instance_id, None)
+
+    task.add_done_callback(_forget)
+
+
+async def shutdown_group_agents(group_id: int) -> None:
+    resolved_group_id = _validate_agent_group_id(group_id)
+    tasks = [
+        task
+        for owner_group_id, task in _agent_tasks.values()
+        if owner_group_id == resolved_group_id and not task.done()
+    ]
+    for task in tasks:
+        task.cancel()
+    for request_id, owner_group_id in list(_stdin_request_groups.items()):
+        if owner_group_id != resolved_group_id:
+            continue
+        queue = _stdin_queues.get(request_id)
+        _discard_stdin_request(request_id)
+        if queue is not None:
+            queue.put_nowait(None)
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def shutdown_all_agents() -> None:
+    group_ids = {
+        group_id for group_id, _task in _agent_tasks.values()
+    } | set(_stdin_request_groups.values())
+    for group_id in group_ids:
+        await shutdown_group_agents(group_id)
 
 
 AGENT_REGISTRY: dict[str, dict] = {}
@@ -280,13 +450,18 @@ async def _run_background_shell(task: str, user_id: int) -> str:
         BACKGROUND_SHELL_STDIN_RESOLUTION_PROMPT,
     )
     from ..infra import (
+        ensure_container_running,
+        get_background_process,
         start_background_cmd,
         read_background_output,
         kill_background_cmd,
-        _background_procs,
     )
     from .nodes import inject_agent_notification
-    from .tools import _agent_notification_callback, _current_group_id
+    from .tools import _agent_notification_callback
+    from ..group_runtime import get_current_group_id
+
+    group_id = get_current_group_id()
+    instance_id = get_current_agent_instance_id()
 
     # ── Step 1: Parse task with code model ──
     PARSE_PROMPT = """\
@@ -330,11 +505,13 @@ Rules:
     notified_user_name = None
     if user_id != 0:
         try:
-            from nonebot import get_bot
+            from ..group_runtime import group_runtime_registry
             from ..utils import get_group_member_name
 
             notified_user_name = await get_group_member_name(
-                get_bot(), _current_group_id, user_id
+                group_runtime_registry.get_bot(group_id),
+                group_id,
+                user_id,
             )
         except Exception as e:
             print(f"❌ background_shell user lookup failed: user={user_id} err={e}")
@@ -344,7 +521,8 @@ Rules:
 
     # ── Step 2: Spawn background process ──
     proc_id = f"bgshell_{uuid.uuid4().hex[:8]}"
-    tmp = start_background_cmd(cmd, proc_id)
+    await ensure_container_running(group_id)
+    tmp = start_background_cmd(cmd, proc_id, group_id=group_id)
 
     # ── Step 3: Poll loop ──
     check_interval = 30  # initial default, seconds
@@ -355,10 +533,14 @@ Rules:
 
     set_agent_state(
         "background_shell",
+        group_id=group_id,
+        instance_id=instance_id,
         status="running",
         task=task,
         user_id=user_id,
         started_at=_time.time(),
+        proc_id=proc_id,
+        stdin_seq=0,
     )
 
     try:
@@ -370,7 +552,7 @@ Rules:
             full_output += new_output
 
             # Check if process is still alive
-            proc_entry = _background_procs.get(proc_id)
+            proc_entry = get_background_process(proc_id, group_id=group_id)
             if proc_entry is None:
                 # Process was killed externally
                 last_decision = "KILL"
@@ -381,7 +563,7 @@ Rules:
 
             # ── Timeout check ──
             if elapsed >= total_timeout:
-                remaining = kill_background_cmd(proc_id)
+                remaining = kill_background_cmd(proc_id, group_id=group_id)
                 if remaining:
                     full_output += remaining
                 last_decision = "TIMEOUT"
@@ -450,7 +632,7 @@ Rules:
                 print("Injecting command intermediate output to graph")
                 inject_agent_notification(
                     user_id=user_id,
-                    group_id=_current_group_id or 0,
+                    group_id=group_id,
                     agent_name="background_shell",
                     result=notify_msg,
                     task=task,
@@ -467,15 +649,20 @@ Rules:
                     stdin_timeout = 300
                     stdin_description = "需要输入"
 
-                agent_state = get_agent_state("background_shell")
+                agent_state = get_agent_instance(
+                    "background_shell",
+                    group_id,
+                    instance_id,
+                )
                 seq = agent_state.get("stdin_seq", 0) if agent_state else 0
                 request_id = f"stdin_{proc_id}_{seq}"
                 if agent_state:
                     agent_state["stdin_seq"] = seq + 1
+                    agent_state["stdin_request_id"] = request_id
 
                 # Create queue and notify chat agent
                 queue: asyncio.Queue[str | None] = asyncio.Queue()
-                _stdin_queues[request_id] = queue
+                register_stdin_request(request_id, group_id, queue)
 
                 notify_msg = (
                     f"[SHELL_STDIN_REQUEST]\n"
@@ -491,7 +678,7 @@ Rules:
                 print(f"BG Shell stdin request: {request_id=} {stdin_description=} {stdin_timeout=}")
                 inject_agent_notification(
                     user_id=user_id,
-                    group_id=_current_group_id or 0,
+                    group_id=group_id,
                     agent_name="background_shell",
                     result=notify_msg,
                     task=task,
@@ -508,7 +695,9 @@ Rules:
                 except asyncio.TimeoutError:
                     raw_text = None
                 finally:
-                    _stdin_queues.pop(request_id, None)
+                    _discard_stdin_request(request_id)
+                    if agent_state is not None:
+                        agent_state["stdin_request_id"] = None
 
                 # Ask code model to decide final stdin content
                 resolution_prompt = (
@@ -549,7 +738,9 @@ Rules:
 
                     # Re-create queue with same request_id
                     queue = asyncio.Queue()
-                    _stdin_queues[request_id] = queue
+                    register_stdin_request(request_id, group_id, queue)
+                    if agent_state is not None:
+                        agent_state["stdin_request_id"] = request_id
 
                     reissue_msg = (
                         f"[SHELL_STDIN_REQUEST]\n"
@@ -563,7 +754,7 @@ Rules:
                     )
                     inject_agent_notification(
                         user_id=user_id,
-                        group_id=_current_group_id or 0,
+                        group_id=group_id,
                         agent_name="background_shell",
                         result=reissue_msg,
                         task=task,
@@ -578,7 +769,9 @@ Rules:
                     except asyncio.TimeoutError:
                         raw_text = None
                     finally:
-                        _stdin_queues.pop(request_id, None)
+                        _discard_stdin_request(request_id)
+                        if agent_state is not None:
+                            agent_state["stdin_request_id"] = None
 
                     if raw_text is not None:
                         resolution_prompt = (
@@ -618,15 +811,15 @@ Rules:
                 # Unrecognized, default to continue
                 last_decision = f"CONTINUE:{check_interval}"
     except asyncio.CancelledError:
-        kill_background_cmd(proc_id)
-        return "background_shell: cancelled."
+        kill_background_cmd(proc_id, group_id=group_id)
+        raise
     except Exception:
         import traceback
         traceback.print_exc()
-        kill_background_cmd(proc_id)
+        kill_background_cmd(proc_id, group_id=group_id)
         return "background_shell: internal error."
     finally:
-        _cleanup_stdin_queues(proc_id)
+        _cleanup_stdin_queues(proc_id, group_id)
 
     # ── Step 4: Final cleanup and notification ──
     print("Last decision of BG Shell Agent: ", last_decision)
@@ -640,7 +833,7 @@ Rules:
         # Process ended on its own
         result_text = "命令已结束。"
 
-    remaining = kill_background_cmd(proc_id)
+    remaining = kill_background_cmd(proc_id, group_id=group_id)
     if remaining:
         full_output += remaining
 

@@ -236,6 +236,8 @@ def _load_nodes_module():
     for attr in [
         "CONTEXT_QUEUE_LEN",
         "CONTEXT_QUEUE_OVERLAP_LEN",
+        "VIDEO_RATE_LIMIT_SECONDS",
+        "GENERATE_IMAGE_RATE_LIMIT_SECONDS",
         "IMAGE_RATE_LIMIT_SECONDS",
         "USER_INPUT_CONFIRM_DURING_TIME",
         "DOCKER_ENV_PATH",
@@ -410,6 +412,38 @@ def _load_nodes_module():
         "hatsume.plugins.hatsume-plugin.graph.nodes",
         NODES_PKG_DIR / "nodes.py",
     )
+    runtime_module = sys.modules["hatsume.plugins.hatsume-plugin.group_runtime"]
+    runtime = runtime_module.group_runtime_registry.get_or_create(101)
+    runtime_module.set_current_group_runtime(runtime)
+
+    def bind_test_state(state):
+        for name, value in vars(state).items():
+            setattr(runtime.conversation, name, value)
+
+    class _RuntimeBackedModule(types.ModuleType):
+        _runtime_fields = {
+            "_last_was_auxiliary_only": "last_was_auxiliary_only",
+            "_last_was_system_trigger": "last_was_system_trigger",
+            "_face_cooling_count": "face_cooling_count",
+        }
+
+        def __getattr__(self, name):
+            runtime_field = self._runtime_fields.get(name)
+            if runtime_field is not None:
+                return getattr(runtime, runtime_field)
+            raise AttributeError(name)
+
+        def __setattr__(self, name, value):
+            runtime_field = self._runtime_fields.get(name)
+            if runtime_field is not None:
+                setattr(runtime, runtime_field, value)
+                return
+            super().__setattr__(name, value)
+
+    nodes_mod.bind_state = bind_test_state
+    nodes_mod.auxiliary_messages_queue = runtime.auxiliary_messages_queue
+    nodes_mod.auxiliary_source_queue = runtime.auxiliary_source_queue
+    nodes_mod.__class__ = _RuntimeBackedModule
     return nodes_mod
 
 
@@ -735,7 +769,7 @@ def test_finish_conversation_node_saves_to_auxiliary_queue():
     assert "历史聊天记录总结" in nodes.auxiliary_messages_queue[0]["text"]
 
     # is_graph_running should be reset
-    assert mock_state.is_graph_running is False
+    assert nodes._conversation_state().is_graph_running is False
 
 
 def test_finish_preserves_each_batched_human_json_message():
@@ -837,73 +871,6 @@ def _load_docker_module():
     sys.modules["hatsume.plugins.hatsume-plugin.infra"] = infra_mod
     spec.loader.exec_module(infra_mod)
     return infra_mod
-
-
-def test_ensure_container_running_sets_active_flag():
-    """ensure_container_running sets the module-level _container_active flag."""
-    import subprocess as sp
-
-    infra_mod = _load_docker_module()
-
-    original_run = sp.run
-    original_write = Path.write_text
-
-    def mock_subprocess_run(cmd, **kwargs):
-        return types.SimpleNamespace(stdout=b"ready\n", stderr=b"")
-
-    sp.run = mock_subprocess_run
-    Path.write_text = lambda self, data, **kw: None
-
-    try:
-        # Initially inactive
-        assert infra_mod._container_active is False
-
-        # First call should start container
-        asyncio.run(infra_mod.ensure_container_running())
-        assert infra_mod._container_active is True
-
-        # Second call should be a no-op (already active)
-        asyncio.run(infra_mod.ensure_container_running())
-        assert infra_mod._container_active is True
-    finally:
-        sp.run = original_run
-        Path.write_text = original_write
-
-
-def test_cleanup_persistent_container_resets_flag():
-    """cleanup_persistent_container resets _container_active to False."""
-    import subprocess as sp
-
-    infra_mod = _load_docker_module()
-
-    original_run = sp.run
-    original_write = Path.write_text
-    delete_calls: list[int] = []
-
-    def mock_subprocess_run(cmd, **kwargs):
-        if any("delete_container" in str(c) for c in cmd):
-            delete_calls.append(1)
-        return types.SimpleNamespace(stdout=b"ready\n", stderr=b"")
-
-    sp.run = mock_subprocess_run
-    Path.write_text = lambda self, data, **kw: None
-
-    try:
-        # Cleanup when not active should be a no-op
-        infra_mod.cleanup_persistent_container()
-        assert len(delete_calls) == 0
-        assert infra_mod._container_active is False
-
-        # Activate, then cleanup
-        asyncio.run(infra_mod.ensure_container_running())
-        assert infra_mod._container_active is True
-
-        infra_mod.cleanup_persistent_container()
-        assert infra_mod._container_active is False
-        assert len(delete_calls) == 1
-    finally:
-        sp.run = original_run
-        Path.write_text = original_write
 
 
 # -----------------------------------------------------------------------
@@ -1439,7 +1406,7 @@ def test_ai_node_suppresses_reply_after_end_conversation_tool():
             return self
 
         async def ainvoke(self, *a, **kw):
-            mock_state.end_requested = True
+            nodes._conversation_state().end_requested = True
             return {
                 "messages": [
                     types.SimpleNamespace(content="这段文本不应发送", type="ai")
@@ -1459,7 +1426,7 @@ def test_ai_node_suppresses_reply_after_end_conversation_tool():
 
     answer.assert_not_awaited()
     assert result["messages"][0].content == "这段文本不应发送"
-    assert mock_state.end_requested
+    assert nodes._conversation_state().end_requested
 
 
 def test_ai_node_memory_query_uses_only_human_content_not_auxiliary():

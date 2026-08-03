@@ -3,13 +3,14 @@
 
 set -e
 
-CONTAINER_NAME="hatsume-space-kali"
+CONTAINER_NAME="${1:-}"
 
-IMAGE_NAME="hatsume-space-kali:1.0"
+if [[ ! "${CONTAINER_NAME}" =~ ^hatsume-space-[1-9][0-9]*$ ]]; then
+    echo "[HALT] Invalid container name."
+    exit 2
+fi
 
-# Argument parsing
-MODE=""
-HOST_PATH=""
+IMAGE_NAME="hatsume-space:1.0"
 
 if ! docker info > /dev/null 2>&1; then
     echo "[HALT] Docker not running."
@@ -17,7 +18,7 @@ if ! docker info > /dev/null 2>&1; then
 fi
 
 if ! docker image inspect "${IMAGE_NAME}" > /dev/null 2>&1; then
-    zstd -d kali-cmd-image.tar.zst -c | docker load > /dev/null
+    zstd -d hatsume-space-image.tar.zst -c | docker load > /dev/null
 fi
 
 if ! docker ps -a --format '{{.Names}}' | grep -qx "${CONTAINER_NAME}"; then
@@ -31,4 +32,4 @@ fi
 if ! docker ps --format '{{.Names}}' | grep -qx "${CONTAINER_NAME}"; then
     docker start "${CONTAINER_NAME}" > /dev/null
 fi
-docker exec -i "${CONTAINER_NAME}" bash -s < $(pwd)/script.sh
+docker exec -i "${CONTAINER_NAME}" bash -s

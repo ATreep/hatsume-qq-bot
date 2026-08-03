@@ -1,4 +1,4 @@
-"""Single, process-local character proxy state."""
+"""Group-local, RAM-only character proxy state."""
 
 from __future__ import annotations
 
@@ -12,6 +12,11 @@ from langchain.messages import HumanMessage
 
 from .memory import get_recent_user_memories
 from .models import get_mini_model
+from .group_runtime import (
+    get_current_group_runtime,
+    group_runtime_registry,
+    validate_group_id,
+)
 from .prompts import (
     build_character_profile_generation_prompt,
     build_character_proxy_role_prompt,
@@ -36,12 +41,17 @@ class GeneratedCharacterProfile:
     aliases: tuple[str, ...]
 
 
-_active_proxy: CharacterProxy | None = None
-_termination_handle: asyncio.TimerHandle | None = None
+def _get_runtime(group_id: int | None = None):
+    if group_id is None:
+        return get_current_group_runtime()
+    runtime = group_runtime_registry.get_existing(validate_group_id(group_id))
+    if runtime is None:
+        raise RuntimeError(f"group runtime is not initialized: {group_id}")
+    return runtime
 
 
-def get_character_proxy() -> CharacterProxy | None:
-    return _active_proxy
+def get_character_proxy(group_id: int | None = None) -> CharacterProxy | None:
+    return _get_runtime(group_id).character_proxy
 
 
 def build_active_character_proxy_role_prompt(proxy: CharacterProxy) -> str:
@@ -62,12 +72,13 @@ def activate_character_proxy(
     behavior_prompt: str,
     aliases: tuple[str, ...] = (),
     during_time: int = 180,
+    group_id: int | None = None,
 ) -> CharacterProxy:
-    """Create the single RAM proxy."""
-    global _active_proxy
-    if _active_proxy is not None:
+    """Create the current group's single RAM proxy."""
+    runtime = _get_runtime(group_id)
+    if runtime.character_proxy is not None:
         raise RuntimeError("character proxy is already active")
-    _active_proxy = CharacterProxy(
+    runtime.character_proxy = CharacterProxy(
         user_id=int(user_id),
         user_name=user_name,
         behavior_prompt=behavior_prompt,
@@ -76,30 +87,34 @@ def activate_character_proxy(
             datetime.now().astimezone() + timedelta(minutes=during_time)
         ).isoformat(timespec="seconds"),
     )
-    role_prompt = build_active_character_proxy_role_prompt(_active_proxy)
+    role_prompt = build_active_character_proxy_role_prompt(runtime.character_proxy)
     print(f"[character_proxy] Activated role prompt:\n{role_prompt}")
-    return _active_proxy
+    return runtime.character_proxy
 
 
-def terminate_character_proxy_state() -> CharacterProxy | None:
+def terminate_character_proxy_state(group_id: int | None = None) -> CharacterProxy | None:
     """Destroy the active proxy, its behavior prompt, and its timeout."""
-    global _active_proxy, _termination_handle
-    previous = _active_proxy
-    _active_proxy = None
-    if _termination_handle is not None:
-        _termination_handle.cancel()
-        _termination_handle = None
+    runtime = _get_runtime(group_id)
+    previous = runtime.character_proxy
+    runtime.character_proxy = None
+    if runtime.character_proxy_termination_handle is not None:
+        runtime.character_proxy_termination_handle.cancel()
+        runtime.character_proxy_termination_handle = None
     return previous
 
 
-def schedule_character_proxy_termination(during_time: int) -> None:
-    """Replace the single RAM timeout that terminates the active proxy."""
-    global _termination_handle
-    if _termination_handle is not None:
-        _termination_handle.cancel()
-    _termination_handle = asyncio.get_running_loop().call_later(
+def schedule_character_proxy_termination(
+    during_time: int,
+    group_id: int | None = None,
+) -> None:
+    """Replace the current group's RAM timeout."""
+    runtime = _get_runtime(group_id)
+    if runtime.character_proxy_termination_handle is not None:
+        runtime.character_proxy_termination_handle.cancel()
+    runtime.character_proxy_termination_handle = asyncio.get_running_loop().call_later(
         during_time * 60,
         terminate_character_proxy_state,
+        runtime.group_id,
     )
 
 

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import contextvars
 import importlib.util
 import sys
 import types
@@ -181,6 +183,75 @@ def _load_tools_module():
     config_mod.PEXELS_BASE_URL = "https://api.pexels.com"
     sys.modules["hatsume.plugins.hatsume-plugin.config"] = config_mod
 
+    runtimes = {}
+    group_bots = {}
+    current_runtime = contextvars.ContextVar(
+        "test_tools_current_runtime",
+        default=None,
+    )
+
+    def _new_runtime(group_id):
+        conversation = types.SimpleNamespace(
+            ai_answer=None,
+            current_query_user_id=None,
+            request_end_conversation=lambda: None,
+        )
+        return types.SimpleNamespace(
+            group_id=group_id,
+            conversation=conversation,
+            end_conversation_callback=conversation.request_end_conversation,
+            is_video_rate_limited_callback=lambda: False,
+            update_video_time_callback=lambda: None,
+            is_generate_image_rate_limited_callback=lambda: False,
+            update_generate_image_time_callback=lambda: None,
+            generate_video_used=False,
+            send_image_count=0,
+            send_video_count=0,
+            agent_tasks=set(),
+        )
+
+    def _get_or_create(group_id):
+        group_id = int(group_id)
+        return runtimes.setdefault(group_id, _new_runtime(group_id))
+
+    registry = types.SimpleNamespace()
+
+    def _bind_bot(group_id, bot):
+        group_id = int(group_id)
+        group_bots[group_id] = bot
+        runtime = registry.get_or_create(group_id)
+        runtime.bot = bot
+        return runtime
+
+    def _get_bot(group_id):
+        return group_bots[int(group_id)]
+
+    def _get_current_group_runtime(*, required=True):
+        runtime = current_runtime.get()
+        if runtime is None and required:
+            raise RuntimeError("group runtime is not bound")
+        return runtime
+
+    @contextlib.contextmanager
+    def _bind_group_runtime(runtime):
+        token = current_runtime.set(runtime)
+        try:
+            yield runtime
+        finally:
+            current_runtime.reset(token)
+
+    group_runtime_mod = types.ModuleType(
+        "hatsume.plugins.hatsume-plugin.group_runtime"
+    )
+    registry.get_or_create = _get_or_create
+    registry.bind_bot = _bind_bot
+    registry.get_bot = _get_bot
+    group_runtime_mod.group_runtime_registry = registry
+    group_runtime_mod.get_current_group_runtime = _get_current_group_runtime
+    group_runtime_mod.set_current_group_runtime = current_runtime.set
+    group_runtime_mod.bind_group_runtime = _bind_group_runtime
+    sys.modules[group_runtime_mod.__name__] = group_runtime_mod
+
     models_mod = types.ModuleType("hatsume.plugins.hatsume-plugin.models")
     models_mod.get_lite_model = lambda **kw: types.SimpleNamespace(
         invoke=lambda *a, **kw: types.SimpleNamespace(content="ok")
@@ -208,8 +279,21 @@ def _load_tools_module():
     # infra (docker + htmlkit merged into infra.py)
     infra_mod = sys.modules["hatsume.plugins.hatsume-plugin.infra"]
     infra_mod.run_cmd = lambda *a, **kw: ""
+    infra_mod.container_name_for_group = (
+        lambda group_id: f"hatsume-space-{group_id}"
+    )
     infra_mod.ensure_container_running = lambda *a, **kw: None
     infra_mod.delete_container = lambda *a, **kw: None
+
+    async def _mock_read_sandbox_image_data_uri(*args, **kwargs):
+        return "data:image/png;base64,aW1hZ2U="
+
+    infra_mod.read_sandbox_image_data_uri = _mock_read_sandbox_image_data_uri
+
+    async def _mock_copy_host_file_to_sandbox(*args, **kwargs):
+        return None
+
+    infra_mod.copy_host_file_to_sandbox = _mock_copy_host_file_to_sandbox
 
     async def _mock_render_html(*a, **kw):
         return b"fake_png_bytes"
@@ -237,6 +321,11 @@ def _load_tools_module():
     sys.modules["hatsume.plugins.hatsume-plugin.graph.tools"] = tools_mod
     spec.loader.exec_module(tools_mod)
     return tools_mod
+
+
+def _bind_tool_runtime(tools, group_id=123):
+    tools.set_current_group_id(group_id)
+    return tools.get_current_group_runtime()
 
 
 
@@ -400,25 +489,23 @@ class TestViewImage:
     @pytest.mark.asyncio
     async def test_reads_file_url_from_sandbox_as_data_uri(self):
         tools = _load_tools_module()
+        runtime = _bind_tool_runtime(tools)
         model = self._set_lite_model([{"type": "text", "text": "沙盒图片描述"}])
-        tools.ensure_container_running = AsyncMock()
-        tools.run_cmd = AsyncMock(
-            side_effect=[
-                "image/png\n::EXIT::0\n",
-                "aW1hZ2U=::EXIT::0\n",
-            ]
+        tools.read_sandbox_image_data_uri = AsyncMock(
+            return_value="data:image/png;base64,aW1hZ2U="
         )
 
         result = await tools.view_image("file:///work/example image.png")
 
         assert result == "沙盒图片描述"
-        tools.ensure_container_running.assert_awaited_once_with()
-        assert tools.run_cmd.await_count == 2
+        tools.read_sandbox_image_data_uri.assert_awaited_once_with(
+            "/work/example image.png",
+            group_id=runtime.group_id,
+        )
         messages = model.ainvoke.await_args.args[0]
         assert messages[0].content[1]["image_url"]["url"] == (
             "data:image/png;base64,aW1hZ2U="
         )
-        assert "'/work/example image.png'" in tools.run_cmd.await_args_list[0].args[0]
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -437,13 +524,19 @@ class TestViewImage:
     @pytest.mark.asyncio
     async def test_rejects_non_image_sandbox_file(self):
         tools = _load_tools_module()
+        runtime = _bind_tool_runtime(tools)
         model = self._set_lite_model()
-        tools.ensure_container_running = AsyncMock()
-        tools.run_cmd = AsyncMock(return_value="text/plain\n::EXIT::0\n")
+        tools.read_sandbox_image_data_uri = AsyncMock(
+            side_effect=ValueError("sandbox file is not a valid image")
+        )
 
         result = await tools.view_image("file:///work/readme.txt")
 
-        assert "不是图片" in result
+        assert "not a valid image" in result
+        tools.read_sandbox_image_data_uri.assert_awaited_once_with(
+            "/work/readme.txt",
+            group_id=runtime.group_id,
+        )
         model.ainvoke.assert_not_awaited()
 
 
@@ -747,7 +840,7 @@ class TestTimerListing:
 
         store.list_tasks_by_group.assert_called_once_with(456)
         assert result.startswith("# 群 456 的定时任务")
-        assert tools._current_group_id == 123
+        assert tools.get_current_group_id() == 123
 
     @pytest.mark.asyncio
     async def test_list_timers_shows_complete_weekly_frequency(self):
@@ -794,7 +887,7 @@ class TestTimerListing:
         }
         self._setup_timer_dependencies(tools, tasks, points)
         bot = object()
-        sys.modules["nonebot"].get_bot = lambda: bot
+        tools.group_runtime_registry.bind_bot(123, bot)
         utils = sys.modules["hatsume.plugins.hatsume-plugin.utils"]
         utils.get_group_member_name = AsyncMock(return_value="提醒对象")
 
@@ -947,10 +1040,13 @@ class TestGenerateImageRateLimit:
 
         def update_time():
             return None
-        tools.configure_tool_callbacks(None, answer_fn=None)
-        # Set the new callbacks
-        tools._is_generate_image_rate_limited = rate_limited
-        tools._update_generate_image_time = update_time
+        _bind_tool_runtime(tools)
+        tools.configure_tool_callbacks(
+            None,
+            answer_fn=None,
+            is_generate_image_rate_limited=rate_limited,
+            update_generate_image_time=update_time,
+        )
 
         result = asyncio.run(
             tools.generate_image("test prompt", [])
@@ -972,9 +1068,13 @@ class TestGenerateImageRateLimit:
         import random as _random
         _orig_random = _random.random
         _random.random = lambda: 0.0
-        tools.configure_tool_callbacks(None, answer_fn=None)
-        tools._is_generate_image_rate_limited = rate_limited
-        tools._update_generate_image_time = update_time
+        _bind_tool_runtime(tools)
+        tools.configure_tool_callbacks(
+            None,
+            answer_fn=None,
+            is_generate_image_rate_limited=rate_limited,
+            update_generate_image_time=update_time,
+        )
 
         try:
             result = asyncio.run(
@@ -1024,9 +1124,13 @@ class TestGenerateImageRateLimit:
         original_random = random.random
         random.random = lambda: 0.0
 
-        tools.configure_tool_callbacks(None, answer_fn=None)
-        tools._is_generate_image_rate_limited = rate_limited
-        tools._update_generate_image_time = update_time
+        _bind_tool_runtime(tools)
+        tools.configure_tool_callbacks(
+            None,
+            answer_fn=None,
+            is_generate_image_rate_limited=rate_limited,
+            update_generate_image_time=update_time,
+        )
 
         try:
             result = asyncio.run(
@@ -1270,6 +1374,13 @@ class MessageStub:
 class TestTimerCommand:
     @staticmethod
     def _setup(commands, *, task=None):
+        runtime = types.SimpleNamespace(group_id=123)
+        commands.group_runtime_registry.get_or_create = MagicMock(
+            return_value=runtime
+        )
+        commands.bind_group_runtime = MagicMock(
+            return_value=contextlib.nullcontext(runtime)
+        )
         store = types.SimpleNamespace(
             get_task=MagicMock(return_value=task),
             replace_task_with_exact_plan=MagicMock(),
@@ -1281,7 +1392,6 @@ class TestTimerCommand:
         sys.modules[timer.__name__] = timer
 
         graph_tools = types.ModuleType("hatsume.plugins.hatsume-plugin.graph.tools")
-        graph_tools.set_current_group_id = MagicMock()
         graph_tools.get_timer_overview = AsyncMock(
             return_value="shared detailed overview"
         )
@@ -1314,7 +1424,8 @@ class TestTimerCommand:
                 object(), event, matcher, MessageStub("list")
             )
 
-        graph_tools.set_current_group_id.assert_called_once_with(123)
+        commands.group_runtime_registry.get_or_create.assert_called_once_with(123)
+        commands.bind_group_runtime.assert_called_once()
         graph_tools.get_timer_overview.assert_awaited_once_with()
         assert matcher.finished_with == "shared detailed overview"
 
@@ -1333,7 +1444,8 @@ class TestTimerCommand:
                 object(), event, matcher, MessageStub("list 456")
             )
 
-        graph_tools.set_current_group_id.assert_called_once_with(123)
+        commands.group_runtime_registry.get_or_create.assert_called_once_with(123)
+        commands.bind_group_runtime.assert_called_once()
         graph_tools.get_timer_overview.assert_awaited_once_with(456)
         assert matcher.finished_with == "shared detailed overview"
 
@@ -1529,14 +1641,174 @@ class TestModelCommand:
         assert "API Key" in str(matcher.finished_with)
 
 
+class TestTodoCommand:
+    """Tests for the public, group-scoped /todo command."""
+
+    @staticmethod
+    def _install_store(store):
+        todo = types.ModuleType("hatsume.plugins.hatsume-plugin.todo")
+        todo.get_store = lambda: store
+        sys.modules[todo.__name__] = todo
+
+    @pytest.mark.asyncio
+    async def test_lists_all_active_items_for_current_group(self):
+        commands = _load_commands_module()
+        created_at = 2_000_000_000.0
+        items = [
+            {
+                "id": 7,
+                "group_id": 456,
+                "initiator_qq_id": 111,
+                "initiator_group_name": "Alice",
+                "content": "tell Alice how long she slept",
+                "finish_condition": (
+                    "Permitted finisher: Alice only\n"
+                    "Completion event: Alice says she woke up"
+                ),
+                "created_at": created_at,
+            },
+            {
+                "id": 9,
+                "group_id": 456,
+                "initiator_qq_id": 222,
+                "initiator_group_name": "Bob",
+                "content": "send the result",
+                "finish_condition": (
+                    "Permitted finisher: Bob only\n"
+                    "Completion event: Bob asks for the result"
+                ),
+                "created_at": created_at + 60,
+            },
+        ]
+        store = types.SimpleNamespace(
+            delete_expired=MagicMock(return_value=1),
+            list_items=MagicMock(return_value=items),
+        )
+        self._install_store(store)
+        matcher = _FakeMatcher()
+        event = types.SimpleNamespace(group_id=456)
+
+        with pytest.raises(_Finished):
+            await commands.handle_todo(event, matcher, MessageStub(""))
+
+        store.delete_expired.assert_called_once_with()
+        store.list_items.assert_called_once_with(456)
+        output = str(matcher.finished_with)
+        assert "当前群活动待办（2 项）" in output
+        assert output.index("待办 ID：7") < output.index("待办 ID：9")
+        assert "Alice（QQ：111）" in output
+        assert "tell Alice how long she slept" in output
+        assert "Permitted finisher: Alice only" in output
+        assert datetime.fromtimestamp(created_at).strftime(
+            "%Y/%m/%d %H:%M:%S"
+        ) in output
+
+    @pytest.mark.asyncio
+    async def test_empty_group_has_clear_response(self):
+        commands = _load_commands_module()
+        store = types.SimpleNamespace(
+            delete_expired=MagicMock(return_value=0),
+            list_items=MagicMock(return_value=[]),
+        )
+        self._install_store(store)
+        matcher = _FakeMatcher()
+
+        with pytest.raises(_Finished):
+            await commands.handle_todo(
+                types.SimpleNamespace(group_id=456), matcher, MessageStub("")
+            )
+
+        assert matcher.finished_with == "当前群没有活动待办。"
+
+    @pytest.mark.asyncio
+    async def test_database_failure_does_not_escape(self):
+        commands = _load_commands_module()
+        store = types.SimpleNamespace(
+            delete_expired=MagicMock(side_effect=RuntimeError("locked")),
+            list_items=MagicMock(),
+        )
+        self._install_store(store)
+        matcher = _FakeMatcher()
+
+        with pytest.raises(_Finished):
+            await commands.handle_todo(
+                types.SimpleNamespace(group_id=456), matcher, MessageStub("")
+            )
+
+        store.list_items.assert_not_called()
+        assert matcher.finished_with == "❌ 待办数据库暂时不可用。"
+
+    @pytest.mark.asyncio
+    async def test_admin_can_view_another_group(self):
+        commands = _load_commands_module()
+        store = types.SimpleNamespace(
+            delete_expired=MagicMock(return_value=0),
+            list_items=MagicMock(return_value=[]),
+        )
+        self._install_store(store)
+        matcher = _FakeMatcher()
+        event = types.SimpleNamespace(
+            group_id=456,
+            get_user_id=lambda: "999999",
+        )
+
+        with pytest.raises(_Finished):
+            await commands.handle_todo(event, matcher, MessageStub("789"))
+
+        store.list_items.assert_called_once_with(789)
+        assert matcher.finished_with == "群 789 没有活动待办。"
+
+    @pytest.mark.asyncio
+    async def test_non_admin_cannot_view_another_group(self):
+        commands = _load_commands_module()
+        store = types.SimpleNamespace(
+            delete_expired=MagicMock(),
+            list_items=MagicMock(),
+        )
+        self._install_store(store)
+        matcher = _FakeMatcher()
+        event = types.SimpleNamespace(
+            group_id=456,
+            get_user_id=lambda: "111111",
+        )
+
+        with pytest.raises(_Finished):
+            await commands.handle_todo(event, matcher, MessageStub("789"))
+
+        store.delete_expired.assert_not_called()
+        store.list_items.assert_not_called()
+        assert matcher.finished_with == "只有管理员可以查看其他群的待办。"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("argument", ["abc", "0", "-1", "789 extra"])
+    async def test_rejects_invalid_group_argument(self, argument):
+        commands = _load_commands_module()
+        matcher = _FakeMatcher()
+
+        with pytest.raises(_Finished):
+            await commands.handle_todo(
+                types.SimpleNamespace(group_id=456),
+                matcher,
+                MessageStub(argument),
+            )
+
+        assert "群号必须是正整数" in str(matcher.finished_with)
+
+
 class TestProxyCommand:
     """Tests for the public /proxy command handler."""
 
     @staticmethod
-    def _stub_graph_tools():
+    def _stub_graph_tools(commands, group_id=456):
+        runtime = types.SimpleNamespace(group_id=group_id)
+        commands.group_runtime_registry.get_or_create = MagicMock(
+            return_value=runtime
+        )
+        commands.bind_group_runtime = MagicMock(
+            return_value=contextlib.nullcontext(runtime)
+        )
         module_name = "hatsume.plugins.hatsume-plugin.graph.tools"
         graph_tools = types.ModuleType(module_name)
-        graph_tools.set_current_group_id = MagicMock()
         graph_tools.create_character_proxy = types.SimpleNamespace(
             ainvoke=AsyncMock(return_value="created")
         )
@@ -1549,7 +1821,7 @@ class TestProxyCommand:
     @pytest.mark.asyncio
     async def test_create_invokes_tool_with_explicit_duration(self):
         commands = _load_commands_module()
-        graph_tools = self._stub_graph_tools()
+        graph_tools = self._stub_graph_tools(commands)
         matcher = _FakeMatcher()
         event = types.SimpleNamespace(group_id=456)
 
@@ -1560,7 +1832,8 @@ class TestProxyCommand:
                 MessageStub("create 222 30"),
             )
 
-        graph_tools.set_current_group_id.assert_called_once_with(456)
+        commands.group_runtime_registry.get_or_create.assert_called_once_with(456)
+        commands.bind_group_runtime.assert_called_once()
         graph_tools.create_character_proxy.ainvoke.assert_awaited_once_with(
             {"proxied_user_id": 222, "during_time": 30}
         )
@@ -1569,7 +1842,7 @@ class TestProxyCommand:
     @pytest.mark.asyncio
     async def test_create_uses_three_hour_default(self):
         commands = _load_commands_module()
-        graph_tools = self._stub_graph_tools()
+        graph_tools = self._stub_graph_tools(commands)
         matcher = _FakeMatcher()
         event = types.SimpleNamespace(group_id=456)
 
@@ -1587,7 +1860,7 @@ class TestProxyCommand:
     @pytest.mark.asyncio
     async def test_terminate_invokes_tool(self):
         commands = _load_commands_module()
-        graph_tools = self._stub_graph_tools()
+        graph_tools = self._stub_graph_tools(commands)
         matcher = _FakeMatcher()
         event = types.SimpleNamespace(group_id=456)
 
@@ -1604,7 +1877,7 @@ class TestProxyCommand:
     @pytest.mark.asyncio
     async def test_status_shows_proxy_prompt_and_end_time(self):
         commands = _load_commands_module()
-        self._stub_graph_tools()
+        self._stub_graph_tools(commands)
         proxy = types.SimpleNamespace(
             user_id=222,
             user_name="Target",
@@ -1631,6 +1904,239 @@ class TestProxyCommand:
         assert "Target（QQ：222）" in output
         assert "2026-07-17T18:30:00+08:00" in output
         assert "complete role prompt" in output
+
+
+class TestGroupSelectableCommands:
+    @staticmethod
+    def _event(*, group_id=123, user_id="77"):
+        return types.SimpleNamespace(
+            group_id=group_id,
+            get_user_id=lambda: user_id,
+        )
+
+    @staticmethod
+    def _load_commands_with_runtime():
+        _load_tools_module()
+        return _load_commands_module()
+
+    @pytest.mark.asyncio
+    async def test_skills_defaults_to_current_group_without_creating_runtime(self):
+        commands = self._load_commands_with_runtime()
+        manager = types.SimpleNamespace(
+            list_skills=MagicMock(
+                return_value=[{"name": "shared", "description": "common"}]
+            )
+        )
+        skills = types.ModuleType("hatsume.plugins.hatsume-plugin.skills")
+        skills.get_skill_manager = MagicMock(return_value=manager)
+        sys.modules[skills.__name__] = skills
+        commands.group_runtime_registry.get_or_create = MagicMock()
+        matcher = _FakeMatcher()
+
+        with pytest.raises(_Finished):
+            await commands.handle_list_skills(
+                self._event(),
+                matcher,
+                MessageStub(""),
+            )
+
+        skills.get_skill_manager.assert_called_once_with(123, create_local=False)
+        commands.group_runtime_registry.get_or_create.assert_not_called()
+        assert "shared" in str(matcher.finished_with)
+
+    @pytest.mark.asyncio
+    async def test_admin_can_inspect_another_groups_skills(self):
+        commands = self._load_commands_with_runtime()
+        manager = types.SimpleNamespace(list_skills=MagicMock(return_value=[]))
+        skills = types.ModuleType("hatsume.plugins.hatsume-plugin.skills")
+        skills.get_skill_manager = MagicMock(return_value=manager)
+        sys.modules[skills.__name__] = skills
+        matcher = _FakeMatcher()
+
+        with pytest.raises(_Finished):
+            await commands.handle_list_skills(
+                self._event(user_id="999999"),
+                matcher,
+                MessageStub("456"),
+            )
+
+        skills.get_skill_manager.assert_called_once_with(456, create_local=False)
+
+    @pytest.mark.asyncio
+    async def test_non_admin_cannot_inspect_another_groups_skills(self):
+        commands = self._load_commands_with_runtime()
+        skills = types.ModuleType("hatsume.plugins.hatsume-plugin.skills")
+        skills.get_skill_manager = MagicMock()
+        sys.modules[skills.__name__] = skills
+        matcher = _FakeMatcher()
+
+        with pytest.raises(_Finished):
+            await commands.handle_list_skills(
+                self._event(),
+                matcher,
+                MessageStub("456"),
+            )
+
+        skills.get_skill_manager.assert_not_called()
+        assert matcher.finished_with == "只有管理员可以访问其他群的数据。"
+
+    @pytest.mark.asyncio
+    async def test_resetsandbox_is_admin_only_for_current_group(self):
+        commands = self._load_commands_with_runtime()
+        commands.cleanup_persistent_container = AsyncMock()
+        agents = types.ModuleType("hatsume.plugins.hatsume-plugin.graph.agents")
+        agents.shutdown_group_agents = AsyncMock()
+        sys.modules[agents.__name__] = agents
+        matcher = _FakeMatcher()
+
+        with pytest.raises(_Finished):
+            await commands.handle_resetsandbox(
+                self._event(),
+                matcher,
+                MessageStub(""),
+            )
+
+        agents.shutdown_group_agents.assert_not_awaited()
+        commands.cleanup_persistent_container.assert_not_awaited()
+        assert matcher.finished_with == "只有管理员可以重置 Sandbox。"
+
+    @pytest.mark.asyncio
+    async def test_resetsandbox_admin_can_select_group(self):
+        commands = self._load_commands_with_runtime()
+        commands.cleanup_persistent_container = AsyncMock(return_value=True)
+        agents = types.ModuleType("hatsume.plugins.hatsume-plugin.graph.agents")
+        agents.shutdown_group_agents = AsyncMock()
+        sys.modules[agents.__name__] = agents
+        matcher = _FakeMatcher()
+
+        with pytest.raises(_Finished):
+            await commands.handle_resetsandbox(
+                self._event(user_id="999999"),
+                matcher,
+                MessageStub("456"),
+            )
+
+        agents.shutdown_group_agents.assert_awaited_once_with(456)
+        commands.cleanup_persistent_container.assert_awaited_once_with(456)
+        assert "群 456" in str(matcher.finished_with)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("argument", ["abc", "0", "-1", "456 extra"])
+    async def test_resetsandbox_rejects_invalid_group_argument(self, argument):
+        commands = self._load_commands_with_runtime()
+        commands.cleanup_persistent_container = AsyncMock()
+        agents = types.ModuleType("hatsume.plugins.hatsume-plugin.graph.agents")
+        agents.shutdown_group_agents = AsyncMock()
+        sys.modules[agents.__name__] = agents
+        matcher = _FakeMatcher()
+
+        with pytest.raises(_Finished):
+            await commands.handle_resetsandbox(
+                self._event(user_id="999999"),
+                matcher,
+                MessageStub(argument),
+            )
+
+        agents.shutdown_group_agents.assert_not_awaited()
+        commands.cleanup_persistent_container.assert_not_awaited()
+        assert matcher.finished_with == (
+            "群号必须是正整数。\n用法：/resetsandbox [群号]"
+        )
+
+
+def _stub_agent_notification_node():
+    nodes = types.ModuleType("hatsume.plugins.hatsume-plugin.graph.nodes")
+    nodes.inject_agent_notification = MagicMock()
+    sys.modules[nodes.__name__] = nodes
+    return nodes
+
+
+@pytest.mark.asyncio
+async def test_agent_dispatch_keeps_initiating_group_and_exact_instance():
+    tools = _load_tools_module()
+    agents = sys.modules["hatsume.plugins.hatsume-plugin.graph.agents"]
+    agents._AGENT_STATES.clear()
+    _stub_agent_notification_node()
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    captured: list[tuple[int, str]] = []
+
+    async def handler(_task, _user_id):
+        captured.append(
+            (
+                tools.get_current_group_runtime().group_id,
+                agents.get_current_agent_instance_id(),
+            )
+        )
+        entered.set()
+        await release.wait()
+        return "done"
+
+    tools.get_agent_handler = lambda name: handler if name == "coding_agent" else None
+    tools.set_current_group_id(101)
+    result = await tools.agent_dispatch("coding_agent", "task", "context")
+    owner_runtime = tools.group_runtime_registry.get_or_create(101)
+    owner_task = next(iter(owner_runtime.agent_tasks))
+
+    tools.set_current_group_id(202)
+    await asyncio.wait_for(entered.wait(), timeout=1)
+
+    assert "开始执行任务" in result
+    assert captured[0][0] == 101
+    instance = agents.get_agent_instance("coding_agent", 101, captured[0][1])
+    assert instance is not None
+    assert instance["task"] == "task"
+    assert agents.get_agent_instance("coding_agent", 202, captured[0][1]) is None
+
+    release.set()
+    await owner_task
+    assert instance["status"] == "done"
+    agents._AGENT_STATES.clear()
+
+
+@pytest.mark.asyncio
+async def test_agent_dispatch_rejects_duplicate_only_within_owner_group():
+    tools = _load_tools_module()
+    agents = sys.modules["hatsume.plugins.hatsume-plugin.graph.agents"]
+    agents._AGENT_STATES.clear()
+    _stub_agent_notification_node()
+    release = asyncio.Event()
+    both_started = asyncio.Event()
+    started_groups: set[int] = set()
+
+    async def handler(_task, _user_id):
+        started_groups.add(tools.get_current_group_runtime().group_id)
+        if len(started_groups) == 2:
+            both_started.set()
+        await release.wait()
+        return "done"
+
+    tools.get_agent_handler = lambda name: handler if name == "coding_agent" else None
+    tools.set_current_group_id(101)
+    first = await tools.agent_dispatch("coding_agent", "same task", "context")
+    duplicate = await tools.agent_dispatch(
+        "coding_agent",
+        " same task ",
+        "context",
+    )
+
+    tools.set_current_group_id(202)
+    second = await tools.agent_dispatch("coding_agent", "same task", "context")
+    await asyncio.wait_for(both_started.wait(), timeout=1)
+
+    assert "开始执行任务" in first
+    assert "相同任务" in duplicate
+    assert "开始执行任务" in second
+    assert started_groups == {101, 202}
+    assert len(agents._AGENT_STATES["coding_agent"]) == 2
+
+    tasks = [
+        *tools.group_runtime_registry.get_or_create(101).agent_tasks,
+        *tools.group_runtime_registry.get_or_create(202).agent_tasks,
+    ]
+    release.set()
+    await asyncio.gather(*tasks)
+    agents._AGENT_STATES.clear()
 
 
 # -----------------------------------------------------------------------
@@ -1716,25 +2222,28 @@ class TestRolePrompt:
 def test_reset_capture_flag_resets_generate_video_used():
     """reset_capture_flag should reset _generate_video_used to False."""
     tools = _load_tools_module()
-    tools._generate_video_used = True
+    runtime = _bind_tool_runtime(tools)
+    runtime.generate_video_used = True
     tools.reset_capture_flag()
-    assert tools._generate_video_used is False
+    assert runtime.generate_video_used is False
 
 
 def test_reset_capture_flag_resets_send_image_count():
     """reset_capture_flag should reset _send_image_count to 0."""
     tools = _load_tools_module()
-    tools._send_image_count = 5
+    runtime = _bind_tool_runtime(tools)
+    runtime.send_image_count = 5
     tools.reset_capture_flag()
-    assert tools._send_image_count == 0
+    assert runtime.send_image_count == 0
 
 
 def test_reset_capture_flag_resets_send_video_count():
     """reset_capture_flag should reset _send_video_count to 0."""
     tools = _load_tools_module()
-    tools._send_video_count = 1
+    runtime = _bind_tool_runtime(tools)
+    runtime.send_video_count = 1
     tools.reset_capture_flag()
-    assert tools._send_video_count == 0
+    assert runtime.send_video_count == 0
 
 
 # -----------------------------------------------------------------------
@@ -1746,9 +2255,10 @@ def test_reset_capture_flag_resets_send_video_count():
 async def test_send_image_allows_up_to_3_calls():
     """send_image should allow up to 3 calls, then return error on the 4th."""
     tools = _load_tools_module()
-    tools._send_image_count = 0
-    # Mock _ai_answer so actual message sending doesn't happen
-    tools._ai_answer = AsyncMock(return_value=None)
+    runtime = _bind_tool_runtime(tools)
+    runtime.send_image_count = 0
+    answer = AsyncMock(return_value=None)
+    tools.configure_tool_callbacks(None, answer_fn=answer)
 
     # First 3 calls should succeed
     for i in range(3):
@@ -1764,10 +2274,12 @@ async def test_send_image_allows_up_to_3_calls():
 async def test_send_image_rate_limit_resets_on_new_round():
     """After reset_capture_flag, send_image should allow 3 more calls."""
     tools = _load_tools_module()
-    tools._ai_answer = AsyncMock(return_value=None)
+    runtime = _bind_tool_runtime(tools)
+    answer = AsyncMock(return_value=None)
+    tools.configure_tool_callbacks(None, answer_fn=answer)
 
     # Use up all 3 slots
-    tools._send_image_count = 3
+    runtime.send_image_count = 3
     result = await tools.send_image("https://example.com/test.jpg")
     assert "最多只能发送3张图片" in result
 
@@ -1789,9 +2301,11 @@ async def test_send_video_allows_one_call_per_round():
     """send_video should allow one call, then return error on the second."""
     tools = _load_tools_module()
     sent = []
-    tools._send_video_count = 0
+    runtime = _bind_tool_runtime(tools)
+    runtime.send_video_count = 0
     tools.MessageSegment.video = lambda **kw: ("video", kw)
-    tools._ai_answer = AsyncMock(side_effect=lambda msg: sent.append(msg))
+    answer = AsyncMock(side_effect=lambda msg: sent.append(msg))
+    tools.configure_tool_callbacks(None, answer_fn=answer)
 
     result = await tools.send_video("https://example.com/test.mp4")
     assert "视频已成功发送" in result
@@ -1806,16 +2320,19 @@ async def test_send_video_accepts_sandbox_absolute_path():
     """send_video should resolve a sandbox absolute path to base64 before sending."""
     tools = _load_tools_module()
     sent = []
-    tools._send_video_count = 0
+    runtime = _bind_tool_runtime(tools)
+    runtime.send_video_count = 0
     tools.ensure_container_running = AsyncMock(return_value=None)
     tools.run_cmd = AsyncMock(return_value="ZmFrZV92aWRlbw==::EXIT::0\n")
     tools.MessageSegment.video = lambda **kw: ("video", kw)
-    tools._ai_answer = AsyncMock(side_effect=lambda msg: sent.append(msg))
+    answer = AsyncMock(side_effect=lambda msg: sent.append(msg))
+    tools.configure_tool_callbacks(None, answer_fn=answer)
 
     result = await tools.send_video("/work/out.mp4")
 
     assert "视频已成功发送" in result
-    tools.ensure_container_running.assert_awaited_once_with()
+    tools.ensure_container_running.assert_awaited_once_with(runtime.group_id)
+    assert tools.run_cmd.await_args.kwargs["group_id"] == runtime.group_id
     assert "base64 -w 0 /work/out.mp4" in tools.run_cmd.await_args.args[0]
     assert sent == [("video", {"file": "base64://ZmFrZV92aWRlbw=="})]
 
@@ -1824,10 +2341,12 @@ async def test_send_video_accepts_sandbox_absolute_path():
 async def test_send_video_rate_limit_resets_on_new_round():
     """After reset_capture_flag, send_video should allow another call."""
     tools = _load_tools_module()
+    runtime = _bind_tool_runtime(tools)
     tools.MessageSegment.video = lambda **kw: ("video", kw)
-    tools._ai_answer = AsyncMock(return_value=None)
+    answer = AsyncMock(return_value=None)
+    tools.configure_tool_callbacks(None, answer_fn=answer)
 
-    tools._send_video_count = 1
+    runtime.send_video_count = 1
     result = await tools.send_video("https://example.com/test.mp4")
     assert "最多只能发送1个视频" in result
 
@@ -1850,9 +2369,11 @@ async def test_generate_video_returns_url_without_sending():
     models_mod.choose_video_model = lambda: "1.5"
     models_mod.generate_video_for = AsyncMock(return_value="https://example.com/out.mp4")
     update_called = []
+    _bind_tool_runtime(tools)
+    answer = AsyncMock()
     tools.configure_tool_callbacks(
         None,
-        answer_fn=AsyncMock(),
+        answer_fn=answer,
         is_video_rate_limited=lambda: False,
         update_video_time=lambda: update_called.append(True),
     )
@@ -1864,7 +2385,7 @@ async def test_generate_video_returns_url_without_sending():
 
     assert "临时 URL：https://example.com/out.mp4" in result
     assert "调用 send_video" in tools.generate_video.__doc__
-    tools._ai_answer.assert_not_awaited()
+    answer.assert_not_awaited()
     models_mod.generate_video_for.assert_awaited_once_with(
         "make a short clip",
         image_url="https://example.com/ref.jpg",
@@ -2011,6 +2532,7 @@ class TestRespondToShellPrompt:
     def test_returns_error_for_invalid_request_id(self):
         """Returns error when request_id is not found."""
         tools = _load_tools_module()
+        _bind_tool_runtime(tools)
         import asyncio as _asyncio
 
         async def _call():
@@ -2027,6 +2549,7 @@ class TestRespondToShellPrompt:
 def test_end_conversation_calls_configured_callback():
     tools = _load_tools_module()
     callback = MagicMock()
+    _bind_tool_runtime(tools)
     tools.configure_tool_callbacks(
         query_user_id=None,
         end_conversation_fn=callback,
@@ -2083,7 +2606,7 @@ def test_create_todo_resolves_name_and_delegates_to_store():
     )
     _install_todo_store(store)
     bot = object()
-    sys.modules["nonebot"].get_bot = lambda: bot
+    tools.group_runtime_registry.bind_bot(456, bot)
     utils = sys.modules["hatsume.plugins.hatsume-plugin.utils"]
     utils.get_group_member_name = AsyncMock(return_value="Group Card")
     tools.set_current_group_id(456)
@@ -2113,7 +2636,7 @@ def test_create_todo_resolves_name_and_delegates_to_store():
 def test_create_todo_handles_duplicate_full_validation_and_name_fallback():
     tools = _load_tools_module()
     tools.set_current_group_id(456)
-    sys.modules["nonebot"].get_bot = lambda: object()
+    tools.group_runtime_registry.bind_bot(456, object())
     utils = sys.modules["hatsume.plugins.hatsume-plugin.utils"]
     utils.get_group_member_name = AsyncMock(side_effect=RuntimeError("offline"))
     item = {
@@ -2217,7 +2740,7 @@ def test_create_character_proxy_uses_explicit_user_id_and_valid_duration(
     sys.modules[module_name] = character_proxy
 
     bot = object()
-    sys.modules["nonebot"].get_bot = lambda: bot
+    tools.group_runtime_registry.bind_bot(456, bot)
     utils = sys.modules["hatsume.plugins.hatsume-plugin.utils"]
     utils.get_group_member_name = AsyncMock(return_value="Target")
     tools.set_current_group_id(456)

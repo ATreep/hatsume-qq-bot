@@ -82,7 +82,7 @@ When the tool cannot retrieve a photo due to environmental issues, it informs th
 
 - The bot runs on macOS where Apple Photos.app is installed and the user has granted automation permissions (System Events / Photos) to the terminal or process running the bot.
 - The "ACG" album already exists in the user's Photos library and is manually maintained by the user.
-- The Docker sandbox container (`hatsume-space-kali`) is managed by the existing infrastructure code and the `ensure_container_running()` function is available.
+- The Docker sandbox container (`hatsume-space`) is managed by the existing infrastructure code and the `ensure_container_running()` function is available.
 - The exported photo's file extension is preserved as-is; no format conversion is performed.
 - Concurrent access to the tool is rare enough that sharing a single macOS temp directory (`/tmp/hatsume_acg_export/`) is acceptable.
 - The existing `send_image` tool already supports `file://` paths and reads from the sandbox container.

@@ -74,6 +74,7 @@ SKILLS_DIR = config_mod.SKILLS_DIR
 # Load skills submodule
 skills_init_mod = _load_submodule("skills", "skills.__init__")
 SkillManager = skills_init_mod.SkillManager
+GroupSkillManager = skills_init_mod.GroupSkillManager
 get_skill_manager = skills_init_mod.get_skill_manager
 
 # Load prompts module for build_skill_prompt
@@ -300,6 +301,109 @@ class TestSkillManagerResetConversation:
             assert "b" in mgr._loaded_this_conversation
             mgr.reset_conversation()
             assert len(mgr._loaded_this_conversation) == 0
+
+
+class TestGroupSkillManager:
+    """Common Skills are read-only and local Skills are group-owned."""
+
+    def test_common_skills_are_visible_but_cannot_be_changed(self, tmp_path):
+        common_dir = tmp_path / "common"
+        common_dir.mkdir()
+        common_file = make_skill_file(
+            common_dir,
+            "shared",
+            "Shared instructions",
+            "Original common content",
+        )
+        manager = GroupSkillManager(
+            SkillManager(common_dir),
+            tmp_path / "groups" / "101",
+            create_local=True,
+        )
+
+        assert [skill["name"] for skill in manager.list_skills()] == ["shared"]
+        assert "Original common content" in manager.load_skill("shared")
+        assert "公共技能" in manager.remove_skill("shared")
+        assert "公共技能" in manager.save_skill(
+            "shared",
+            "---\nname: shared\ndescription: changed\n---\nchanged",
+        )
+        assert "Original common content" in common_file.read_text(encoding="utf-8")
+
+    def test_local_skills_and_load_dedup_are_isolated_by_group(self, tmp_path):
+        common_dir = tmp_path / "common"
+        common_dir.mkdir()
+        make_skill_file(common_dir, "shared", "Shared", "Common body")
+        common = SkillManager(common_dir)
+        first = GroupSkillManager(
+            common,
+            tmp_path / "groups" / "101",
+            create_local=True,
+        )
+        second = GroupSkillManager(
+            common,
+            tmp_path / "groups" / "202",
+            create_local=True,
+        )
+        local_content = (
+            "---\nname: local-only\ndescription: Group 101\n---\nLocal body"
+        )
+
+        assert "已创建" in first.save_skill("local-only", local_content)
+        assert {skill["name"] for skill in first.list_skills()} == {
+            "shared",
+            "local-only",
+        }
+        assert [skill["name"] for skill in second.list_skills()] == ["shared"]
+        assert "Local body" in first.load_skill("local-only")
+        assert "已在本轮对话中加载" in first.load_skill("local-only")
+        assert "Common body" in first.load_skill("shared")
+        assert "Common body" in second.load_skill("shared")
+
+        first.reset_conversation()
+        assert "Local body" in first.load_skill("local-only")
+        assert "已在本轮对话中加载" in second.load_skill("shared")
+
+    def test_read_only_inspection_does_not_create_local_directory(self, tmp_path):
+        common_dir = tmp_path / "common"
+        common_dir.mkdir()
+        local_dir = tmp_path / "groups" / "303"
+        manager = GroupSkillManager(
+            SkillManager(common_dir),
+            local_dir,
+            create_local=False,
+        )
+
+        assert manager.list_skills() == []
+        assert not local_dir.exists()
+
+    @pytest.mark.parametrize(
+        "malicious_name",
+        ["../../shared", "../202/local", "/tmp/escaped", r"..\\..\\shared"],
+    )
+    def test_local_skill_names_cannot_escape_group_directory(
+        self,
+        tmp_path,
+        malicious_name,
+    ):
+        common_dir = tmp_path / "common"
+        common_dir.mkdir()
+        common_file = make_skill_file(
+            common_dir,
+            "shared",
+            "Shared instructions",
+            "Original common content",
+        )
+        manager = GroupSkillManager(
+            SkillManager(common_dir),
+            tmp_path / "groups" / "101",
+            create_local=True,
+        )
+
+        assert "名称无效" in manager.save_skill(malicious_name, "changed")
+        assert "名称无效" in manager.remove_skill(malicious_name)
+        assert "名称无效" in manager.load_skill(malicious_name)
+        assert "Original common content" in common_file.read_text(encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------

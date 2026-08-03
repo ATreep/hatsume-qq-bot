@@ -1,4 +1,4 @@
-# Feature Specification: Send File from Kali Container
+# Feature Specification: Send File from Ubuntu Container
 
 **Feature Branch**: `014-send-file-tool`
 
@@ -6,13 +6,13 @@
 
 **Status**: Draft
 
-**Input**: User description: "Add a new tool that allows bot send a file from its kali docker container"
+**Input**: User description: "Add a new tool that allows bot send a file from its ubuntu docker container"
 
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - Send Script Output File on Explicit Request (Priority: P1)
 
-A user asks the bot to write a Python script inside the Kali container and explicitly says "send me the script file." The bot executes the shell commands to create the script in `/work/`, then uses the send_file tool to extract the file from the container and deliver it to the QQ group as a group file attachment.
+A user asks the bot to write a Python script inside the Ubuntu container and explicitly says "send me the script file." The bot executes the shell commands to create the script in `/work/`, then uses the send_file tool to extract the file from the container and deliver it to the QQ group as a group file attachment.
 
 **Why this priority**: This is the core capability — delivering container-generated files to users on demand. Without this, users cannot receive any files generated inside the container.
 
@@ -85,7 +85,7 @@ The user asks the bot to write a script but does NOT explicitly request the file
 
 ### Edge Cases
 
-- What happens when the Docker container is not running? The system checks container status and returns "Kali 容器未运行".
+- What happens when the Docker container is not running? The system checks container status and returns "Ubuntu 容器未运行".
 - What happens when the file path points to a directory? The system checks if it's a regular file and returns "是一个目录".
 - What happens when docker cp times out? After 30 seconds, the system returns "文件提取超时" and cleans up temp files.
 - What happens with symlinks? Symlink targets are validated to also be within `/work/`.
@@ -96,7 +96,7 @@ The user asks the bot to write a script but does NOT explicitly request the file
 
 ### Functional Requirements
 
-- **FR-001**: System MUST allow extraction of files from the Kali Docker container `/work/` directory to the QQ group chat.
+- **FR-001**: System MUST allow extraction of files from the Ubuntu Docker container `/work/` directory to the QQ group chat.
 - **FR-002**: System MUST resolve relative file paths against `/work/` and accept absolute paths starting with `/work/`.
 - **FR-003**: System MUST reject file paths that resolve outside `/work/` (including `../` traversal and absolute paths outside `/work/`).
 - **FR-004**: System MUST enforce a maximum file size of 10 MB before attempting extraction.
@@ -111,7 +111,7 @@ The user asks the bot to write a script but does NOT explicitly request the file
 
 ### Key Entities
 
-- **Container File**: A file located inside the Kali Docker container at a path under `/work/`. Has attributes: path, size (bytes), type (file/directory/symlink).
+- **Container File**: A file located inside the Ubuntu Docker container at a path under `/work/`. Has attributes: path, size (bytes), type (file/directory/symlink).
 - **Transferred File**: The file after extraction from the container to the host temporary directory, before being sent to QQ.
 - **Group File Message**: The file as received by QQ group members. Displays with a filename and appears in the group file list.
 
@@ -127,7 +127,7 @@ The user asks the bot to write a script but does NOT explicitly request the file
 
 ## Assumptions
 
-- The Kali Docker container is named `kali-cmd-runner` and accessible via `docker cp`.
+- The Ubuntu Docker container is named `hatsume-space` and accessible via `docker cp`.
 - The OneBot V11 protocol implementation supports `MessageSegment.file()` for group file sending.
 - Users are interacting via QQ group chat (not private chat initially).
 - Files sent are small to medium-sized artifacts (scripts, reports, configs, scan results).

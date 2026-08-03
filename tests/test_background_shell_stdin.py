@@ -38,10 +38,15 @@ _setup_package_hierarchy()
 @pytest.fixture(autouse=True)
 def _reset_stdin_queues():
     """Reset _stdin_queues before each test."""
-    from hatsume.plugins.hatsume_plugin.graph.agents import _stdin_queues
+    from hatsume.plugins.hatsume_plugin.graph.agents import (
+        _stdin_queues,
+        _stdin_request_groups,
+    )
     _stdin_queues.clear()
+    _stdin_request_groups.clear()
     yield
     _stdin_queues.clear()
+    _stdin_request_groups.clear()
 
 
 class TestWriteStdin:
@@ -111,14 +116,15 @@ class TestCleanupStdinQueues:
         from hatsume.plugins.hatsume_plugin.graph.agents import (
             _stdin_queues,
             _cleanup_stdin_queues,
+            register_stdin_request,
         )
 
         q = asyncio.Queue()
-        _stdin_queues["stdin_test_abc_0"] = q
-        _stdin_queues["stdin_test_abc_1"] = asyncio.Queue()
-        _stdin_queues["stdin_other_xyz_0"] = asyncio.Queue()
+        register_stdin_request("stdin_test_abc_0", 101, q)
+        register_stdin_request("stdin_test_abc_1", 101, asyncio.Queue())
+        register_stdin_request("stdin_other_xyz_0", 202, asyncio.Queue())
 
-        _cleanup_stdin_queues("test_abc")
+        _cleanup_stdin_queues("test_abc", 101)
 
         assert q.get_nowait() is None
         assert "stdin_test_abc_0" not in _stdin_queues

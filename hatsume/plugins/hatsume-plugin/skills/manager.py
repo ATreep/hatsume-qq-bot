@@ -10,11 +10,13 @@ import yaml
 class SkillManager:
     """Manages skill files: scanning, lazy loading, caching, deduplication, removal."""
 
-    def __init__(self, skills_dir: Path) -> None:
+    def __init__(self, skills_dir: Path, *, create_dir: bool = True) -> None:
         self._skills_dir = skills_dir
+        self._create_dir = create_dir
         self._content_cache: dict[str, str] = {}
         self._loaded_this_conversation: set[str] = set()
-        self._ensure_dir()
+        if create_dir:
+            self._ensure_dir()
 
     # ------------------------------------------------------------------
     # Public API
@@ -26,7 +28,10 @@ class SkillManager:
         Only .md files with valid YAML frontmatter (name + description) are included.
         Files with duplicate names log a warning; last one wins.
         """
-        self._ensure_dir()
+        if not self._skills_dir.exists():
+            if not self._create_dir:
+                return []
+            self._ensure_dir()
         seen: dict[str, bool] = {}
         results: list[dict[str, str]] = []
 
@@ -54,6 +59,11 @@ class SkillManager:
         the same conversation.
         """
 
+        try:
+            name = self.validate_skill_name(name)
+        except ValueError:
+            return "错误：技能名称无效。"
+
         if name in self._content_cache:
             self._loaded_this_conversation.add(name)
             return self._content_cache[name]
@@ -78,6 +88,10 @@ class SkillManager:
 
         Returns success message or error if the skill doesn't exist.
         """
+        try:
+            name = self.validate_skill_name(name)
+        except ValueError:
+            return "错误：技能名称无效。"
         file_path = self._skills_dir / f"{name}.md"
         if not file_path.exists():
             return f"错误：技能 '{name}' 不存在。"
@@ -95,6 +109,10 @@ class SkillManager:
         Returns a success message. If a skill with the same name already
         exists, it is overwritten and the message indicates so.
         """
+        try:
+            name = self.validate_skill_name(name)
+        except ValueError:
+            return "错误：技能名称无效。"
         self._ensure_dir()
         file_path = self._skills_dir / f"{name}.md"
         existed = file_path.exists()
@@ -118,6 +136,20 @@ class SkillManager:
         in the next conversation.
         """
         self._loaded_this_conversation.clear()
+
+    @staticmethod
+    def validate_skill_name(name: str) -> str:
+        """Validate a Skill name before using it as a filename."""
+        normalized = str(name).strip()
+        if (
+            not normalized
+            or normalized in {".", ".."}
+            or "/" in normalized
+            or "\\" in normalized
+            or "\0" in normalized
+        ):
+            raise ValueError("invalid Skill name")
+        return normalized
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -198,3 +230,76 @@ class SkillManager:
     def _ensure_dir(self) -> None:
         """Create the skills directory if it doesn't exist."""
         self._skills_dir.mkdir(parents=True, exist_ok=True)
+
+
+class GroupSkillManager:
+    """Read-only common Skills overlaid with one group's writable Skills."""
+
+    def __init__(
+        self,
+        common_manager: SkillManager,
+        local_dir: Path,
+        *,
+        create_local: bool,
+    ) -> None:
+        self._common_manager = common_manager
+        self._local_manager = SkillManager(local_dir, create_dir=create_local)
+        self._loaded_this_conversation: set[str] = set()
+
+    def _common_names(self) -> set[str]:
+        return {skill["name"] for skill in self._common_manager.list_skills()}
+
+    def list_skills(self) -> list[dict[str, str]]:
+        common = self._common_manager.list_skills()
+        common_names = {skill["name"] for skill in common}
+        local = [
+            skill
+            for skill in self._local_manager.list_skills()
+            if skill["name"] not in common_names
+        ]
+        return common + local
+
+    def load_skill(self, name: str) -> str:
+        try:
+            name = self._local_manager.validate_skill_name(name)
+        except ValueError:
+            return "错误：技能名称无效。"
+        if name in self._loaded_this_conversation:
+            return f"技能 '{name}' 已在本轮对话中加载。"
+        if name in self._common_names():
+            result = self._common_manager.load_skill(name)
+        else:
+            result = self._local_manager.load_skill(name)
+        if not result.startswith("错误："):
+            self._loaded_this_conversation.add(name)
+        return result
+
+    def remove_skill(self, name: str) -> str:
+        try:
+            name = self._local_manager.validate_skill_name(name)
+        except ValueError:
+            return "错误：技能名称无效。"
+        if name in self._common_names():
+            return f"错误：技能 '{name}' 是公共技能，不能删除。"
+        result = self._local_manager.remove_skill(name)
+        self._loaded_this_conversation.discard(name)
+        return result
+
+    def save_skill(self, name: str, content: str) -> str:
+        try:
+            name = self._local_manager.validate_skill_name(name)
+        except ValueError:
+            return "错误：技能名称无效。"
+        if name in self._common_names():
+            return f"错误：技能 '{name}' 是公共技能，不能覆盖。"
+        result = self._local_manager.save_skill(name, content)
+        if not result.startswith("错误："):
+            self._loaded_this_conversation.discard(name)
+        return result
+
+    def parse_frontmatter_text(self, text: str) -> dict[str, str] | None:
+        return self._local_manager.parse_frontmatter_text(text)
+
+    def reset_conversation(self) -> None:
+        self._loaded_this_conversation.clear()
+        self._local_manager.reset_conversation()

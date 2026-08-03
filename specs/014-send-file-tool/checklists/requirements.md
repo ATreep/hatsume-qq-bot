@@ -1,4 +1,4 @@
-# Specification Quality Checklist: Send File from Kali Container
+# Specification Quality Checklist: Send File from Ubuntu Container
 
 **Purpose**: Validate specification completeness and quality before proceeding to planning
 **Created**: 2026-06-25

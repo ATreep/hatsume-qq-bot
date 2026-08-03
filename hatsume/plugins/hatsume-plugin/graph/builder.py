@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from langgraph.graph import START, END, StateGraph, MessagesState
 
+from ..group_runtime import get_current_group_runtime
 from .nodes import ai_node, human_node, chat_end_detect_node, finish_conversation_node
-from .nodes import _last_was_auxiliary_only
 
 
 def _human_condition(state: MessagesState) -> str:
@@ -17,7 +17,7 @@ def _human_condition(state: MessagesState) -> str:
 def _chat_end_detect_condition(state: MessagesState) -> str:
     if state["messages"][-1].content == "__end__":
         return "__end__"
-    if _last_was_auxiliary_only:
+    if get_current_group_runtime().last_was_auxiliary_only:
         return "auxiliary_only"
     return "continue"
 

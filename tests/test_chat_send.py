@@ -62,7 +62,7 @@ ConversationState = _state_mod.ConversationState
 
 def _make_state(**overrides) -> ConversationState:
     """Create a ConversationState with sensible defaults for testing."""
-    state = ConversationState()
+    state = ConversationState(group_id=101)
     for k, v in overrides.items():
         setattr(state, k, v)
     return state
@@ -261,13 +261,13 @@ def test_flush_pending_returns_correct_data():
 
 def test_conversation_state_default_is_graph_running_false():
     """ConversationState should default to is_graph_running = False."""
-    state = ConversationState()
+    state = ConversationState(group_id=101)
     assert state.is_graph_running is False
 
 
 def test_conversation_state_queues_default_empty():
     """All message queues should default to empty lists."""
-    state = ConversationState()
+    state = ConversationState(group_id=101)
     assert state.human_queue == []
     assert state.human_source_queue == []
     assert state.pending_queue == []

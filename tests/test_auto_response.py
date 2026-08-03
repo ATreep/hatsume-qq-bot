@@ -139,55 +139,128 @@ def test_random_response_trigger_is_between_thirty_minutes_and_two_hours(
 
 
 @pytest.mark.asyncio
-async def test_refresh_removes_internal_task_when_group_is_disabled(
-    modules, store, monkeypatch
-):
+async def test_refresh_removes_internal_task_for_group_without_memories(modules, store):
     _, executor, scheduler, _ = modules
     point_time = datetime.now(SHANGHAI).timestamp() + 3600
-    store.upsert_auto_response(point_time)
-    point = store.get_auto_response_point()
+    store.upsert_auto_response(123, point_time)
+    point = store.get_auto_response_point(123)
     assert point is not None
-    monkeypatch.setattr(executor, "AUTO_RESPONSE_GROUP_ID", 0)
 
-    await executor.refresh_auto_response(store)
+    await executor.refresh_auto_responses(store, ())
 
     scheduler.remove_job.assert_called_once_with(point["job_id"])
     scheduler.add_job.assert_not_called()
-    assert store.get_auto_response_point() is None
+    assert store.get_auto_response_point(123) is None
 
 
 @pytest.mark.asyncio
-async def test_refresh_retains_and_registers_one_future_internal_point(
-    modules, store
-):
+async def test_refresh_retains_future_internal_points_for_each_memory_group(modules, store):
     _, executor, scheduler, _ = modules
-    point_time = datetime.now(SHANGHAI).timestamp() + 3600
-    task_id = store.upsert_auto_response(point_time)
+    first_time = datetime.now(SHANGHAI).timestamp() + 3600
+    second_time = first_time + 600
+    first_task_id = store.upsert_auto_response(123, first_time)
+    second_task_id = store.upsert_auto_response(456, second_time)
 
-    await executor.refresh_auto_response(store)
+    await executor.refresh_auto_responses(store, (123, 456))
 
-    point = store.get_auto_response_point()
-    assert point is not None
-    assert point["task_id"] == task_id
-    assert point["exact_at"] == point_time
-    assert scheduler.add_job.call_count == 1
-    assert scheduler.add_job.call_args.kwargs["id"] == point["job_id"]
+    first_point = store.get_auto_response_point(123)
+    second_point = store.get_auto_response_point(456)
+    assert first_point["task_id"] == first_task_id
+    assert first_point["exact_at"] == first_time
+    assert second_point["task_id"] == second_task_id
+    assert second_point["exact_at"] == second_time
+    assert {call.kwargs["id"] for call in scheduler.add_job.call_args_list} == {
+        first_point["job_id"],
+        second_point["job_id"],
+    }
 
 
 @pytest.mark.asyncio
-async def test_refresh_creates_one_future_internal_point_when_missing(
+async def test_refresh_creates_one_future_internal_point_for_each_missing_group(
     modules, store, monkeypatch
 ):
     _, executor, scheduler, _ = modules
     point_time = datetime.now(SHANGHAI).timestamp() + 3600
     monkeypatch.setattr(executor, "_random_response_trigger", lambda: point_time)
 
-    await executor.refresh_auto_response(store)
+    await executor.refresh_auto_responses(store, (123, 456))
 
-    point = store.get_auto_response_point()
-    assert point is not None
-    assert point["exact_at"] == point_time
+    first_point = store.get_auto_response_point(123)
+    second_point = store.get_auto_response_point(456)
+    assert first_point["exact_at"] == point_time
+    assert second_point["exact_at"] == point_time
+    assert scheduler.add_job.call_count == 2
+
+
+def test_ensure_auto_response_for_group_is_idempotent(modules, store, monkeypatch):
+    _, executor, scheduler, _ = modules
+    point_time = datetime.now(SHANGHAI).timestamp() + 3600
+    monkeypatch.setattr(executor, "_random_response_trigger", lambda: point_time)
+
+    executor.ensure_auto_response_for_group(store, 456)
+    first = store.get_auto_response_point(456)
+    executor.ensure_auto_response_for_group(store, 456)
+
+    assert store.get_auto_response_point(456)["task_id"] == first["task_id"]
     assert scheduler.add_job.call_count == 1
+
+
+def test_ensure_auto_response_repairs_orphaned_future_point(
+    modules, store, monkeypatch
+):
+    _, executor, scheduler, _ = modules
+    point_time = datetime.now(SHANGHAI).timestamp() + 3600
+    monkeypatch.setattr(executor, "_random_response_trigger", lambda: point_time)
+    scheduler.add_job.side_effect = RuntimeError("scheduler unavailable")
+
+    with pytest.raises(RuntimeError, match="scheduler unavailable"):
+        executor.ensure_auto_response_for_group(store, 456)
+
+    orphaned = store.get_auto_response_point(456)
+    assert orphaned is not None
+    scheduler.add_job.side_effect = None
+    scheduler.get_job.return_value = None
+
+    executor.ensure_auto_response_for_group(store, 456)
+
+    repaired = store.get_auto_response_point(456)
+    assert repaired["task_id"] == orphaned["task_id"]
+    assert scheduler.add_job.call_count == 2
+    scheduler.get_job.assert_called_once_with(orphaned["job_id"])
+
+
+@pytest.mark.asyncio
+async def test_recovery_skips_groups_without_registered_bot_routes(
+    modules, store, monkeypatch
+):
+    _, executor, scheduler, nodes = modules
+    current = datetime.now(SHANGHAI).timestamp()
+    trigger_at = current - 60
+    successor_at = current + 3600
+    store.upsert_auto_response(123, trigger_at, "routable")
+    store.upsert_auto_response(456, trigger_at, "unroutable")
+    unroutable_point = store.get_auto_response_point(456)
+    monkeypatch.setattr(executor, "_random_response_trigger", lambda: successor_at)
+    scheduler.reset_mock()
+
+    await executor.reload_all_schedules(store, now=current, group_ids=(123,))
+
+    nodes.inject_timer.assert_called_once()
+    assert nodes.inject_timer.call_args.kwargs["group_id"] == 123
+    assert store.get_point(unroutable_point["id"])["processed_occurrences"] == 0
+
+
+@pytest.mark.asyncio
+async def test_ineligible_due_auto_response_is_removed_before_recovery(modules, store):
+    _, executor, _, nodes = modules
+    current = datetime.now(SHANGHAI).timestamp()
+    task_id = store.upsert_auto_response(456, current - 60, "stale")
+
+    executor.remove_ineligible_auto_response_groups(store, (123,))
+    await executor.reload_all_schedules(store, now=current, group_ids=(123, 456))
+
+    assert store.get_task(task_id) is None
+    nodes.inject_timer.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -197,8 +270,8 @@ async def test_auto_response_marks_before_injection_and_registers_successor(
     _, executor, scheduler, nodes = modules
     trigger_at = datetime.now(SHANGHAI).timestamp() + 60
     successor_at = trigger_at + 3600
-    store.upsert_auto_response(trigger_at, "participate in chat")
-    point = store.get_auto_response_point()
+    store.upsert_auto_response(456, trigger_at, "participate in chat")
+    point = store.get_auto_response_point(456)
     assert point is not None
     progress_marked = False
     original_mark = store.mark_occurrence_processed
@@ -210,7 +283,7 @@ async def test_auto_response_marks_before_injection_and_registers_successor(
 
     def inject_timer(**kwargs):
         assert progress_marked is True
-        assert kwargs["group_id"] == 123
+        assert kwargs["group_id"] == 456
         assert kwargs["timer_prompt"] == "participate in chat"
 
     monkeypatch.setattr(store, "mark_occurrence_processed", mark_processed)
@@ -220,7 +293,7 @@ async def test_auto_response_marks_before_injection_and_registers_successor(
 
     await executor._execute_point(point["id"], store, scheduled_at=trigger_at)
 
-    successor = store.get_auto_response_point()
+    successor = store.get_auto_response_point(456)
     assert successor is not None
     assert successor["exact_at"] == successor_at
     assert scheduler.add_job.call_count == 1
@@ -234,8 +307,8 @@ async def test_auto_response_registers_successor_when_injection_fails(
     _, executor, scheduler, nodes = modules
     trigger_at = datetime.now(SHANGHAI).timestamp() + 60
     successor_at = trigger_at + 3600
-    store.upsert_auto_response(trigger_at, "participate in chat")
-    point = store.get_auto_response_point()
+    store.upsert_auto_response(456, trigger_at, "participate in chat")
+    point = store.get_auto_response_point(456)
     assert point is not None
     monkeypatch.setattr(
         nodes,
@@ -248,7 +321,7 @@ async def test_auto_response_registers_successor_when_injection_fails(
     with pytest.raises(RuntimeError, match="injection failed"):
         await executor._execute_point(point["id"], store, scheduled_at=trigger_at)
 
-    successor = store.get_auto_response_point()
+    successor = store.get_auto_response_point(456)
     assert successor is not None
     assert successor["exact_at"] == successor_at
     assert scheduler.add_job.call_count == 1
@@ -271,8 +344,8 @@ async def test_auto_response_skips_quiet_hours_and_registers_successor(
     _, executor, scheduler, nodes = modules
     trigger_at = datetime(2026, 1, 2, hour, minute, tzinfo=SHANGHAI).timestamp()
     successor_at = trigger_at + 3600
-    store.upsert_auto_response(trigger_at, "participate in chat")
-    point = store.get_auto_response_point()
+    store.upsert_auto_response(456, trigger_at, "participate in chat")
+    point = store.get_auto_response_point(456)
     assert point is not None
     monkeypatch.setattr(executor, "_random_response_trigger", lambda: successor_at)
     scheduler.reset_mock()
@@ -283,24 +356,7 @@ async def test_auto_response_skips_quiet_hours_and_registers_successor(
         nodes.inject_timer.assert_called_once()
     else:
         nodes.inject_timer.assert_not_called()
-    successor = store.get_auto_response_point()
+    successor = store.get_auto_response_point(456)
     assert successor is not None
     assert successor["exact_at"] == successor_at
     assert scheduler.add_job.call_count == 1
-
-
-@pytest.mark.asyncio
-async def test_auto_response_never_injects_or_reschedules_when_disabled(
-    modules, store, monkeypatch
-):
-    _, executor, scheduler, nodes = modules
-    trigger_at = datetime.now(SHANGHAI).timestamp() + 60
-    store.upsert_auto_response(trigger_at)
-    point = store.get_auto_response_point()
-    assert point is not None
-    monkeypatch.setattr(executor, "AUTO_RESPONSE_GROUP_ID", 0)
-
-    await executor._execute_point(point["id"], store, scheduled_at=trigger_at)
-
-    nodes.inject_timer.assert_not_called()
-    scheduler.add_job.assert_not_called()

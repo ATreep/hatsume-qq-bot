@@ -96,30 +96,39 @@ def test_get_store_closes_failed_v2_initialization_and_retries(capsys):
 
 
 @pytest.mark.asyncio
-async def test_init_scheduler_orders_recovery_auto_response_and_cleanup():
+async def test_init_scheduler_orders_recovery_memory_group_auto_response_and_cleanup():
     timer = _load_timer_init(type("Store", (), {}))
     store = object()
     timer._store = store
     calls = []
     executor = types.ModuleType(f"{BASE_NAME}.timer.executor")
 
-    async def recover(received):
+    def sync(received, group_ids):
         assert received is store
+        assert tuple(group_ids) == (101, 202)
+        calls.append("sync")
+
+    async def recover(received, *, group_ids):
+        assert received is store
+        assert tuple(group_ids) == (101,)
         calls.append("recover")
 
-    async def auto(received):
+    async def auto(received, group_ids, *, routable_group_ids):
         assert received is store
+        assert tuple(group_ids) == (101, 202)
+        assert tuple(routable_group_ids) == (101,)
         calls.append("auto")
 
     def cleanup(received):
         assert received is store
         calls.append("cleanup")
 
+    executor.remove_ineligible_auto_response_groups = sync
     executor.reload_all_schedules = recover
-    executor.refresh_auto_response = auto
+    executor.refresh_auto_responses = auto
     executor.register_cleanup_job = cleanup
     sys.modules[executor.__name__] = executor
 
-    await timer.init_scheduler()
+    await timer.init_scheduler((101, 202), (101,))
 
-    assert calls == ["recover", "auto", "cleanup"]
+    assert calls == ["sync", "recover", "auto", "cleanup"]

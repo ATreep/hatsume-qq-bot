@@ -176,43 +176,28 @@ def get_embedding_model() -> OpenAIEmbeddings:
 
 
 async def _resolve_image_srcs(images: list[str]) -> list[str]:
-    """Convert sandbox absolute paths to base64 data URIs.
+    """Convert sandbox image paths to base64 data URIs.
 
     URLs (http://, https://) and existing data URIs pass through unchanged.
-    Absolute Unix paths (starting with /) are read from the Docker sandbox
-    and converted to base64 data URIs with a detected MIME type.
+    Sandbox file URIs and absolute Unix paths are read from the Docker sandbox
+    and converted to base64 data URIs with a detected MIME type for Ark.
     """
-    import shlex
+    from .group_runtime import get_current_group_id
+    from .infra import read_sandbox_image_data_uri
 
-    from .infra import ensure_container_running, run_cmd
-
-    _MIME_FALLBACK: dict[str, str] = {
-        "png": "image/png",
-        "jpg": "image/jpeg",
-        "jpeg": "image/jpeg",
-        "gif": "image/gif",
-        "webp": "image/webp",
-        "bmp": "image/bmp",
-        "svg": "image/svg+xml",
-    }
+    group_id = get_current_group_id()
 
     resolved: list[str] = []
     for src in images:
         if src.startswith(("http://", "https://", "data:")):
             resolved.append(src)
             continue
+        if src.startswith("file://"):
+            src = src[7:]
         if src.startswith("/"):
-            await ensure_container_running()
-            mime = (await run_cmd(
-                f"file --mime-type -b {shlex.quote(src)}"
-            )).strip()
-            if not mime or "/" not in mime:
-                ext = src.rsplit(".", 1)[-1].lower() if "." in src else "png"
-                mime = _MIME_FALLBACK.get(ext, "image/png")
-            b64 = (await run_cmd(
-                f"base64 -w 0 {shlex.quote(src)}"
-            )).strip()
-            resolved.append(f"data:{mime};base64,{b64}")
+            resolved.append(
+                await read_sandbox_image_data_uri(src, group_id=group_id)
+            )
         else:
             resolved.append(src)
     return resolved

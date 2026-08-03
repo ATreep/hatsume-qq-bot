@@ -62,6 +62,7 @@ def _setup_package_hierarchy():
     _ensure_module("hatsume.plugins.hatsume_plugin.graph.nodes")
     _ensure_module("hatsume.plugins.hatsume_plugin.graph.nodes.ai")
     _ensure_module("hatsume.plugins.hatsume_plugin.graph.tools")
+    _ensure_module("hatsume.plugins.hatsume_plugin.group_runtime")
     # prompts: only stub if not already a real module (loaded by other tests)
     prompts_name = "hatsume.plugins.hatsume_plugin.prompts"
     if prompts_name not in sys.modules:
@@ -76,12 +77,20 @@ def _setup_package_hierarchy():
     # Add missing attributes to infra
     infra_mod = sys.modules["hatsume.plugins.hatsume_plugin.infra"]
     _ensure_attr(infra_mod, "run_cmd", lambda *a, **kw: "")
-    _ensure_attr(infra_mod, "ensure_container_running", lambda *a, **kw: None)
+    _ensure_attr(infra_mod, "ensure_container_running", AsyncMock(return_value=None))
     _ensure_attr(infra_mod, "delete_container", lambda *a, **kw: None)
     _ensure_attr(infra_mod, "_background_procs", {})
     _ensure_attr(infra_mod, "start_background_cmd", MagicMock(return_value=Path("/tmp/test_bg.log")))
     _ensure_attr(infra_mod, "read_background_output", MagicMock(return_value=("", 0)))
     _ensure_attr(infra_mod, "kill_background_cmd", MagicMock(return_value=None))
+    _ensure_attr(
+        infra_mod,
+        "get_background_process",
+        lambda proc_id, **_kwargs: infra_mod._background_procs.get(proc_id),
+    )
+
+    runtime_mod = sys.modules["hatsume.plugins.hatsume_plugin.group_runtime"]
+    _ensure_attr(runtime_mod, "get_current_group_id", lambda: 101)
 
     # Add missing attributes to graph.nodes (merged, not graph.nodes.ai)
     nodes_mod = sys.modules["hatsume.plugins.hatsume_plugin.graph.nodes"]
@@ -90,7 +99,6 @@ def _setup_package_hierarchy():
     # Add missing attributes to graph.tools
     tools_mod = sys.modules["hatsume.plugins.hatsume_plugin.graph.tools"]
     _ensure_attr(tools_mod, "_agent_notification_callback", None)
-    _ensure_attr(tools_mod, "_current_group_id", 0)
 
     # Add missing attributes to prompts
     prompts_mod = sys.modules["hatsume.plugins.hatsume_plugin.prompts"]
@@ -235,6 +243,23 @@ def _make_mock_code_model_raw(content: str):
     return types.SimpleNamespace(ainvoke=mock_ainvoke)
 
 
+async def _run_bound_background_shell(task: str, user_id: int = 123) -> str:
+    from hatsume.plugins.hatsume_plugin.graph.agents import (
+        _run_background_shell,
+        add_agent_instance,
+        bind_agent_instance,
+    )
+
+    instance_id = add_agent_instance(
+        "background_shell",
+        group_id=101,
+        status="running",
+        task=task,
+    )
+    with bind_agent_instance(instance_id):
+        return await _run_background_shell(task, user_id)
+
+
 # ---------------------------------------------------------------------------
 # Test: agent is registered
 # ---------------------------------------------------------------------------
@@ -265,7 +290,7 @@ class TestBackgroundShellParseTask:
         from hatsume.plugins.hatsume_plugin.graph.agents import _run_background_shell
         with patch("hatsume.plugins.hatsume_plugin.models.get_code_model",
                    return_value=_make_mock_code_model_raw("not valid {{{")):
-            result = asyncio.run(_run_background_shell("bad task", 123))
+            result = asyncio.run(_run_bound_background_shell("bad task"))
         assert "failed to parse" in result.lower()
 
     def test_empty_cmd_returns_error(self):
@@ -274,8 +299,58 @@ class TestBackgroundShellParseTask:
             "cmd": "", "description": "nothing", "total_timeout": 300})
         with patch("hatsume.plugins.hatsume_plugin.models.get_code_model",
                    return_value=_make_mock_code_model_raw(parse_json)):
-            result = asyncio.run(_run_background_shell("empty cmd", 123))
+            result = asyncio.run(_run_bound_background_shell("empty cmd"))
         assert "no command" in result.lower()
+
+    def test_cancellation_propagates_after_process_cleanup(self):
+        from hatsume.plugins.hatsume_plugin.graph.agents import (
+            _run_background_shell,
+        )
+
+        async def scenario():
+            parse_json = json.dumps(
+                {
+                    "cmd": "sleep 300",
+                    "description": "wait",
+                    "total_timeout": 300,
+                }
+            )
+            sleep_entered = asyncio.Event()
+
+            async def blocked_sleep(_seconds):
+                sleep_entered.set()
+                await asyncio.Event().wait()
+
+            with (
+                patch(
+                    "hatsume.plugins.hatsume_plugin.models.get_code_model",
+                    return_value=_make_mock_code_model_raw(parse_json),
+                ),
+                patch(
+                    "hatsume.plugins.hatsume_plugin.infra.ensure_container_running",
+                    new=AsyncMock(),
+                ),
+                patch(
+                    "hatsume.plugins.hatsume_plugin.infra.start_background_cmd",
+                    return_value=Path("/tmp/cancelled-background.log"),
+                ),
+                patch(
+                    "hatsume.plugins.hatsume_plugin.infra.kill_background_cmd"
+                ) as kill,
+                patch("asyncio.sleep", new=blocked_sleep),
+            ):
+                task = asyncio.create_task(
+                    _run_bound_background_shell("sleep until cancelled")
+                )
+                await asyncio.wait_for(sleep_entered.wait(), timeout=1)
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+
+            kill.assert_called_once()
+            assert kill.call_args.kwargs == {"group_id": 101}
+
+        asyncio.run(scenario())
 
 
 # ---------------------------------------------------------------------------
@@ -301,10 +376,12 @@ class TestBackgroundShellDecisionLoop:
                        return_value=("finished", 100)), \
                  patch("hatsume.plugins.hatsume_plugin.infra.kill_background_cmd") as mk:
                 mp = MagicMock(); mp.poll.return_value = None
-                bm = MagicMock(); bm.get.return_value = (mp, mock_tmp)
-                with patch("hatsume.plugins.hatsume_plugin.infra._background_procs", bm):
+                with patch(
+                    "hatsume.plugins.hatsume_plugin.infra.get_background_process",
+                    return_value=(mp, mock_tmp),
+                ):
                     r = asyncio.run(asyncio.wait_for(
-                        _run_background_shell("echo done", 123), timeout=2.0))
+                        _run_bound_background_shell("echo done"), timeout=2.0))
             assert isinstance(r, str)
             # kill_background_cmd is called during cleanup after DONE decision
             if mock_tmp.exists(): mock_tmp.unlink()
@@ -327,10 +404,12 @@ class TestBackgroundShellDecisionLoop:
                        side_effect=_read), \
                  patch("hatsume.plugins.hatsume_plugin.infra.kill_background_cmd"):
                 mp = MagicMock(); mp.poll.return_value = None
-                bm = MagicMock(); bm.get.return_value = (mp, mock_tmp)
-                with patch("hatsume.plugins.hatsume_plugin.infra._background_procs", bm):
+                with patch(
+                    "hatsume.plugins.hatsume_plugin.infra.get_background_process",
+                    return_value=(mp, mock_tmp),
+                ):
                     asyncio.run(asyncio.wait_for(
-                        _run_background_shell("sleep 10", 123), timeout=5.0))
+                        _run_bound_background_shell("sleep 10"), timeout=5.0))
             assert len(reads) >= 3
             if mock_tmp.exists(): mock_tmp.unlink()
 
@@ -351,13 +430,14 @@ class TestBackgroundShellDecisionLoop:
                        return_value=("https://github.com/login/device\n", 100)), \
                  patch("hatsume.plugins.hatsume_plugin.infra.kill_background_cmd"), \
                  patch("hatsume.plugins.hatsume_plugin.graph.nodes.inject_agent_notification") as mi, \
-                 patch("hatsume.plugins.hatsume_plugin.graph.tools._agent_notification_callback", None), \
-                 patch("hatsume.plugins.hatsume_plugin.graph.tools._current_group_id", 0):
+                 patch("hatsume.plugins.hatsume_plugin.graph.tools._agent_notification_callback", None):
                 mp = MagicMock(); mp.poll.return_value = None
-                bm = MagicMock(); bm.get.return_value = (mp, mock_tmp)
-                with patch("hatsume.plugins.hatsume_plugin.infra._background_procs", bm):
+                with patch(
+                    "hatsume.plugins.hatsume_plugin.infra.get_background_process",
+                    return_value=(mp, mock_tmp),
+                ):
                     asyncio.run(asyncio.wait_for(
-                        _run_background_shell("gh auth login", 123), timeout=3.0))
+                        _run_bound_background_shell("gh auth login"), timeout=3.0))
             assert mi.call_count >= 1
             if mock_tmp.exists(): mock_tmp.unlink()
 
@@ -379,10 +459,12 @@ class TestBackgroundShellDecisionLoop:
                  patch("hatsume.plugins.hatsume_plugin.infra.kill_background_cmd") as mk:
                 mk.return_value = "killed output"
                 mp = MagicMock(); mp.poll.return_value = None
-                bm = MagicMock(); bm.get.return_value = (mp, mock_tmp)
-                with patch("hatsume.plugins.hatsume_plugin.infra._background_procs", bm):
+                with patch(
+                    "hatsume.plugins.hatsume_plugin.infra.get_background_process",
+                    return_value=(mp, mock_tmp),
+                ):
                     r = asyncio.run(asyncio.wait_for(
-                        _run_background_shell("sleep 999", 123), timeout=5.0))
+                        _run_bound_background_shell("sleep 999"), timeout=5.0))
             assert "超时" in r
             # kill_background_cmd called once on timeout + once in cleanup
             assert mk.call_count >= 1
@@ -406,9 +488,11 @@ class TestBackgroundShellDecisionLoop:
                  patch("hatsume.plugins.hatsume_plugin.infra.kill_background_cmd") as mk:
                 mk.return_value = "remaining"
                 mp = MagicMock(); mp.poll.return_value = None
-                bm = MagicMock(); bm.get.return_value = (mp, mock_tmp)
-                with patch("hatsume.plugins.hatsume_plugin.infra._background_procs", bm):
+                with patch(
+                    "hatsume.plugins.hatsume_plugin.infra.get_background_process",
+                    return_value=(mp, mock_tmp),
+                ):
                     r = asyncio.run(asyncio.wait_for(
-                        _run_background_shell("bad", 123), timeout=2.0))
+                        _run_bound_background_shell("bad"), timeout=2.0))
             assert "终止" in r; mk.assert_called_once()
             if mock_tmp.exists(): mock_tmp.unlink()

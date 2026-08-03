@@ -29,6 +29,11 @@ class MockState:
         self.chat_peers: set[str] = set()
 
 
+def _set_group_state(ai_mod, group_id: int, state: MockState) -> None:
+    runtime = ai_mod.group_runtime_registry.get_or_create(group_id)
+    runtime.conversation = state
+
+
 def _load_ai_module():
     """Load graph/nodes/ai.py with all external dependencies stubbed."""
     pkg_prefixes = [
@@ -216,9 +221,9 @@ class TestInjectTimer:
         ai_mod = _load_ai_module()
         mock_state = MockState()
         mock_state.is_chatting = True
-        ai_mod._state = mock_state
+        _set_group_state(ai_mod, 101, mock_state)
         ai_mod.inject_timer(
-            user_id=123, group_id=0, timer_prompt="提醒开会",
+            user_id=123, group_id=101, timer_prompt="提醒开会",
         )
         assert len(mock_state.human_queue) == 1
         msg = mock_state.human_queue[0]
@@ -233,10 +238,10 @@ class TestInjectTimer:
         ai_mod = _load_ai_module()
         mock_state = MockState()
         mock_state.is_chatting = True
-        ai_mod._state = mock_state
+        _set_group_state(ai_mod, 102, mock_state)
         ai_mod.inject_timer(
             user_id=123,
-            group_id=0,
+            group_id=102,
             timer_prompt="提醒开会",
             notified_user_name="小明",
         )
@@ -249,14 +254,14 @@ class TestInjectTimer:
         ai_mod = _load_ai_module()
         mock_state = MockState()
         mock_state.is_chatting = False
-        ai_mod._state = mock_state
+        _set_group_state(ai_mod, 103, mock_state)
         cb_called = {"called": False, "user_id": 0, "msg": ""}
         def cb(uid, gid, msg):
             cb_called["called"] = True
             cb_called["user_id"] = uid
             cb_called["msg"] = msg
         ai_mod.inject_timer(
-            user_id=456, group_id=0, timer_prompt="喝水提醒",
+            user_id=456, group_id=103, timer_prompt="喝水提醒",
             start_conversation_cb=cb,
         )
         assert cb_called["called"]
@@ -269,8 +274,8 @@ class TestInjectTimer:
         ai_mod = _load_ai_module()
         mock_state = MockState()
         mock_state.is_chatting = False
-        ai_mod._state = mock_state
-        ai_mod.inject_timer(user_id=789, group_id=0, timer_prompt="test")
+        _set_group_state(ai_mod, 104, mock_state)
+        ai_mod.inject_timer(user_id=789, group_id=104, timer_prompt="test")
 
 
 class TestTimerInjectionRoundTrip:
@@ -280,9 +285,9 @@ class TestTimerInjectionRoundTrip:
         ai_mod = _load_ai_module()
         mock_state = MockState()
         mock_state.is_chatting = True
-        ai_mod._state = mock_state
+        _set_group_state(ai_mod, 105, mock_state)
         ai_mod.inject_timer(
-            user_id=111, group_id=0, timer_prompt="定时提醒：喝水",
+            user_id=111, group_id=105, timer_prompt="定时提醒：喝水",
             start_conversation_cb=None,
         )
         msg = mock_state.human_queue[0]
@@ -298,7 +303,7 @@ class TestInjectAgentNotification:
         ai_mod = _load_ai_module()
         mock_state = MockState()
         mock_state.is_chatting = True
-        ai_mod._state = mock_state
+        _set_group_state(ai_mod, 9, mock_state)
         ai_mod.inject_agent_notification(
             user_id=234,
             group_id=9,
@@ -319,7 +324,7 @@ class TestInjectAgentNotification:
         ai_mod = _load_ai_module()
         mock_state = MockState()
         mock_state.is_chatting = True
-        ai_mod._state = mock_state
+        _set_group_state(ai_mod, 9, mock_state)
 
         ai_mod.inject_agent_notification(
             user_id=234,

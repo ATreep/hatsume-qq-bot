@@ -20,8 +20,6 @@ from .handlers.dialogue import handle_group_increase, start_chat, user_chat_hand
 from .handlers.tools import (
     handle_agents,
     handle_autoresponse,
-    handle_clear,
-    handle_generate_video,
     handle_list_skills,
     handle_membersearch,
     handle_model,
@@ -30,19 +28,40 @@ from .handlers.tools import (
     handle_resetsandbox,
     handle_shell,
     handle_timer,
+    handle_todo,
 )
 from .handlers.social import handle_like, handle_likerank
-from .memory import init_memory_system, init_tokenized_corpus  # noqa: F401 — scheduler decorator registers it
-from .timer import init_scheduler
+from .group_runtime import group_runtime_registry
+from .memory import (
+    configure_auto_response_timer_callback,
+    init_memory_system,
+    init_tokenized_corpus,  # noqa: F401 — scheduler decorator registers it
+    list_memory_group_ids,
+)
+from .timer import ensure_auto_response_for_group, init_scheduler
 
 # Initialize memory system on plugin startup (DB init, JSON migration, memory load)
 init_memory_system()
+configure_auto_response_timer_callback(ensure_auto_response_for_group)
 
-# Initialize timer scheduler after the OneBot connection is established.
-# Registering on bot-connect (rather than on_startup) guarantees the adapter
-# handshake is done, so timer delivery / auto-response callbacks that send
-# messages have a live bot available when they fire.
-nonebot.get_driver().on_bot_connect(init_scheduler)
+async def _handle_bot_connect(bot: Bot) -> None:
+    """Learn target-group routes before recovering background injections."""
+    await group_runtime_registry.discover_bot_groups(bot)
+    await init_scheduler(
+        list_memory_group_ids(),
+        group_runtime_registry.routed_group_ids(),
+    )
+
+
+async def _handle_bot_disconnect(bot: Bot) -> None:
+    group_runtime_registry.unbind_bot(bot)
+
+
+# Recover timers only after the connected OneBot account's group routes have
+# been learned. External triggers can then select the Bot for their target group.
+nonebot.get_driver().on_bot_connect(_handle_bot_connect)
+nonebot.get_driver().on_bot_disconnect(_handle_bot_disconnect)
+nonebot.get_driver().on_shutdown(group_runtime_registry.shutdown)
 
 
 # ---------------------------------------------------------------------------
@@ -116,7 +135,6 @@ model_cmd = on_command(
     priority=10,
     block=True,
 )
-generate_video_cmd = on_command(cmd="video", priority=10, block=True)
 like_match = on_fullmatch(("赞我", "互赞", "点赞"), priority=10, block=True)
 timer_cmd = on_command("timer", priority=10, block=True)
 skills_cmd = on_command("skills", priority=10, block=True)
@@ -129,9 +147,9 @@ resetsandbox_cmd = on_command(
     block=True,
 )
 agents_cmd = on_command("agents", priority=10, block=True)
-clear_cmd = on_command("clear", rule=lambda event: str(event.get_user_id()) == ADMIN_QQ_ID, priority=10, block=True)
 autoresponse_cmd = on_command("autoresponse", rule=lambda event: str(event.get_user_id()) == ADMIN_QQ_ID, priority=10, block=True)
 proxy_cmd = on_command("proxy", priority=10, block=True)
+todo_cmd = on_command("todo", priority=10, block=True)
 
 # ---------------------------------------------------------------------------
 # Chat matchers
@@ -163,18 +181,13 @@ group_increase_notice = on_notice(
 # Command handlers
 # ---------------------------------------------------------------------------
 @shell_cmd.handle()
-async def _(args: Message = CommandArg()):
-    await handle_shell(shell_cmd, args)
+async def _(event: GroupMessageEvent, args: Message = CommandArg()):
+    await handle_shell(event, shell_cmd, args)
 
 
 @model_cmd.handle()
 async def _(args: Message = CommandArg()):
     await handle_model(model_cmd, args)
-
-
-@generate_video_cmd.handle()
-async def _(args: Message = CommandArg()):
-    await handle_generate_video(generate_video_cmd, args)
 
 
 # ---------------------------------------------------------------------------
@@ -189,8 +202,8 @@ async def _(bot: Bot, event: GroupMessageEvent, args: Message = CommandArg()):
 # Skills handler
 # ---------------------------------------------------------------------------
 @skills_cmd.handle()
-async def _(args: Message = CommandArg()):
-    await handle_list_skills(skills_cmd, args)
+async def _(event: GroupMessageEvent, args: Message = CommandArg()):
+    await handle_list_skills(event, skills_cmd, args)
 
 
 # ---------------------------------------------------------------------------
@@ -205,8 +218,8 @@ async def _(bot: Bot, event: GroupMessageEvent):
 # Likerank handler
 # ---------------------------------------------------------------------------
 @likerank_cmd.handle()
-async def _(bot: Bot, event: GroupMessageEvent):
-    await handle_likerank(bot, event, likerank_cmd)
+async def _(bot: Bot, event: GroupMessageEvent, args: Message = CommandArg()):
+    await handle_likerank(bot, event, likerank_cmd, args)
 
 
 @membersearch_cmd.handle()
@@ -215,18 +228,13 @@ async def _(bot: Bot, event: GroupMessageEvent, args: Message = CommandArg()):
 
 
 @resetsandbox_cmd.handle()
-async def _():
-    await handle_resetsandbox(resetsandbox_cmd)
+async def _(event: GroupMessageEvent, args: Message = CommandArg()):
+    await handle_resetsandbox(event, resetsandbox_cmd, args)
 
 
 @agents_cmd.handle()
-async def _():
-    await handle_agents(agents_cmd)
-
-
-@clear_cmd.handle()
-async def _():
-    await handle_clear(clear_cmd)
+async def _(event: GroupMessageEvent, args: Message = CommandArg()):
+    await handle_agents(event, agents_cmd, args)
 
 
 @autoresponse_cmd.handle()
@@ -239,26 +247,31 @@ async def _(event: GroupMessageEvent, args: Message = CommandArg()):
     await handle_proxy_command(event, proxy_cmd, args)
 
 
+@todo_cmd.handle()
+async def _(event: GroupMessageEvent, args: Message = CommandArg()):
+    await handle_todo(event, todo_cmd, args)
+
+
 # ---------------------------------------------------------------------------
 # Chat handlers
 # ---------------------------------------------------------------------------
 @start_chat_by_at_and_mentioned.handle()
 async def _(bot: Bot, event: GroupMessageEvent):
     try:
-        await start_chat(start_chat_by_at_and_mentioned, event)
+        await start_chat(bot, start_chat_by_at_and_mentioned, event)
     except FinishedException:
         pass
     await user_chat_handle(bot, event, user_chat)
 
 
 @start_chat_by_at.handle()
-async def _(event: GroupMessageEvent):
-    await start_chat(start_chat_by_at, event)
+async def _(bot: Bot, event: GroupMessageEvent):
+    await start_chat(bot, start_chat_by_at, event)
 
 
 @start_chat_by_mentioned.handle()
-async def _(event: GroupMessageEvent):
-    await start_chat(start_chat_by_mentioned, event)
+async def _(bot: Bot, event: GroupMessageEvent):
+    await start_chat(bot, start_chat_by_mentioned, event)
 
 
 @user_chat.handle()

@@ -75,6 +75,13 @@ def _load_modules():
     utils.get_group_member_name = AsyncMock(return_value="user")
     sys.modules[utils.__name__] = utils
 
+    group_runtime = types.ModuleType(f"{BASE_NAME}.group_runtime")
+    target_bot = object()
+    group_runtime.group_runtime_registry = types.SimpleNamespace(
+        get_bot=lambda group_id: target_bot,
+    )
+    sys.modules[group_runtime.__name__] = group_runtime
+
     scheduler = MagicMock()
     apscheduler_plugin = types.ModuleType("nonebot_plugin_apscheduler")
     apscheduler_plugin.scheduler = scheduler

@@ -9,6 +9,7 @@ import random
 import shlex
 import ssl
 import subprocess
+import tempfile
 import traceback
 import urllib.request
 import urllib.error
@@ -20,7 +21,18 @@ from langchain_community.tools import DuckDuckGoSearchRun
 from nonebot.adapters.onebot.v11 import MessageSegment
 from pydantic import Field
 
-from ..infra import run_cmd, ensure_container_running
+from ..infra import (
+    copy_host_file_to_sandbox,
+    ensure_container_running,
+    read_sandbox_image_data_uri,
+    run_cmd,
+)
+from ..group_runtime import (
+    bind_group_runtime,
+    get_current_group_runtime,
+    group_runtime_registry,
+    set_current_group_runtime,
+)
 
 from ..memory import query_mems
 from .agents import get_agent_list, get_agent_handler
@@ -90,26 +102,8 @@ def tool(*args: Any, **kwargs: Any) -> Any:
     return decorator
 
 # ---------------------------------------------------------------------------
-# Deferred references — set by the graph layer before use
+# Deferred references — group-owned runtime state is configured before use
 # ---------------------------------------------------------------------------
-_ai_answer: Any = None
-_current_memory_query_user_id: int | None = None
-_end_conversation_callback: Callable[[], None] | None = None
-_generate_video_used: bool = False
-def _not_rate_limited() -> bool:
-    return False
-
-
-def _noop() -> None:
-    return None
-
-
-_is_video_rate_limited: Callable[[], bool] = _not_rate_limited
-_update_video_time: Callable[[], None] = _noop
-_is_generate_image_rate_limited: Callable[[], bool] = _not_rate_limited
-_update_generate_image_time: Callable[[], None] = _noop
-_current_group_id: int | None = None
-
 # Agent notification callback (set by chat.py)
 _agent_notification_callback: Callable[[int, int, str], None] | None = None
 
@@ -118,10 +112,15 @@ async def _resolve_notified_user_name(user_id: int, group_id: int | None) -> str
     if user_id == 0:
         return None
     try:
-        from nonebot import get_bot
         from ..utils import get_group_member_name
 
-        return await get_group_member_name(get_bot(), group_id, user_id)
+        if group_id is None:
+            return None
+        return await get_group_member_name(
+            group_runtime_registry.get_bot(group_id),
+            group_id,
+            user_id,
+        )
     except Exception as e:
         print(f"❌ failed to resolve notified user name: user={user_id} err={e}")
         return None
@@ -150,14 +149,14 @@ def set_shell_executor_limit(max_calls: int | None) -> None:
 
 
 def set_current_group_id(group_id: int | None) -> None:
-    """Set the current group ID for timer tool context."""
-    global _current_group_id
-    _current_group_id = group_id
+    """Compatibility setter; production entry points use scoped binding."""
+    runtime = None if group_id is None else group_runtime_registry.get_or_create(group_id)
+    set_current_group_runtime(runtime)
 
 
 def get_current_group_id() -> int | None:
-    """Return the current group ID without exposing an imported scalar snapshot."""
-    return _current_group_id
+    runtime = get_current_group_runtime(required=False)
+    return runtime.group_id if runtime is not None else None
 
 
 def configure_tool_callbacks(
@@ -169,21 +168,21 @@ def configure_tool_callbacks(
     update_generate_image_time: Callable[[], None] | None = None,
     end_conversation_fn: Callable[[], None] | None = None,
 ) -> None:
-    global _ai_answer, _current_memory_query_user_id
-    global _is_video_rate_limited, _update_video_time
-    global _is_generate_image_rate_limited, _update_generate_image_time
-    global _end_conversation_callback
-    _ai_answer = answer_fn
-    _current_memory_query_user_id = query_user_id
-    _end_conversation_callback = end_conversation_fn
+    runtime = get_current_group_runtime()
+    state = runtime.conversation
+    state.ai_answer = answer_fn
+    state.current_query_user_id = query_user_id
+    runtime.end_conversation_callback = (
+        end_conversation_fn or state.request_end_conversation
+    )
     if is_video_rate_limited is not None:
-        _is_video_rate_limited = is_video_rate_limited
+        runtime.is_video_rate_limited_callback = is_video_rate_limited
     if update_video_time is not None:
-        _update_video_time = update_video_time
+        runtime.update_video_time_callback = update_video_time
     if is_generate_image_rate_limited is not None:
-        _is_generate_image_rate_limited = is_generate_image_rate_limited
+        runtime.is_generate_image_rate_limited_callback = is_generate_image_rate_limited
     if update_generate_image_time is not None:
-        _update_generate_image_time = update_generate_image_time
+        runtime.update_generate_image_time_callback = update_generate_image_time
 
 
 def configure_agent_notification_callback(cb: Callable[[int, int, str], None]) -> None:
@@ -193,15 +192,11 @@ def configure_agent_notification_callback(cb: Callable[[int, int, str], None]) -
     _agent_notification_callback = cb # type: ignore
 
 
-_send_image_count: int = 0
-_send_video_count: int = 0
-
-
 def reset_capture_flag() -> None:
-    global _generate_video_used, _send_image_count, _send_video_count
-    _generate_video_used = False
-    _send_image_count = 0
-    _send_video_count = 0
+    runtime = get_current_group_runtime()
+    runtime.generate_video_used = False
+    runtime.send_image_count = 0
+    runtime.send_video_count = 0
 
 
 
@@ -449,32 +444,25 @@ async def view_image(image_url: str) -> str:
         if not sandbox_path.startswith("/"):
             return "❌ 错误：file:// 后必须是沙盒内的绝对路径。"
 
-        await ensure_container_running()
-        quoted_path = shlex.quote(sandbox_path)
-        mime_output = await run_cmd(
-            f"file --mime-type -b -- {quoted_path} 2>&1; echo '::EXIT::'$?",
-            timeout=30,
+        runtime = get_current_group_runtime()
+        try:
+            url = await read_sandbox_image_data_uri(
+                sandbox_path,
+                group_id=runtime.group_id,
+            )
+        except (RuntimeError, ValueError) as exc:
+            print(
+                "❌ view_image sandbox read failed: "
+                f"group={runtime.group_id} path={sandbox_path!r} error={exc}"
+            )
+            return f"❌ 无法读取沙盒图片：{exc}"
+        mime = url[5 : url.index(";base64,")]
+        encoded_size = len(url) - url.index(";base64,") - len(";base64,")
+        print(
+            "👁️ [view_image] loaded sandbox image: "
+            f"group={runtime.group_id} path={sandbox_path!r} "
+            f"mime={mime} base64_chars={encoded_size}"
         )
-        if "::EXIT::" not in mime_output:
-            return "❌ 无法读取沙盒图片：未获得文件检测结果。"
-        mime_text, mime_exit = mime_output.rsplit("::EXIT::", 1)
-        mime = mime_text.strip()
-        if mime_exit.strip() != "0":
-            return f"❌ 无法读取沙盒图片：{mime or '(no output)'}"
-        if not mime.startswith("image/"):
-            return f"❌ 错误：该沙盒文件不是图片（MIME: {mime}）。"
-
-        b64_output = await run_cmd(
-            f"base64 -w 0 -- {quoted_path} 2>&1; echo '::EXIT::'$?",
-            timeout=30,
-        )
-        if "::EXIT::" not in b64_output:
-            return "❌ 无法读取沙盒图片：未获得文件内容。"
-        b64_text, b64_exit = b64_output.rsplit("::EXIT::", 1)
-        b64_data = b64_text.strip()
-        if b64_exit.strip() != "0" or not b64_data:
-            return f"❌ 无法读取沙盒图片：{b64_data or '(no output)'}"
-        url = f"data:{mime};base64,{b64_data}"
     elif not url.startswith(("http://", "https://")):
         return "❌ 错误：仅支持 HTTP/HTTPS URL 或 file:// 沙盒绝对路径。"
 
@@ -517,9 +505,6 @@ async def view_image(image_url: str) -> str:
 # Extracted so both the random_acg_photo tool (LLM → Docker sandbox) and the
 # poke handler (direct send) can reuse the same Photo-export logic.
 
-_MACOS_TMP = "/tmp/hatsume_acg_export"
-
-
 async def _export_random_acg_photo() -> str:
     """Export a random photo from the 'ACG' album in macOS Photos.
 
@@ -528,13 +513,11 @@ async def _export_random_acg_photo() -> str:
     """
     import shutil as _shutil
 
-    # 1. Clean and recreate macOS temp export directory
-    if _os.path.exists(_MACOS_TMP):
-        _shutil.rmtree(_MACOS_TMP)
-    _os.makedirs(_MACOS_TMP, exist_ok=True)
+    export_dir = tempfile.mkdtemp(prefix="hatsume-acg-export-")
+    succeeded = False
 
-    # 2. AppleScript: query "ACG" album, pick random photo, export
-    applescript = f'''
+    try:
+        applescript = f'''
     try
         tell application "Photos"
             if not (exists album "ACG") then
@@ -548,7 +531,7 @@ async def _export_random_acg_photo() -> str:
             end if
             set randomIndex to random number from 1 to photoCount
             set thePhoto to item randomIndex of allPhotos
-            set exportDir to POSIX file "{_MACOS_TMP}"
+            set exportDir to POSIX file "{export_dir}"
             export {{thePhoto}} to exportDir with using originals
         end tell
     on error errMsg
@@ -556,41 +539,57 @@ async def _export_random_acg_photo() -> str:
     end try
     '''
 
-    result = subprocess.run(
-        ["osascript", "-e", applescript],
-        capture_output=True,
-        timeout=30,
-    )
+        try:
+            result = subprocess.run(
+                ["osascript", "-e", applescript],
+                capture_output=True,
+                timeout=30,
+            )
+        except subprocess.TimeoutExpired:
+            return "❌ 错误：Photos 操作超时。"
 
-    stdout_text = result.stdout.decode("utf-8", errors="replace").strip()
+        stdout_text = result.stdout.decode("utf-8", errors="replace").strip()
 
-    # Check for AppleScript-level errors
-    if stdout_text.startswith("ERROR:"):
-        err_msg = stdout_text[len("ERROR:"):].strip()
-        if "ALBUM_NOT_FOUND" in err_msg:
-            return "❌ 错误：未找到名为 'ACG' 的相簿。"
-        if "ALBUM_EMPTY" in err_msg:
-            return "❌ 错误：'ACG' 相簿中没有照片。"
-        return f"❌ 错误：Photos 操作失败：{err_msg}"
+        if stdout_text.startswith("ERROR:"):
+            err_msg = stdout_text[len("ERROR:"):].strip()
+            if "ALBUM_NOT_FOUND" in err_msg:
+                return "❌ 错误：未找到名为 'ACG' 的相簿。"
+            if "ALBUM_EMPTY" in err_msg:
+                return "❌ 错误：'ACG' 相簿中没有照片。"
+            return f"❌ 错误：Photos 操作失败：{err_msg}"
 
-    # Check for osascript process failure (Photos not running, permissions, etc.)
-    if result.returncode != 0:
-        stderr_text = result.stderr.decode("utf-8", errors="replace").strip()
-        combined = (stdout_text + " " + stderr_text).strip()
-        if "not running" in combined.lower() or "application isn't running" in combined.lower():
-            return "❌ 错误：无法访问 Photos 应用，请确认 Photos.app 已打开并授权。"
-        return f"❌ 错误：Photos 操作失败：{combined}"
+        if result.returncode != 0:
+            stderr_text = result.stderr.decode("utf-8", errors="replace").strip()
+            combined = (stdout_text + " " + stderr_text).strip()
+            if (
+                "not running" in combined.lower()
+                or "application isn't running" in combined.lower()
+            ):
+                return "❌ 错误：无法访问 Photos 应用，请确认 Photos.app 已打开并授权。"
+            return f"❌ 错误：Photos 操作失败：{combined}"
 
-    # 3. Find exported file
-    exported = [
-        f for f in _os.listdir(_MACOS_TMP)
-        if _os.path.isfile(_os.path.join(_MACOS_TMP, f))
-    ]
-    if not exported:
-        return "❌ 错误：照片导出失败，未找到导出文件。"
+        exported = [
+            filename
+            for filename in _os.listdir(export_dir)
+            if _os.path.isfile(_os.path.join(export_dir, filename))
+        ]
+        if not exported:
+            return "❌ 错误：照片导出失败，未找到导出文件。"
 
-    host_file = _os.path.join(_MACOS_TMP, exported[0])
-    return host_file
+        succeeded = True
+        return _os.path.join(export_dir, exported[0])
+    finally:
+        if not succeeded:
+            _shutil.rmtree(export_dir, ignore_errors=True)
+
+
+def _cleanup_exported_acg_photo(host_file: str) -> None:
+    """Remove the unique host export directory created for one photo."""
+    import shutil as _shutil
+
+    export_dir = _os.path.dirname(host_file)
+    if _os.path.basename(export_dir).startswith("hatsume-acg-export-"):
+        _shutil.rmtree(export_dir, ignore_errors=True)
 
 
 @tool
@@ -610,8 +609,7 @@ async def random_acg_photo() -> str:
     - 用户提到想看"二次元"、"动漫"、"ACG" 图时
     """
     from datetime import datetime
-    from ..config import CONTAINER_NAME
-
+    runtime = get_current_group_runtime()
     host_file = await _export_random_acg_photo()
     if host_file.startswith("❌"):
         return host_file
@@ -620,26 +618,26 @@ async def random_acg_photo() -> str:
     if not ext:
         ext = ".jpg"
 
-    # Ensure sandbox container is running
-    await ensure_container_running()
+    try:
+        timestamp = datetime.now().strftime("%y%m%d_%H%M%S")
+        random_suffix = f"{random.randint(0, 999999):06d}"
+        sandbox_name = f"apple_photo_export_{timestamp}_{random_suffix}{ext}"
+        sandbox_path = f"/tmp/{sandbox_name}"
 
-    # Generate a timestamped, randomized sandbox path and docker cp
-    timestamp = datetime.now().strftime("%y%m%d_%H%M%S")
-    random_suffix = f"{random.randint(0, 999999):06d}"
-    sandbox_name = f"apple_photo_export_{timestamp}_{random_suffix}{ext}"
-    sandbox_path = f"/tmp/{sandbox_name}"
+        try:
+            await copy_host_file_to_sandbox(
+                host_file,
+                sandbox_path,
+                timeout=30,
+                group_id=runtime.group_id,
+            )
+        except Exception as exc:
+            return f"❌ 错误：无法复制文件到沙盒：{exc}"
 
-    cp_result = subprocess.run(
-        ["docker", "cp", host_file, f"{CONTAINER_NAME}:{sandbox_path}"],
-        capture_output=True,
-        timeout=30,
-    )
-    if cp_result.returncode != 0:
-        stderr = cp_result.stderr.decode("utf-8", errors="replace").strip()
-        return f"❌ 错误：无法复制文件到沙盒：{stderr}"
-
-    print(f"📷 [random_acg_photo] Exported {host_file} → sandbox {sandbox_path}")
-    return sandbox_path
+        print(f"📷 [random_acg_photo] Exported to sandbox {sandbox_path}")
+        return sandbox_path
+    finally:
+        _cleanup_exported_acg_photo(host_file)
 
 
 @tool
@@ -657,15 +655,15 @@ async def send_image(image_url: str) -> str:
     - 每次调用只能发送一张图片
     - 用户需要知道你发送图片的意图以及图片内容的意义。
     """
-    global _send_image_count
+    runtime = get_current_group_runtime()
 
     if not image_url or not image_url.strip():
         return "❌ 错误：image_url 不能为空。"
 
-    if _send_image_count >= 3:
+    if runtime.send_image_count >= 3:
         return "图片发送失败：一轮发言中你最多只能发送3张图片。"
 
-    _send_image_count += 1
+    runtime.send_image_count += 1
 
     url = image_url.strip()
     print(f"Send image: {url[:100]}...")
@@ -675,10 +673,11 @@ async def send_image(image_url: str) -> str:
         sandbox_path = url[7:]  # strip "file://"
         print(f"  → reading sandbox file: {sandbox_path}")
 
-        await ensure_container_running()
+        await ensure_container_running(runtime.group_id)
         b64_output = await run_cmd(
             f'base64 -w 0 "{sandbox_path}" 2>&1; echo "::EXIT::$?"',
             timeout=30,
+            group_id=runtime.group_id,
         )
 
         # Split exit code from base64 data
@@ -698,8 +697,8 @@ async def send_image(image_url: str) -> str:
         print(f"  → resolved to base64 data URI ({len(b64_data)} chars)")
 
     try:
-        if _ai_answer:
-            await _ai_answer(MessageSegment.image(url))
+        if runtime.conversation.ai_answer:
+            await runtime.conversation.ai_answer(MessageSegment.image(url))
         else:
             return "❌ 错误：无法发送图片（发送通道未就绪）。"
     except Exception as e:
@@ -726,15 +725,15 @@ async def send_video(video_url: str) -> str:
     - 每次调用只能发送一个视频
     - 视频会直接发送给用户，你不需要再额外描述视频内容
     """
-    global _send_video_count
+    runtime = get_current_group_runtime()
 
     if not video_url or not video_url.strip():
         return "❌ 错误：video_url 不能为空。"
 
-    if _send_video_count >= 1:
+    if runtime.send_video_count >= 1:
         return "视频发送失败：一轮发言中你最多只能发送1个视频。"
 
-    _send_video_count += 1
+    runtime.send_video_count += 1
 
     url = video_url.strip()
     print(f"Send video: {url[:100]}...")
@@ -745,10 +744,11 @@ async def send_video(video_url: str) -> str:
     if url.startswith("/"):
         sandbox_path = url
         print(f"  → reading sandbox video file: {sandbox_path}")
-        await ensure_container_running()
+        await ensure_container_running(runtime.group_id)
         b64_output = await run_cmd(
             f'base64 -w 0 {shlex.quote(sandbox_path)} 2>&1; echo "::EXIT::$?"',
             timeout=120,
+            group_id=runtime.group_id,
         )
 
         if "::EXIT::" in b64_output:
@@ -767,8 +767,8 @@ async def send_video(video_url: str) -> str:
         print(f"  → resolved video to base64 data URI ({len(b64_data)} chars)")
 
     try:
-        if _ai_answer:
-            await _ai_answer(MessageSegment.video(file=url))
+        if runtime.conversation.ai_answer:
+            await runtime.conversation.ai_answer(MessageSegment.video(file=url))
         else:
             return "❌ 错误：无法发送视频（发送通道未就绪）。"
     except Exception as e:
@@ -795,11 +795,12 @@ async def generate_image(prompt: str, image_urls: list[str]) -> str:
     """
     from ..models import generate_image_for_volc, generate_image_for_kege
 
-    if _is_generate_image_rate_limited():
+    runtime = get_current_group_runtime()
+    if runtime.is_generate_image_rate_limited_callback():
         return "❌ 图片生成请求过于频繁，请 3 分钟后再试。"
 
     print(f"Generate image: {prompt}")
-    _update_generate_image_time()
+    runtime.update_generate_image_time_callback()
     try:
         if random.random() <= 0.5 or len(image_urls) > 0:
             print("Using Seedream 5.0 Lite...")
@@ -832,13 +833,13 @@ async def generate_video(prompt: str, image_url: str = "") -> str:
     ## 返回值：
     返回视频生成状态与临时 URL。
     """
-    global _generate_video_used
+    runtime = get_current_group_runtime()
     from ..models import generate_video_for, choose_video_model
 
-    if _generate_video_used:
+    if runtime.generate_video_used:
         return "❌ 视频生成工具在本轮对话中已被调用过，禁止重复调用。"
 
-    if _is_video_rate_limited():
+    if runtime.is_video_rate_limited_callback():
         return "❌ 视频生成请求过于频繁，请稍后再试。"
 
     print(f"Generate video: {prompt}, image_url: {image_url[:80] if image_url else '(none)'}")
@@ -852,8 +853,8 @@ async def generate_video(prompt: str, image_url: str = "") -> str:
         traceback.print_exc()
         return f"❌ 视频生成失败: {e}"
 
-    _update_video_time()
-    _generate_video_used = True
+    runtime.update_video_time_callback()
+    runtime.generate_video_used = True
 
     if url is None:
         return f"❌ 视频生成失败（模型 Seedance {model} Pro）。"
@@ -866,7 +867,7 @@ async def generate_video(prompt: str, image_url: str = "") -> str:
 @tool
 async def shell_executor(shell: str, timeout: int) -> str:
     """
-    在 Kali Linux 无桌面沙箱环境中执行 bash shell（当前工作目录 pwd 为 /work），并返回输出结果。
+    在 Ubuntu Linux 无桌面沙箱环境中执行 bash shell（当前工作目录 pwd 为 /work），并返回输出结果。
     timeout 参数为命令执行时长，单位为秒，超过该时长会被强制终止。一般设为 180 秒。
 
     ## 约束：
@@ -885,9 +886,10 @@ async def shell_executor(shell: str, timeout: int) -> str:
             )
         _shell_call_count.set(count + 1)
 
+    runtime = get_current_group_runtime()
     print("Executing shell: \n\r", shell)
-    await ensure_container_running()
-    result = await run_cmd(shell, timeout=timeout)
+    await ensure_container_running(runtime.group_id)
+    result = await run_cmd(shell, timeout=timeout, group_id=runtime.group_id)
     print("Shell result: \n\r", result)
     return result
 
@@ -898,7 +900,8 @@ async def _create_scheduled_timer(
     user_id: int, prompt: str, plan: SchedulePlan
 ) -> str:
     """Persist and register one already-validated timer-v2 schedule."""
-    if _current_group_id is None:
+    group_id = get_current_group_id()
+    if group_id is None:
         return "错误：无法确定当前群聊 ID。"
 
     from ..timer import get_store
@@ -907,7 +910,7 @@ async def _create_scheduled_timer(
     store = get_store()
     if prompt_error := store.validate_prompt(prompt):
         return prompt_error
-    task_id = store.create_task(_current_group_id, user_id, prompt, plan)
+    task_id = store.create_task(group_id, user_id, prompt, plan)
     add_jobs_for_task(task_id, store)
     return (
         f"定时任务已创建（ID: {task_id}）\n"
@@ -1044,23 +1047,45 @@ async def create_todo(
     permitted_finisher: str,
     completion_event: str,
 ) -> str:
-    """创建一个最长保留 48 小时的当前群待办。
+    """创建一个待办事项。
 
+    ## 简介
     当“当前聊天记录”出现值得在未来条件满足时继续完成的事情，可以主动调用；
-    禁止仅根据“背景聊天记录”创建。initiator_qq_id 必须是提出该待办的用户 QQ ID。
-    content 描述将来要做的事情；permitted_finisher 必须严格说明谁能完成；
-    completion_event 必须严格说明什么可观察事件代表完成。三个文本参数均最多 500 字符。
+    禁止仅根据“背景聊天记录”创建。
+    区分：如果用户希望设置提醒，且提醒触发的时机是某个事件而不是具体的时间，则使用 create_todo 而不是 create_xxx_timer。
+
+    ## 参数说明
+    initiator_qq_id 必须是提出该待办的用户 QQ ID。
+    content 描述将来要做的事情；
+    permitted_finisher 必须严格说明谁可以完成这个待办事项，可以设置多个人；
+    completion_event 必须严格说明什么可观察事件代表完成。
+
+    ## 示例
+
+    ### Example 1
+    用户Prompt: 等明天我睡完午觉之后提醒我早早去健身房，因为晚上有直播要看。
+    content: 明天用户睡完午觉之后提醒他早早去健身房
+    permitted_finisher: 仅该用户本人可以完成
+    completion_event: 该用户在明天中午到下午的时间段内，在群里的发言能证明其午觉已睡醒。
+
+
+    ### Example 2
+    用户Prompt: 晚安，明天我起来的时候告诉我昨晚睡了多久。另外，我有同居室友。
+    content: 用户早上起床早安的时候告诉用户他一晚上睡了几个小时。可以通过其早上发消息的时间与此提醒的时间差推断其睡觉时长。
+    permitted_finisher: 仅该用户本人或者其室友可以完成
+    completion_event: 该用户或其同居室友在明天早上发早安消息时。
     """
     group_id = get_current_group_id()
     if group_id is None or group_id <= 0:
         return "错误：无法确定当前群聊 ID，待办功能不可用。"
 
     try:
-        from nonebot import get_bot
         from ..utils import get_group_member_name
 
         initiator_name = await get_group_member_name(
-            get_bot(), group_id, initiator_qq_id
+            group_runtime_registry.get_bot(group_id),
+            group_id,
+            initiator_qq_id,
         )
     except Exception:
         initiator_name = str(initiator_qq_id)
@@ -1199,7 +1224,7 @@ def _next_timer_occurrence(
 
 async def get_timer_overview(group_id: int | None = None) -> str:
     """Return the exact timer overview shared by the tool and system prompt."""
-    resolved_group_id = group_id if group_id is not None else _current_group_id
+    resolved_group_id = group_id if group_id is not None else get_current_group_id()
     if resolved_group_id is None:
         return "错误：无法确定当前群聊 ID。"
 
@@ -1210,9 +1235,8 @@ async def get_timer_overview(group_id: int | None = None) -> str:
     # Look up user names (cache per user_id for tasks sharing the same owner)
     user_names: dict[int, str] = {}
     try:
-        from nonebot import get_bot
         from ..utils import get_group_member_name
-        bot = get_bot()
+        bot = group_runtime_registry.get_bot(resolved_group_id)
         for task in tasks:
             uid = task["user_id"]
             if uid != 0 and uid not in user_names:
@@ -1296,9 +1320,8 @@ async def delete_timer(task_id: int) -> str:
     ## 参数：
     - task_id: 要删除的任务 ID
     """
-    global _current_group_id
-
-    if _current_group_id is None:
+    group_id = get_current_group_id()
+    if group_id is None:
         return "错误：无法确定当前群聊 ID。"
 
     from ..timer import get_store
@@ -1308,7 +1331,7 @@ async def delete_timer(task_id: int) -> str:
     if task is None:
         return f"错误：任务 ID {task_id} 不存在。"
 
-    if task["group_id"] != _current_group_id:
+    if task["group_id"] != group_id:
         return f"错误：任务 ID {task_id} 不属于当前群。"
 
     # Cancel APScheduler jobs
@@ -1375,7 +1398,7 @@ def skill_download(url: str) -> str:
 
     ## 行为：
     - 下载 URL 内容，解析 YAML frontmatter 提取技能名称
-    - 保存为 data/hatsume-plugin/skills/{name}.md
+    - 保存为当前群的 groups/<group-id>/{name}.md
     - 如果同名技能已存在，覆盖并提示
     - 清除 SkillManager 缓存，使新技能立即可用
 
@@ -1389,7 +1412,6 @@ def skill_download(url: str) -> str:
     - 用户提供了一个 skill 文件的 URL
     """
     from ..skills import get_skill_manager
-    from ..config import SKILLS_DIR
 
     # Download (use unverified SSL context for environments with missing root certs)
     try:
@@ -1419,25 +1441,7 @@ def skill_download(url: str) -> str:
     if not name:
         return "错误：无法从下载内容中解析技能名称。"
 
-    # Save
-    SKILLS_DIR.mkdir(parents=True, exist_ok=True)
-    file_path = SKILLS_DIR / f"{name}.md"
-    existed = file_path.exists()
-    try:
-        file_path.write_text(content, encoding="utf-8")
-    except Exception as e:
-        print(f"❌ skill_download write error: {e}")
-        return f"错误：保存技能文件失败：{e}"
-
-    # Clear cache so next list_skills / load_skill picks up the new/updated file
-    mgr._content_cache.pop(name, None)
-
-    if existed:
-        print(f"✅ skill_download overwrote skill '{name}'")
-        return f"✅ 技能 '{name}' 已下载（覆盖了已有文件）。"
-    else:
-        print(f"✅ skill_download installed skill '{name}'")
-        return f"✅ 技能 '{name}' 已下载。"
+    return mgr.save_skill(name, content)
 
 
 @tool
@@ -1451,7 +1455,7 @@ def skill_create(content: str) -> str:
 
     ## 行为：
     - 从 frontmatter 中自动解析 name 和 description
-    - 保存为 data/hatsume-plugin/skills/{name}.md
+    - 保存为当前群的 groups/<group-id>/{name}.md
     - 如果同名技能已存在，覆盖并提示
     - 创建后技能立即可用（无需重启）
 
@@ -1507,17 +1511,15 @@ async def membersearch(query: str) -> str:
     - 有人提到"那个叫什么菠萝的"，你搜索 "菠萝" 来找出可能的成员
     """
     import json
-    from nonebot import get_bot
     from ..utils import search_group_members
 
-    global _current_group_id
-
-    if _current_group_id is None:
+    group_id = get_current_group_id()
+    if group_id is None:
         return json.dumps({"error": "错误：无法确定当前群聊 ID。"}, ensure_ascii=False)
 
     try:
-        bot = get_bot()
-        results = await search_group_members(bot, _current_group_id, query)
+        bot = group_runtime_registry.get_bot(group_id)
+        results = await search_group_members(bot, group_id, query)
     except Exception as e:
         print(f"❌ membersearch failed: {e}")
         import traceback
@@ -1560,6 +1562,8 @@ async def agent_dispatch(
     notified_user_id: int = 0,
 ) -> str:
 
+    runtime = get_current_group_runtime()
+    group_id = runtime.group_id
     handler = get_agent_handler(agent_name)
     if handler is None:
         available = ", ".join(a["name"] for a in get_agent_list())
@@ -1567,47 +1571,82 @@ async def agent_dispatch(
 
     print(f"🧩 [agent_dispatch] Dispatching {agent_name} (notify_user={notified_user_id})")
 
+    from .agents import (
+        add_agent_instance,
+        bind_agent_instance,
+        has_running_agent_task,
+        set_agent_state,
+        track_agent_task,
+    )
+    import time as _time
+
+    if has_running_agent_task(agent_name, group_id, task):
+        return f"错误：Agent '{agent_name}' 已在当前群执行相同任务。"
+
+    instance_id = add_agent_instance(
+        agent_name,
+        group_id=group_id,
+        status="running",
+        task=task,
+        context=context,
+        user_id=notified_user_id,
+        user_name=None,
+        started_at=_time.time(),
+    )
+
     async def _run_and_notify() -> None:
-        from .agents import add_agent_instance, set_agent_state
-        import time as _time
-
-        notified_user_name = await _resolve_notified_user_name(
-            notified_user_id, _current_group_id
-        )
-
-        instance_id = add_agent_instance(
-            agent_name,
-            status="running",
-            task=task,
-            context=context,
-            user_id=notified_user_id,
-            user_name=notified_user_name,
-            started_at=_time.time(),
-        )
-        try:
-            result = await handler(task, notified_user_id)
-        except Exception:
-            print(f"❌ Agent {agent_name} failed")
-            traceback.print_exc()
-            result = f"Agent '{agent_name}' 执行失败。"
-        set_agent_state(agent_name, instance_id=instance_id, status="done", result=result)
-
-        from .nodes import inject_agent_notification
-        if _agent_notification_callback is not None:
-            inject_agent_notification(
-                user_id=notified_user_id,
-                group_id=_current_group_id or 0,
-                agent_name=agent_name,
-                result=result,
-                task=task,
-                context=context,
-                notified_user_name=notified_user_name,
-                start_conversation_cb=_agent_notification_callback,
+        with bind_group_runtime(runtime):
+            notified_user_name = await _resolve_notified_user_name(
+                notified_user_id, group_id
             )
-        else:
-            print("❌ _agent_notification_callback is None, agent result lost")
+            set_agent_state(
+                agent_name,
+                group_id=group_id,
+                instance_id=instance_id,
+                user_name=notified_user_name,
+            )
+            try:
+                with bind_agent_instance(instance_id):
+                    result = await handler(task, notified_user_id)
+            except asyncio.CancelledError:
+                set_agent_state(
+                    agent_name,
+                    group_id=group_id,
+                    instance_id=instance_id,
+                    status="cancelled",
+                )
+                raise
+            except Exception:
+                print(f"❌ Agent {agent_name} failed")
+                traceback.print_exc()
+                result = f"Agent '{agent_name}' 执行失败。"
+            set_agent_state(
+                agent_name,
+                group_id=group_id,
+                instance_id=instance_id,
+                status="done",
+                result=result,
+            )
 
-    asyncio.create_task(_run_and_notify())
+            from .nodes import inject_agent_notification
+            if _agent_notification_callback is not None:
+                inject_agent_notification(
+                    user_id=notified_user_id,
+                    group_id=group_id,
+                    agent_name=agent_name,
+                    result=result,
+                    task=task,
+                    context=context,
+                    notified_user_name=notified_user_name,
+                    start_conversation_cb=_agent_notification_callback,
+                )
+            else:
+                print("❌ _agent_notification_callback is None, agent result lost")
+
+    agent_task = asyncio.create_task(_run_and_notify())
+    runtime.agent_tasks.add(agent_task)
+    agent_task.add_done_callback(runtime.agent_tasks.discard)
+    track_agent_task(instance_id, group_id, agent_task)
     return f"✅ Agent '{agent_name}' 开始执行任务，任务完成后将通知你。"
 
 
@@ -1629,9 +1668,9 @@ async def respond_to_shell_prompt(
     Returns:
         成功或失败的描述信息。
     """
-    from .agents import _stdin_queues
+    from .agents import pop_stdin_request
 
-    q = _stdin_queues.pop(request_id, None)
+    q = pop_stdin_request(request_id, get_current_group_runtime().group_id)
     if q is None:
         return (
             f"错误：找不到 pending stdin 请求 (request_id={request_id})。"
@@ -1659,8 +1698,6 @@ async def create_character_proxy(
     if during_time <= 0 or during_time > 24 * 60:
         return "代理持续时间必须大于 0 分钟且不能超过 1440 分钟。"
 
-    from nonebot import get_bot
-
     from ..character_proxy import (
         activate_character_proxy,
         generate_character_profile,
@@ -1669,13 +1706,16 @@ async def create_character_proxy(
     )
     from ..utils import get_group_member_name
 
+    group_id = get_current_group_id()
     if get_character_proxy() is not None:
         return "角色代理已经开启；当前状态下只能先终止它。"
-    if _current_group_id is None:
+    if group_id is None:
         return "无法确定当前群，未开启角色代理。"
 
     user_name = await get_group_member_name(
-        get_bot(), _current_group_id, proxied_user_id
+        group_runtime_registry.get_bot(group_id),
+        group_id,
+        proxied_user_id,
     )
     profile = await generate_character_profile(proxied_user_id, user_name)
     activate_character_proxy(
@@ -1710,9 +1750,10 @@ def end_conversation() -> str:
     执行此工具后，你不会再接收到任何聊天消息，直到有人主动提及你。
     当用户希望你不回话时使用。
     """
-    if _end_conversation_callback is None:
+    callback = get_current_group_runtime().end_conversation_callback
+    if callback is None:
         return "当前对话无法结束：对话状态尚未初始化。"
-    _end_conversation_callback()
+    callback()
     return "当前对话已结束；不要继续回复，等待有人主动提及你。"
 
 
