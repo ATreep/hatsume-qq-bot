@@ -424,7 +424,6 @@ def _load_nodes_module():
         _runtime_fields = {
             "_last_was_auxiliary_only": "last_was_auxiliary_only",
             "_last_was_system_trigger": "last_was_system_trigger",
-            "_face_cooling_count": "face_cooling_count",
         }
 
         def __getattr__(self, name):
@@ -488,23 +487,88 @@ def test_extract_replyable_ids_uses_only_top_level_human_json():
     assert nodes._extract_replyable_message_ids(messages) == {10, 20}
 
 
-def test_extract_memory_records_accepts_space_after_opening_bracket():
+def test_extract_memory_records_accepts_multiple_new_cards():
     nodes = _load_nodes_module()
 
-    record, cleaned = nodes._extract_memory_records(
-        "回答[ memoryrecord: 记忆内容][\tmemorykeyman: 123, 456]"
+    records, cleaned = nodes._extract_memory_records(
+        "回答\n"
+        "[ memory: 「小明」喜欢爵士乐 MEMORYCONTENTEND]\n"
+        "[\tmemory: 「小红」周五出差 MEMORYCONTENTEND, "
+        "keyman: 123, 456, invalid]"
     )
 
-    assert record == {"content": "记忆内容", "qq_numbers": [123, 456]}
+    assert records == [
+        {"content": "「小明」喜欢爵士乐", "qq_numbers": []},
+        {"content": "「小红」周五出差", "qq_numbers": [123, 456]},
+    ]
     assert cleaned == "回答"
+
+
+def test_extract_memory_records_rejects_retired_tags():
+    nodes = _load_nodes_module()
+
+    records, cleaned = nodes._extract_memory_records(
+        "回答[memoryrecord: 旧记忆][memorykeyman: 123]"
+    )
+
+    assert records == []
+    assert cleaned == "回答[memoryrecord: 旧记忆][memorykeyman: 123]"
+
+
+def test_ai_node_saves_every_memory_card():
+    nodes = _load_nodes_module()
+    memory_pkg = sys.modules["hatsume.plugins.hatsume-plugin.memory"]
+    saved: list[tuple[str, list[dict]]] = []
+
+    class _FakeAgent:
+        def with_retry(self, **kw):
+            return self
+
+        async def ainvoke(self, *a, **kw):
+            return {
+                "messages": [
+                    types.SimpleNamespace(
+                        content=(
+                            "收到\n"
+                            "[memory: 「小明」喜欢爵士乐 MEMORYCONTENTEND]\n"
+                            "[memory: 「小红」周五出差 MEMORYCONTENTEND]"
+                        ),
+                        type="ai",
+                    )
+                ]
+            }
+
+    original_create_agent = nodes.create_agent
+    original_add_mem = memory_pkg.add_mem
+    nodes.create_agent = lambda *a, **kw: _FakeAgent()
+    memory_pkg.add_mem = lambda content, people: saved.append((content, people))
+
+    try:
+        asyncio.run(
+            nodes.ai_node(
+                {"messages": [types.SimpleNamespace(content="hello", type="human")]}
+            )
+        )
+    finally:
+        nodes.create_agent = original_create_agent
+        memory_pkg.add_mem = original_add_mem
+
+    assert saved == [
+        ("「小明」喜欢爵士乐", []),
+        ("「小红」周五出差", []),
+    ]
 
 
 def test_special_tag_patterns_reject_newline_after_opening_bracket():
     nodes = _load_nodes_module()
 
     assert nodes.FACE_TAG_PATTERN.search("[\nhatsumeface:害羞]") is None
-    assert nodes.MEMORY_RECORD_PATTERN.search("[\nmemoryrecord:内容]") is None
-    assert nodes.MEMORY_KEYMAN_PATTERN.search("[\nmemorykeyman:123]") is None
+    assert (
+        nodes.MEMORY_RECORD_PATTERN.search(
+            "[\nmemory:内容 MEMORYCONTENTEND]"
+        )
+        is None
+    )
     assert nodes.REPLY_DIRECTIVE_PATTERN.search("[\nreply:42]") is None
 
 
@@ -1654,19 +1718,22 @@ def test_admin_mode_detector_requires_admin_sender_and_uppercase_keyword():
     nodes = _load_nodes_module()
 
     assert nodes.is_admin_mode_message(
+        _admin_mode_content(12345, "please BYPASS now"), "12345"
+    )
+    assert not nodes.is_admin_mode_message(
+        _admin_mode_content(99999, "please BYPASS now"), "12345"
+    )
+    assert not nodes.is_admin_mode_message(
+        _admin_mode_content(12345, "please bypass now"), "12345"
+    )
+    assert not nodes.is_admin_mode_message(
+        _admin_mode_content(12345, "please Bypass now"), "12345"
+    )
+    assert not nodes.is_admin_mode_message(
+        _admin_mode_content(12345, "please BYPASS now"), ""
+    )
+    assert not nodes.is_admin_mode_message(
         _admin_mode_content(12345, "please WORLDSKY now"), "12345"
-    )
-    assert not nodes.is_admin_mode_message(
-        _admin_mode_content(99999, "please WORLDSKY now"), "12345"
-    )
-    assert not nodes.is_admin_mode_message(
-        _admin_mode_content(12345, "please worldsky now"), "12345"
-    )
-    assert not nodes.is_admin_mode_message(
-        _admin_mode_content(12345, "please WorldSky now"), "12345"
-    )
-    assert not nodes.is_admin_mode_message(
-        _admin_mode_content(12345, "please WORLDSKY now"), ""
     )
 
 
@@ -1675,18 +1742,18 @@ def test_admin_mode_detector_ignores_nested_and_malformed_content():
     reply_only = _admin_mode_content(
         12345,
         "ordinary request",
-        reply_to={"user": {"id": 2}, "content": "WORLDSKY"},
+        reply_to={"user": {"id": 2}, "content": "BYPASS"},
     )
     forward = _admin_mode_content(
         12345,
-        "WORLDSKY",
+        "BYPASS",
         message_type="forward",
     )
 
     assert not nodes.is_admin_mode_message(reply_only, "12345")
     assert not nodes.is_admin_mode_message(forward, "12345")
     assert not nodes.is_admin_mode_message(
-        [{"type": "text", "text": "not-json WORLDSKY"}], "12345"
+        [{"type": "text", "text": "not-json BYPASS"}], "12345"
     )
 
 
@@ -1694,7 +1761,7 @@ def test_admin_mode_detector_accepts_qualifying_message_in_merged_batch():
     nodes = _load_nodes_module()
     merged_content = (
         _admin_mode_content(88888, "ordinary message")
-        + _admin_mode_content(12345, "WORLDSKY run task")
+        + _admin_mode_content(12345, "BYPASS run task")
     )
 
     assert nodes.is_admin_mode_message(merged_content, "12345")
@@ -1728,7 +1795,7 @@ def test_ai_node_admin_mode_applies_model_prompt_and_image_filter_per_round():
         sys_prompts.append(system_prompt or "")
         return _FakeAgent()
 
-    admin_content = _admin_mode_content(12345, "WORLDSKY configure it") + [
+    admin_content = _admin_mode_content(12345, "BYPASS configure it") + [
         {"type": "image_url", "image_url": {"url": "data:image/png;base64,admin"}},
         {"type": "img_url", "img_url": "https://example.com/admin.png"},
     ]
@@ -1888,74 +1955,72 @@ def test_ai_node_continues_when_todo_database_is_unavailable():
     assert "todo prompt: available=False" in sys_prompts[0]
 
 
-def test_generate_image_used_skips_face_injection():
-    """When _generate_image_used is True, face injection prompt should NOT be
-    added to chat_agent's system_prompt."""
+def test_face_prompt_is_injected_every_invocation_despite_old_gate_inputs():
     nodes = _load_nodes_module()
 
     tools_mod = sys.modules["hatsume.plugins.hatsume-plugin.graph.tools"]
     tools_mod._generate_image_used = True
-    tools_mod._capture_html_shot_used = False
+    tools_mod._capture_html_shot_used = True
     tools_mod._last_capture_html = ""
 
-    mock_state = types.SimpleNamespace(
-        human_queue=[],
-        human_source_queue=[],
-        is_graph_running=True,
-        current_query_user_id=None,
-        ai_answer=None,
-    )
-    nodes.bind_state(mock_state)
+    import tempfile
 
-    # Track the system_prompt passed to create_agent
+    tmpdir = tempfile.TemporaryDirectory()
+    face_dir = Path(tmpdir.name)
+    (face_dir / "开心_0.png").touch()
+    original_get_data = nodes.store.get_plugin_data_file
+    nodes.store.get_plugin_data_file = lambda name: types.SimpleNamespace(
+        iterdir=lambda: list(face_dir.iterdir()),
+        absolute=lambda: face_dir,
+    )
+
     sys_prompts: list[str] = []
 
     class _FakeAgent:
         def with_retry(self, **kw):
             return self
+
         async def ainvoke(self, *a, **kw):
             return {"messages": [types.SimpleNamespace(content="hello", type="ai")]}
 
     original_create_agent = nodes.create_agent
+
     def _tracking_create_agent(model, tools, system_prompt=None, **kw):
         sys_prompts.append(system_prompt or "")
         return _FakeAgent()
+
     nodes.create_agent = _tracking_create_agent
 
-    # Force random to return 0 (so face WOULD be injected if not for the flag)
     original_randint = random.randint
-    random.randint = lambda a, b: 0
-
-    # Set _face_cooling_count high enough to pass the >= 1 check
-    nodes._face_cooling_count = 2
+    random.randint = lambda a, b: 1
 
     try:
-        asyncio.run(
-            nodes.ai_node(
-                {"messages": [types.SimpleNamespace(content="hello", type="human")]}
+        for _ in range(2):
+            asyncio.run(
+                nodes.ai_node(
+                    {
+                        "messages": [
+                            types.SimpleNamespace(content="hello", type="human")
+                        ]
+                    }
+                )
             )
-        )
-        assert len(sys_prompts) == 1, "create_agent should be called exactly once"
-        assert "# 表情发送" not in sys_prompts[0], (
-            "face injection should NOT be in sys_prompt when _generate_image_used is True"
-        )
+        assert len(sys_prompts) == 2
+        assert all("# 表情发送" in prompt for prompt in sys_prompts)
+        assert all("开心" in prompt for prompt in sys_prompts)
     finally:
         nodes.create_agent = original_create_agent
         random.randint = original_randint
+        nodes.store.get_plugin_data_file = original_get_data
         tools_mod._generate_image_used = False
+        tools_mod._capture_html_shot_used = False
+        tmpdir.cleanup()
 
 
-def test_face_injection_when_flags_false():
-    """When both _generate_image_used and _capture_html_shot_used are False,
-    face injection prompt should be added to chat_agent's system_prompt."""
+def test_face_injection_lists_available_emotions():
     import tempfile
 
     nodes = _load_nodes_module()
-
-    tools_mod = sys.modules["hatsume.plugins.hatsume-plugin.graph.tools"]
-    tools_mod._generate_image_used = False
-    tools_mod._capture_html_shot_used = False
-    tools_mod._last_capture_html = ""
 
     mock_state = types.SimpleNamespace(
         human_queue=[],
@@ -1966,7 +2031,6 @@ def test_face_injection_when_flags_false():
     )
     nodes.bind_state(mock_state)
 
-    # Create temp dir with fake face files so the gate proceeds to injection
     tmpdir = tempfile.TemporaryDirectory()
     face_dir = Path(tmpdir.name)
     (face_dir / "开心_0.png").touch()
@@ -1996,13 +2060,6 @@ def test_face_injection_when_flags_false():
         return _FakeAgent()
     nodes.create_agent = _tracking_create_agent
 
-    # Force random to return 0 (so face WILL be injected)
-    original_randint = random.randint
-    random.randint = lambda a, b: 0
-
-    # Set _face_cooling_count high enough to pass the >= 1 check
-    nodes._face_cooling_count = 2
-
     try:
         asyncio.run(
             nodes.ai_node(
@@ -2018,7 +2075,6 @@ def test_face_injection_when_flags_false():
         )
     finally:
         nodes.create_agent = original_create_agent
-        random.randint = original_randint
         nodes.store.get_plugin_data_file = original_get_data
         tmpdir.cleanup()
 
@@ -2059,13 +2115,6 @@ def test_face_tag_stripped_from_user_text_preserved_in_aimessage():
     original_create_agent = nodes.create_agent
     nodes.create_agent = lambda *a, **kw: _FakeAgent()
 
-    # Force random to return 0
-    original_randint = random.randint
-    random.randint = lambda a, b: 0
-
-    # Set cooling count high enough
-    nodes._face_cooling_count = 2
-
     try:
         result = asyncio.run(
             nodes.ai_node(
@@ -2091,7 +2140,6 @@ def test_face_tag_stripped_from_user_text_preserved_in_aimessage():
         )
     finally:
         nodes.create_agent = original_create_agent
-        random.randint = original_randint
 
 
 # -----------------------------------------------------------------------

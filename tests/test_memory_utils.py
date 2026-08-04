@@ -169,7 +169,6 @@ def load_memory_modules(
     config_mod.DOUBAO_2_LITE = ""
     config_mod.GPT_5_4_NANO = ""
     config_mod.BOT_QQ_ID = 0
-    config_mod.AUTO_RESPONSE_GROUP_ID = 12345
     sys.modules["hatsume.plugins.hatsume-plugin.config"] = config_mod
 
     state_mod = types.ModuleType("hatsume.plugins.hatsume-plugin.state")
@@ -413,6 +412,43 @@ def test_init_tokenized_corpus_expires_old_memories_from_db(tmp_path: Path):
     rows = conn.execute("SELECT id, content FROM memories ORDER BY id").fetchall()
     assert rows == [(2, "recent-memory")]
     assert deleted_vectors == [(12345, [1])]
+
+
+def test_expiry_deactivates_group_when_its_last_memory_is_removed(tmp_path: Path):
+    embedding_model = EmbeddingModelStub(
+        {"old-memory": [0.2, 0.8], "recent-memory": [0.5, 0.5]}
+    )
+    _tok, store, _retrieval, _cfg, _memory_file = load_memory_modules(
+        tmp_path, embedding_model
+    )
+    conn = store._get_db()
+    old_time = int(time.time()) - 10_000_000
+    recent_time = int(time.time())
+    conn.execute(
+        "INSERT INTO memories (group_id, content, time, people, tokens) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (12345, "old-memory", old_time, "[]", "[]"),
+    )
+    conn.execute(
+        "INSERT INTO memories (group_id, content, time, people, tokens) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (54321, "recent-memory", recent_time, "[]", "[]"),
+    )
+    conn.commit()
+    store.refresh_activated_groups(conn)
+    activation_updates: list[tuple[int, bool]] = []
+    store.configure_activated_group_callback(
+        lambda group_id, active: activation_updates.append((group_id, active))
+    )
+    store._get_vector_store = lambda: types.SimpleNamespace(
+        delete=lambda _memory_ids, *, group_id: None,
+        close=lambda: None,
+    )
+
+    store.init_tokenized_corpus()
+
+    assert store.get_activated_group_ids() == (54321,)
+    assert activation_updates == [(12345, False)]
 
 
 @pytest.mark.skip(reason="Pre-existing test infrastructure gap — ensure_embedding_model requires real credentials in engine.py")

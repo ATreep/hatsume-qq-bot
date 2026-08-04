@@ -36,7 +36,10 @@ _MEMORY_VECTOR_DB_FILE = "memory-db/memory_vectors.db"
 _db_conn: sqlite3.Connection | None = None
 _vector_store_lock = threading.RLock()
 embedding_model = None
-_auto_response_timer_callback: Callable[[int], None] | None = None
+_activated_group_lock = threading.RLock()
+_activated_group_ids: set[int] = set()
+_activated_group_callback: Callable[[int, bool], None] | None = None
+_pending_activated_group_updates: dict[int, bool] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -59,60 +62,10 @@ def _create_memory_table(conn: sqlite3.Connection) -> None:
     )
 
 
-def _migrate_legacy_schema(
-    conn: sqlite3.Connection,
-    columns: set[str],
-    legacy_group_id: int | None,
-) -> None:
-    row_count = int(conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0])
-    resolved_group_id: int | None = None
-    if row_count:
-        try:
-            resolved_group_id = validate_group_id(
-                _config.AUTO_RESPONSE_GROUP_ID
-                if legacy_group_id is None
-                else legacy_group_id
-            )
-        except ValueError as exc:
-            raise RuntimeError(
-                "AUTO_RESPONSE_GROUP_ID must be positive to migrate legacy memories"
-            ) from exc
-
-    expressions = {
-        "people": "people" if "people" in columns else "'[]'",
-        "tokens": "tokens" if "tokens" in columns else "'[]'",
-        "embedding": "embedding" if "embedding" in columns else "NULL",
-        "created_at": (
-            "created_at" if "created_at" in columns else "strftime('%s', 'now')"
-        ),
-    }
-    conn.execute("BEGIN IMMEDIATE")
-    try:
-        conn.execute("ALTER TABLE memories RENAME TO memories_legacy_group_migration")
-        _create_memory_table(conn)
-        if row_count and resolved_group_id is not None:
-            conn.execute(
-                "INSERT INTO memories "
-                "(id, group_id, content, time, people, tokens, embedding, created_at) "
-                "SELECT id, ?, content, time, "
-                f"{expressions['people']}, {expressions['tokens']}, "
-                f"{expressions['embedding']}, {expressions['created_at']} "
-                "FROM memories_legacy_group_migration ORDER BY id",
-                (resolved_group_id,),
-            )
-        conn.execute("DROP TABLE memories_legacy_group_migration")
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-
-
 def init_db(
     conn_or_path: sqlite3.Connection | str | Path,
-    *,
-    legacy_group_id: int | None = None,
 ) -> sqlite3.Connection:
-    """Open memory metadata and transactionally add required group ownership."""
+    """Open memory metadata and require explicit current group ownership."""
     if isinstance(conn_or_path, sqlite3.Connection):
         conn = conn_or_path
     else:
@@ -131,7 +84,7 @@ def init_db(
             str(row[1]) for row in conn.execute("PRAGMA table_info(memories)")
         }
         if "group_id" not in columns:
-            _migrate_legacy_schema(conn, columns, legacy_group_id)
+            raise RuntimeError("memory database schema must include group_id")
         else:
             invalid_count = int(
                 conn.execute(
@@ -188,7 +141,7 @@ def insert_memory(
     return int(cursor.lastrowid)
 
 
-def list_memory_group_ids(
+def _query_memory_group_ids(
     conn: sqlite3.Connection | None = None,
 ) -> tuple[int, ...]:
     """Return the positive group owners currently represented in memory metadata."""
@@ -199,12 +152,96 @@ def list_memory_group_ids(
     return tuple(validate_group_id(int(row[0])) for row in rows)
 
 
-def configure_auto_response_timer_callback(
-    callback: Callable[[int], None] | None,
+def get_activated_group_ids() -> tuple[int, ...]:
+    """Return a stable snapshot of groups currently represented in memory.db."""
+    with _activated_group_lock:
+        return tuple(sorted(_activated_group_ids))
+
+
+def is_group_activated(group_id: int) -> bool:
+    """Return whether a group currently owns at least one memory."""
+    resolved_group_id = validate_group_id(group_id)
+    with _activated_group_lock:
+        return resolved_group_id in _activated_group_ids
+
+
+def configure_activated_group_callback(
+    callback: Callable[[int, bool], None] | None,
 ) -> None:
-    """Register the runtime hook that ensures a new memory owner's timer."""
-    global _auto_response_timer_callback
-    _auto_response_timer_callback = callback
+    """Register the runtime hook that synchronizes group-owned background work."""
+    global _activated_group_callback
+    _activated_group_callback = callback
+
+
+def _notify_activated_group(group_id: int, active: bool) -> None:
+    callback = _activated_group_callback
+    if callback is None:
+        return
+    _invoke_activated_group_callback(group_id, active, callback)
+
+
+def _invoke_activated_group_callback(
+    group_id: int,
+    active: bool,
+    callback: Callable[[int, bool], None],
+) -> None:
+    try:
+        callback(group_id, active)
+    except Exception as exc:
+        _pending_activated_group_updates[group_id] = active
+        print(
+            "Error synchronizing activated group "
+            f"{group_id} (active={active}): {exc}"
+        )
+        traceback.print_exc()
+    else:
+        _pending_activated_group_updates.pop(group_id, None)
+
+
+def synchronize_activated_group(
+    group_id: int,
+    callback: Callable[[int, bool], None],
+) -> bool:
+    """Synchronize one group while its current activation state is locked."""
+    resolved_group_id = validate_group_id(group_id)
+    with _activated_group_lock:
+        active = resolved_group_id in _activated_group_ids
+        _invoke_activated_group_callback(resolved_group_id, active, callback)
+        return active
+
+
+def refresh_activated_groups(
+    conn: sqlite3.Connection | None = None,
+    *,
+    notify: bool = False,
+) -> tuple[int, ...]:
+    """Refresh the RAM registry from SQLite and optionally notify changes."""
+    with _activated_group_lock:
+        if notify:
+            for group_id, active in sorted(
+                tuple(_pending_activated_group_updates.items())
+            ):
+                _notify_activated_group(group_id, active)
+        current_group_ids = set(_query_memory_group_ids(conn))
+        previous_group_ids = set(_activated_group_ids)
+        _activated_group_ids.clear()
+        _activated_group_ids.update(current_group_ids)
+        if notify:
+            for group_id in sorted(previous_group_ids - current_group_ids):
+                _notify_activated_group(group_id, False)
+            for group_id in sorted(current_group_ids - previous_group_ids):
+                _notify_activated_group(group_id, True)
+    return tuple(sorted(current_group_ids))
+
+
+def _update_activated_group(group_id: int, active: bool) -> None:
+    resolved_group_id = validate_group_id(group_id)
+    with _activated_group_lock:
+        if active:
+            _activated_group_ids.add(resolved_group_id)
+        else:
+            _activated_group_ids.discard(resolved_group_id)
+        _notify_activated_group(resolved_group_id, active)
 
 
 def delete_expired_memories(conn: sqlite3.Connection, retention_seconds: int) -> int:
@@ -468,27 +505,6 @@ def normalize_people(
     return normalized
 
 
-def normalize_memory_object(obj: Any) -> tuple[dict[str, Any] | None, bool]:
-    if not isinstance(obj, dict):
-        return None, True
-    content = obj.get("content")
-    if not isinstance(content, str) or not content.strip():
-        return None, True
-    try:
-        raw_time = obj.get("time")
-        if raw_time is None:
-            return None, True
-        mem_time = int(raw_time)
-    except (TypeError, ValueError):
-        return None, True
-    normalized_obj = {
-        "content": content,
-        "time": mem_time,
-        "people": normalize_people(obj.get("people")),
-    }
-    return normalized_obj, normalized_obj != obj
-
-
 def _resolve_memory_group_id(group_id: int | None) -> int:
     if group_id is None:
         current_group_id = get_current_group_id()
@@ -553,15 +569,7 @@ def add_mem(
         traceback.print_exc()
         return
 
-    if _auto_response_timer_callback is not None:
-        try:
-            _auto_response_timer_callback(resolved_group_id)
-        except Exception as exc:
-            print(
-                "Error ensuring auto-response timer for "
-                f"group {resolved_group_id}: {exc}"
-            )
-            traceback.print_exc()
+    _update_activated_group(resolved_group_id, True)
 
     try:
         vector = ensure_embedding_model().embed_documents(
@@ -575,82 +583,8 @@ def add_mem(
         traceback.print_exc()
 
 
-def migrate_from_json(
-    conn: sqlite3.Connection,
-    json_path: str | Path,
-    model,
-    *,
-    group_id: int,
-) -> int:
-    resolved_group_id = validate_group_id(group_id)
-    path = Path(json_path)
-    if not path.exists():
-        return 0
-    raw = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(raw, list):
-        return 0
-
-    vector_store = None
-    if model is not None:
-        try:
-            _vector_store_lock.acquire()
-            vector_store = _get_vector_store()
-        except Exception as exc:
-            _vector_store_lock.release()
-            print(f"Error opening Milvus for JSON migration: {exc}")
-            traceback.print_exc()
-
-    count = 0
-    try:
-        for raw_obj in raw:
-            obj, _ = normalize_memory_object(raw_obj)
-            if obj is None:
-                continue
-            tokens = tokenize_with_pos(obj["content"])
-            memory_id = insert_memory(
-                conn,
-                resolved_group_id,
-                obj["content"],
-                obj["time"],
-                obj["people"],
-                tokens,
-            )
-            count += 1
-            if model is None or vector_store is None:
-                continue
-            try:
-                vector = model.embed_documents(
-                    [_truncate_for_embedding(obj["content"])]
-                )[0]
-                vector_store.upsert([(memory_id, resolved_group_id, vector)])
-            except Exception as exc:
-                print(f"Error migrating memory {memory_id} vector: {exc}")
-                traceback.print_exc()
-    finally:
-        if vector_store is not None:
-            try:
-                vector_store.close()
-            finally:
-                _vector_store_lock.release()
-    return count
-
-
 def init_memory_system() -> None:
     conn = _get_db()
-    json_path = Path(store.get_plugin_data_file("memory.json"))
-    if json_path.exists():
-        count = int(conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0])
-        if count == 0:
-            print("Migrating memory.json to SQLite and Milvus...")
-            legacy_group_id = validate_group_id(_config.AUTO_RESPONSE_GROUP_ID)
-            migrated = migrate_from_json(
-                conn,
-                json_path,
-                ensure_embedding_model(),
-                group_id=legacy_group_id,
-            )
-            print(f"Migrated {migrated} memories")
-            json_path.rename(Path(str(json_path) + ".bak"))
     from .vector_store import migrate_sqlite_vectors
 
     sqlite_path = Path(store.get_plugin_data_file(_MEMORY_DB_FILE))
@@ -659,7 +593,6 @@ def init_memory_system() -> None:
             sqlite_path,
             vector_store,
             ensure_embedding_model().embed_documents,
-            legacy_group_id=_config.AUTO_RESPONSE_GROUP_ID,
         )
     if report.failed or report.verified != report.total:
         raise RuntimeError(
@@ -671,6 +604,7 @@ def init_memory_system() -> None:
         "ON CONFLICT(key) DO UPDATE SET value = excluded.value"
     )
     conn.commit()
+    refresh_activated_groups(conn)
     count = int(conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0])
     print(f"Initialized SQLite memory store with {count} memories")
 
@@ -704,6 +638,7 @@ def init_tokenized_corpus() -> None:
             except Exception as exc:
                 print(f"Error deleting expired Milvus vectors: {exc}")
                 traceback.print_exc()
+        refresh_activated_groups(conn, notify=True)
         print(f"Expired {deleted} memories")
     except Exception as exc:
         print(f"Error in daily memory maintenance: {exc}")

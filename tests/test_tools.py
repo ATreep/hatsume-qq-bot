@@ -1371,6 +1371,33 @@ class MessageStub:
         return []
 
 
+@pytest.mark.asyncio
+async def test_autoresponse_treats_all_arguments_as_current_group_custom_prompt():
+    _load_tools_module()
+    commands = _load_commands_module()
+    nodes = types.ModuleType("hatsume.plugins.hatsume-plugin.graph.nodes")
+    nodes.inject_timer = MagicMock()
+    sys.modules[nodes.__name__] = nodes
+    prompts = types.ModuleType("hatsume.plugins.hatsume-plugin.prompts")
+    prompts.get_auto_response_prompt = MagicMock(return_value="default prompt")
+    sys.modules[prompts.__name__] = prompts
+    matcher = _FakeMatcher()
+    bot = object()
+    event = types.SimpleNamespace(group_id=456)
+
+    with pytest.raises(_Finished):
+        await commands.handle_autoresponse(
+            bot, event, matcher, MessageStub("prod")
+        )
+
+    nodes.inject_timer.assert_called_once_with(
+        user_id=0,
+        group_id=456,
+        timer_prompt="prod",
+        start_conversation_cb=None,
+    )
+
+
 class TestTimerCommand:
     @staticmethod
     def _setup(commands, *, task=None):

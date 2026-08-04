@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 import time
 from contextlib import contextmanager
+from functools import wraps
 from pathlib import Path
-from typing import Iterator
+from typing import Callable, Concatenate, Iterator, ParamSpec, TypeVar
 
 import nonebot_plugin_localstore as localstore
 
@@ -43,6 +45,25 @@ _EXPECTED_COLUMNS = {
         "job_id",
     },
 }
+_StoreParams = ParamSpec("_StoreParams")
+_StoreReturn = TypeVar("_StoreReturn")
+
+
+def _serialized(
+    method: Callable[Concatenate["TimerStore", _StoreParams], _StoreReturn],
+) -> Callable[Concatenate["TimerStore", _StoreParams], _StoreReturn]:
+    """Serialize access to the shared cross-thread SQLite connection."""
+
+    @wraps(method)
+    def locked(
+        self: "TimerStore",
+        *args: _StoreParams.args,
+        **kwargs: _StoreParams.kwargs,
+    ) -> _StoreReturn:
+        with self._operation_lock:
+            return method(self, *args, **kwargs)
+
+    return locked
 
 
 def _get_default_db_path() -> str:
@@ -79,8 +100,10 @@ class TimerStore:
 
     def __init__(self, db_path: str | None = None):
         self._db_path = db_path or _get_default_db_path()
+        self._operation_lock = threading.RLock()
         self._conn: sqlite3.Connection | None = None
 
+    @_serialized
     def init_db(self) -> None:
         """Open the v2 database and create its idempotent schema."""
         if self._conn is not None:
@@ -177,6 +200,7 @@ class TimerStore:
         self._conn = conn
         print(f"[timer-v2] DB initialized at {path}")
 
+    @_serialized
     def close(self) -> None:
         """Close the store connection."""
         if self._conn is not None:
@@ -191,15 +215,22 @@ class TimerStore:
     @contextmanager
     def transaction(self) -> Iterator[None]:
         """Run multiple store writes as one immediate transaction."""
-        conn = self._connection()
-        conn.execute("BEGIN IMMEDIATE")
-        try:
+        with self._operation_lock:
+            conn = self._connection()
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                yield
+            except BaseException:
+                conn.rollback()
+                raise
+            else:
+                conn.commit()
+
+    @contextmanager
+    def serialized(self) -> Iterator[None]:
+        """Hold the store operation lock across a multi-method state transition."""
+        with self._operation_lock:
             yield
-        except BaseException:
-            conn.rollback()
-            raise
-        else:
-            conn.commit()
 
     def _insert_points(self, task_id: int, plan: SchedulePlan) -> None:
         conn = self._connection()
@@ -227,6 +258,7 @@ class TimerStore:
                 (f"timer_v2_point_{point_id}", point_id),
             )
 
+    @_serialized
     def create_task(
         self,
         group_id: int,
@@ -277,12 +309,14 @@ class TimerStore:
         self._insert_points(int(inserted_id), plan)
         return int(inserted_id)
 
+    @_serialized
     def get_task(self, task_id: int) -> dict | None:
         row = self._connection().execute(
             "SELECT * FROM timer_tasks WHERE id = ?", (task_id,)
         ).fetchone()
         return dict(row) if row is not None else None
 
+    @_serialized
     def list_tasks_by_group(self, group_id: int) -> list[dict]:
         rows = self._connection().execute(
             "SELECT * FROM timer_tasks "
@@ -292,12 +326,14 @@ class TimerStore:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    @_serialized
     def get_point(self, point_id: int) -> dict | None:
         row = self._connection().execute(
             "SELECT * FROM timer_schedule_points WHERE id = ?", (point_id,)
         ).fetchone()
         return dict(row) if row is not None else None
 
+    @_serialized
     def get_points_for_task(self, task_id: int) -> list[dict]:
         rows = self._connection().execute(
             "SELECT * FROM timer_schedule_points "
@@ -306,6 +342,7 @@ class TimerStore:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    @_serialized
     def list_incomplete_points(self) -> list[dict]:
         rows = self._connection().execute(
             "SELECT p.*, t.schedule_type, t.step, t.task_type, t.group_id, "
@@ -318,6 +355,7 @@ class TimerStore:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    @_serialized
     def replace_task_with_exact_plan(
         self, task_id: int, prompt: str, plan: SchedulePlan
     ) -> None:
@@ -345,12 +383,14 @@ class TimerStore:
             )
             self._insert_points(task_id, plan)
 
+    @_serialized
     def delete_task(self, task_id: int, *, commit: bool = True) -> None:
         conn = self._connection()
         conn.execute("DELETE FROM timer_tasks WHERE id = ?", (task_id,))
         if commit:
             conn.commit()
 
+    @_serialized
     def mark_occurrence_processed(
         self, point_id: int, scheduled_at: float
     ) -> bool:
@@ -384,6 +424,7 @@ class TimerStore:
             )
         return True
 
+    @_serialized
     def list_finished_task_ids(self) -> list[int]:
         rows = self._connection().execute(
             "SELECT id FROM timer_tasks "
@@ -392,6 +433,7 @@ class TimerStore:
         ).fetchall()
         return [int(row["id"]) for row in rows]
 
+    @_serialized
     def delete_finished_tasks(self) -> list[int]:
         task_ids = self.list_finished_task_ids()
         if not task_ids:
@@ -404,6 +446,7 @@ class TimerStore:
         conn.commit()
         return task_ids
 
+    @_serialized
     def upsert_auto_response(
         self,
         group_id: int,
@@ -433,6 +476,7 @@ class TimerStore:
             )
         return task_id
 
+    @_serialized
     def get_auto_response_point(self, group_id: int) -> dict | None:
         if isinstance(group_id, bool) or not isinstance(group_id, int) or group_id <= 0:
             raise ValueError("group_id must be a positive integer")
@@ -447,6 +491,7 @@ class TimerStore:
         ).fetchone()
         return dict(row) if row is not None else None
 
+    @_serialized
     def list_auto_response_group_ids(self) -> tuple[int, ...]:
         rows = self._connection().execute(
             "SELECT DISTINCT group_id FROM timer_tasks "
@@ -454,6 +499,7 @@ class TimerStore:
         ).fetchall()
         return tuple(int(row["group_id"]) for row in rows)
 
+    @_serialized
     def delete_auto_response_tasks(self, group_id: int | None = None) -> None:
         conn = self._connection()
         if group_id is None:

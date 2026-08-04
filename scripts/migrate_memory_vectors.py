@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Copy legacy SQLite memory vectors into the local Milvus Lite database."""
+"""Reconcile group-owned SQLite memory rows into Milvus Lite."""
 
 from __future__ import annotations
 
@@ -51,9 +51,11 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = _parse_args()
-    config = _load_module("hatsume_memory_migration_config", PLUGIN_DIR / "config.py")
+    config = _load_module(
+        "hatsume_memory_reconciliation_config", PLUGIN_DIR / "config.py"
+    )
     vectors = _load_module(
-        "hatsume_memory_migration_vector_store",
+        "hatsume_memory_reconciliation_vector_store",
         PLUGIN_DIR / "memory/vector_store.py",
     )
     embedding_model = OpenAIEmbeddings(

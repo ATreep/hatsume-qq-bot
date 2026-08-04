@@ -61,7 +61,6 @@ def _stub_config():
     mod.SHELL_MAX_OUTPUT = 1000
     mod.SHELL_TIMEOUT = 10
     mod.BOT_QQ_ID = 1234567890
-    mod.AUTO_RESPONSE_GROUP_ID = 100
 
 
 def _load_state_module():
@@ -235,11 +234,16 @@ def _load_conversation_module():
         sys.modules[mem_engine_name] = mem_engine_mod
 
     # Also set directly on memory module since __init__.py re-exports from engine
-    if "hatsume.plugins.hatsume-plugin.memory" in sys.modules:
-        memory = sys.modules["hatsume.plugins.hatsume-plugin.memory"]
-        memory.get_mem_list = MagicMock(return_value=[])
-        memory.add_mem = MagicMock()
-        memory.query_mems = MagicMock(return_value=[])
+    memory_name = "hatsume.plugins.hatsume-plugin.memory"
+    if memory_name not in sys.modules:
+        memory_mod = types.ModuleType(memory_name)
+        memory_mod.__path__ = [str(PLUGIN_DIR / "memory")]
+        sys.modules[memory_name] = memory_mod
+    memory = sys.modules[memory_name]
+    memory.get_mem_list = MagicMock(return_value=[])
+    memory.add_mem = MagicMock()
+    memory.query_mems = MagicMock(return_value=[])
+    memory.is_group_activated = MagicMock(return_value=False)
 
     # Stub graph.tools (imported by chat.py)
     tools_name = "hatsume.plugins.hatsume-plugin.graph.tools"
@@ -380,14 +384,12 @@ def test_group_runtime_rejects_invalid_ids_and_owns_distinct_mutable_state():
     first.conversation.chat_peers.add("peer")
     first.conversation.pending_queue.append({"text": "pending"})
     first.auxiliary_messages_queue.append({"text": "aux"})
-    first.face_cooling_count = 3
     first.send_image_count = 2
     first.generate_video_used = True
 
     assert second.conversation.chat_peers == set()
     assert second.conversation.pending_queue == []
     assert second.auxiliary_messages_queue == []
-    assert second.face_cooling_count == 0
     assert second.send_image_count == 0
     assert second.generate_video_used is False
     registry.clear_for_tests()
@@ -413,7 +415,7 @@ def test_group_runtime_discovers_and_unbinds_target_group_bots():
     assert registry.get_or_create(202).bot is first_bot
     assert registry.get_bot(303) is second_bot
 
-    registry.unbind_bot(first_bot)
+    assert registry.unbind_bot(first_bot) == (101, 202)
     with pytest.raises(LookupError, match="group 101"):
         registry.get_bot(101)
     assert registry.routed_group_ids() == (303,)
@@ -641,7 +643,7 @@ def _make_group_increase_event(*, group_id=100, user_id=123456, self_id=999999):
 
 def test_group_increase_starts_conversation_and_activates_new_member_peer():
     dialogue = _load_conversation_module()
-    dialogue.AUTO_RESPONSE_GROUP_ID = 100
+    dialogue.is_group_activated = MagicMock(return_value=True)
     dialogue.group_runtime_registry.clear_for_tests()
     dialogue.get_group_member_name = AsyncMock(return_value="新成员")
     dialogue.get_qq_avatar_url = MagicMock(
@@ -649,17 +651,17 @@ def test_group_increase_starts_conversation_and_activates_new_member_peer():
     )
     dialogue._start_conv_for_trigger = MagicMock()
     bot = MagicMock()
-    event = _make_group_increase_event()
+    event = _make_group_increase_event(group_id=101)
 
     asyncio.run(dialogue.handle_group_increase(bot, event))
 
-    state = dialogue.group_runtime_registry.get_existing(100).conversation
+    state = dialogue.group_runtime_registry.get_existing(101).conversation
     assert state.is_chatting
-    assert state.chat_peers == {"group_100_123456"}
-    dialogue.get_group_member_name.assert_awaited_once_with(bot, 100, 123456)
+    assert state.chat_peers == {"group_101_123456"}
+    dialogue.get_group_member_name.assert_awaited_once_with(bot, 101, 123456)
     dialogue._start_conv_for_trigger.assert_called_once()
     user_id, group_id, prompt = dialogue._start_conv_for_trigger.call_args.args
-    assert (user_id, group_id) == (123456, 100)
+    assert (user_id, group_id) == (123456, 101)
     assert dialogue._start_conv_for_trigger.call_args.kwargs == {
         "trigger_type": "group_increase",
         "bot": bot,
@@ -676,7 +678,7 @@ def test_group_increase_starts_conversation_and_activates_new_member_peer():
 
 def test_group_increase_injects_active_conversation_without_starting_another():
     dialogue = _load_conversation_module()
-    dialogue.AUTO_RESPONSE_GROUP_ID = 100
+    dialogue.is_group_activated = MagicMock(return_value=True)
     dialogue.group_runtime_registry.clear_for_tests()
     state = dialogue.group_runtime_registry.get_or_create(100).conversation
     state.activate_chat("group_100_1")
@@ -708,9 +710,11 @@ def test_group_increase_injects_active_conversation_without_starting_another():
     dialogue._start_conv_for_trigger.assert_not_called()
 
 
-def test_group_increase_ignores_other_groups_and_the_bot_itself():
+def test_group_increase_ignores_inactive_groups_and_the_bot_itself():
     dialogue = _load_conversation_module()
-    dialogue.AUTO_RESPONSE_GROUP_ID = 100
+    dialogue.is_group_activated = MagicMock(
+        side_effect=lambda group_id: group_id == 100
+    )
     dialogue.group_runtime_registry.clear_for_tests()
     dialogue.get_group_member_name = AsyncMock(return_value="ignored")
     dialogue._start_conv_for_trigger = MagicMock()

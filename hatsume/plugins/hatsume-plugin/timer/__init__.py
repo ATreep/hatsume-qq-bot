@@ -30,11 +30,35 @@ def get_store() -> TimerStore:
     return _store
 
 
-def ensure_auto_response_for_group(group_id: int) -> None:
-    """Ensure one memory-owning group has an active auto-response point."""
-    from .executor import ensure_auto_response_for_group as ensure_for_group
+def sync_auto_response_for_group(group_id: int, active: bool) -> None:
+    """Synchronize one activated group's auto-response point."""
+    from ..group_runtime import group_runtime_registry
+    from .executor import sync_auto_response_for_group as sync_for_group
 
-    ensure_for_group(get_store(), group_id)
+    sync_for_group(
+        get_store(),
+        group_id,
+        active,
+        register_job=group_id in group_runtime_registry.routed_group_ids(),
+    )
+
+
+def reconcile_auto_response_for_group(group_id: int) -> None:
+    """Synchronize one group from its memory-owned current activation state."""
+    from ..memory import synchronize_activated_group
+
+    synchronize_activated_group(group_id, sync_auto_response_for_group)
+
+
+def reconcile_auto_responses() -> None:
+    """Atomically reconcile current and persisted auto-response group owners."""
+    from ..memory import get_activated_group_ids
+
+    store = get_store()
+    group_ids = set(get_activated_group_ids())
+    group_ids.update(store.list_auto_response_group_ids())
+    for group_id in sorted(group_ids):
+        reconcile_auto_response_for_group(group_id)
 
 
 async def init_scheduler(
@@ -56,16 +80,17 @@ async def init_scheduler(
 
     print("⏰ [timer] Starting scheduler recovery...")
     store = get_store()
-    memory_groups = tuple(group_ids)
+    activated_groups = tuple(group_ids)
     routed_groups = tuple(routable_group_ids)
-    remove_ineligible_auto_response_groups(store, memory_groups)
+    remove_ineligible_auto_response_groups(store, activated_groups)
     await reload_all_schedules(store, group_ids=routed_groups)
 
     await refresh_auto_responses(
         store,
-        memory_groups,
+        activated_groups,
         routable_group_ids=routed_groups,
     )
     register_cleanup_job(store)
+    reconcile_auto_responses()
 
     print("⏰ [timer] Scheduler recovery complete")

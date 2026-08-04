@@ -17,6 +17,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from nonebot import require
 
 from ..config import (
+    AUTO_RESPONSE_GROUP_BLACKLIST,
     AUTO_RESPONSE_MAX_INTERVAL_MINUTES,
     AUTO_RESPONSE_MIN_INTERVAL_MINUTES,
     AUTO_RESPONSE_QUIET_END_HOUR,
@@ -204,6 +205,39 @@ def _is_auto_response_quiet_time(triggered_at: float) -> bool:
     return AUTO_RESPONSE_QUIET_START_HOUR <= trigger_hour < AUTO_RESPONSE_QUIET_END_HOUR
 
 
+def _is_group_routable(group_id: int) -> bool:
+    """Return whether the target group has an explicit connected Bot route."""
+    from ..group_runtime import group_runtime_registry
+
+    try:
+        group_runtime_registry.get_bot(group_id)
+    except LookupError:
+        return False
+    return True
+
+
+def _get_auto_response_state(group_id: int) -> tuple[bool, bool]:
+    """Return current memory activation and explicit Bot-route availability."""
+    from ..memory import is_group_activated
+
+    return is_group_activated(group_id), _is_group_routable(group_id)
+
+
+def _synchronize_current_auto_response(store: TimerStore, group_id: int) -> None:
+    """Apply current activation atomically through the memory-owned registry."""
+    from ..memory import synchronize_activated_group
+
+    synchronize_activated_group(
+        group_id,
+        lambda resolved_group_id, active: sync_auto_response_for_group(
+            store,
+            resolved_group_id,
+            active,
+            register_job=_is_group_routable(resolved_group_id),
+        ),
+    )
+
+
 async def _execute_auto_response(
     task: dict[str, Any], store: TimerStore, *, triggered_at: float
 ) -> None:
@@ -211,6 +245,11 @@ async def _execute_auto_response(
     group_id = int(task["group_id"])
     if group_id <= 0:
         print(f"[auto_response] Skipped invalid group_id={group_id}")
+        return
+
+    active, routable = _get_auto_response_state(group_id)
+    if not active or group_id in AUTO_RESPONSE_GROUP_BLACKLIST or not routable:
+        _synchronize_current_auto_response(store, group_id)
         return
 
     try:
@@ -227,7 +266,7 @@ async def _execute_auto_response(
             start_conversation_cb=_timer_start_conv_cb,
         )
     finally:
-        reschedule_auto_response(store, group_id)
+        _synchronize_current_auto_response(store, group_id)
 
 
 def reschedule_auto_response(
@@ -239,17 +278,31 @@ def reschedule_auto_response(
         add_jobs_for_task(task_id, store)
 
 
-def ensure_auto_response_for_group(store: TimerStore, group_id: int) -> None:
-    """Ensure one group owns exactly one future auto-response point."""
-    point = store.get_auto_response_point(group_id)
-    if point is not None and float(point["exact_at"]) > time.time():
-        if scheduler.get_job(str(point["job_id"])) is None:
-            register_point(point, store)
-        return
-    if point is not None:
-        cancel_point_job(int(point["id"]))
-    store.delete_auto_response_tasks(group_id)
-    reschedule_auto_response(store, group_id)
+def sync_auto_response_for_group(
+    store: TimerStore,
+    group_id: int,
+    active: bool,
+    *,
+    register_job: bool = True,
+) -> None:
+    """Synchronize one group's auto-response point with its activation state."""
+    with store.serialized():
+        point = store.get_auto_response_point(group_id)
+        if not active or group_id in AUTO_RESPONSE_GROUP_BLACKLIST:
+            if point is not None:
+                cancel_point_job(int(point["id"]))
+            store.delete_auto_response_tasks(group_id)
+            return
+        if point is not None and float(point["exact_at"]) > time.time():
+            if not register_job:
+                cancel_point_job(int(point["id"]))
+            elif scheduler.get_job(str(point["job_id"])) is None:
+                register_point(point, store)
+            return
+        if point is not None:
+            cancel_point_job(int(point["id"]))
+        store.delete_auto_response_tasks(group_id)
+        reschedule_auto_response(store, group_id, register_job=register_job)
 
 
 def _normalize_group_ids(group_ids: Iterable[int]) -> set[int]:
@@ -268,8 +321,10 @@ def _normalize_group_ids(group_ids: Iterable[int]) -> set[int]:
 def remove_ineligible_auto_response_groups(
     store: TimerStore, group_ids: Iterable[int]
 ) -> None:
-    """Delete auto-response tasks whose groups no longer own memory."""
-    eligible_group_ids = _normalize_group_ids(group_ids)
+    """Delete auto-response tasks for groups without memory or on the blacklist."""
+    eligible_group_ids = (
+        _normalize_group_ids(group_ids) - AUTO_RESPONSE_GROUP_BLACKLIST
+    )
     stored_group_ids = set(store.list_auto_response_group_ids())
     for group_id in sorted(stored_group_ids - eligible_group_ids):
         if group_id > 0:
@@ -286,7 +341,9 @@ async def refresh_auto_responses(
     routable_group_ids: Iterable[int] | None = None,
 ) -> None:
     """Synchronize per-group auto-response points with memory-owned groups."""
-    eligible_group_ids = _normalize_group_ids(group_ids)
+    eligible_group_ids = (
+        _normalize_group_ids(group_ids) - AUTO_RESPONSE_GROUP_BLACKLIST
+    )
     routable = (
         eligible_group_ids
         if routable_group_ids is None
@@ -300,6 +357,8 @@ async def refresh_auto_responses(
         if point is not None and float(point["exact_at"]) > now:
             if group_id in routable:
                 register_point(point, store)
+            else:
+                cancel_point_job(int(point["id"]))
             continue
         if point is not None:
             cancel_point_job(int(point["id"]))
@@ -433,6 +492,14 @@ async def _execute_point(
         )
 
     if task["task_type"] == "auto_response":
+        group_id = int(task["group_id"])
+        active, routable = _get_auto_response_state(group_id)
+        if not active or group_id in AUTO_RESPONSE_GROUP_BLACKLIST:
+            _synchronize_current_auto_response(store, group_id)
+            return
+        if not routable:
+            cancel_point_job(point_id)
+            return
         if store.mark_occurrence_processed(point_id, scheduled_at):
             await _execute_auto_response(task, store, triggered_at=scheduled_at)
         return

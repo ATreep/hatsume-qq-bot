@@ -33,28 +33,33 @@ from .handlers.tools import (
 from .handlers.social import handle_like, handle_likerank
 from .group_runtime import group_runtime_registry
 from .memory import (
-    configure_auto_response_timer_callback,
+    configure_activated_group_callback,
+    get_activated_group_ids,
     init_memory_system,
     init_tokenized_corpus,  # noqa: F401 — scheduler decorator registers it
-    list_memory_group_ids,
 )
-from .timer import ensure_auto_response_for_group, init_scheduler
+from .timer import (
+    init_scheduler,
+    reconcile_auto_response_for_group,
+    sync_auto_response_for_group,
+)
 
-# Initialize memory system on plugin startup (DB init, JSON migration, memory load)
+# Initialize memory system and its activated-group snapshot on plugin startup.
 init_memory_system()
-configure_auto_response_timer_callback(ensure_auto_response_for_group)
+configure_activated_group_callback(sync_auto_response_for_group)
 
 async def _handle_bot_connect(bot: Bot) -> None:
     """Learn target-group routes before recovering background injections."""
     await group_runtime_registry.discover_bot_groups(bot)
     await init_scheduler(
-        list_memory_group_ids(),
+        get_activated_group_ids(),
         group_runtime_registry.routed_group_ids(),
     )
 
 
 async def _handle_bot_disconnect(bot: Bot) -> None:
-    group_runtime_registry.unbind_bot(bot)
+    for group_id in group_runtime_registry.unbind_bot(bot):
+        reconcile_auto_response_for_group(group_id)
 
 
 # Recover timers only after the connected OneBot account's group routes have

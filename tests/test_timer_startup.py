@@ -95,6 +95,63 @@ def test_get_store_closes_failed_v2_initialization_and_retries(capsys):
     assert "/private/timer-v2-db/timer.db" in output
 
 
+def test_incremental_auto_response_sync_uses_current_group_route():
+    timer = _load_timer_init(type("Store", (), {}))
+    store = object()
+    timer._store = store
+    registry = types.SimpleNamespace(routed_group_ids=lambda: (101,))
+    group_runtime = types.ModuleType(f"{BASE_NAME}.group_runtime")
+    group_runtime.group_runtime_registry = registry
+    sys.modules[group_runtime.__name__] = group_runtime
+    calls = []
+    executor = types.ModuleType(f"{BASE_NAME}.timer.executor")
+    executor.sync_auto_response_for_group = (
+        lambda received, group_id, active, *, register_job: calls.append(
+            (received, group_id, active, register_job)
+        )
+    )
+    sys.modules[executor.__name__] = executor
+
+    timer.sync_auto_response_for_group(101, True)
+    timer.sync_auto_response_for_group(202, True)
+
+    assert calls == [
+        (store, 101, True, True),
+        (store, 202, True, False),
+    ]
+
+
+def test_reconcile_auto_responses_uses_memory_owned_current_state_for_union():
+    timer = _load_timer_init(type("Store", (), {}))
+    store = types.SimpleNamespace(list_auto_response_group_ids=lambda: (202,))
+    timer._store = store
+    registry = types.SimpleNamespace(routed_group_ids=lambda: (101,))
+    group_runtime = types.ModuleType(f"{BASE_NAME}.group_runtime")
+    group_runtime.group_runtime_registry = registry
+    sys.modules[group_runtime.__name__] = group_runtime
+    memory = types.ModuleType(f"{BASE_NAME}.memory")
+    memory.get_activated_group_ids = lambda: (101,)
+    memory.synchronize_activated_group = (
+        lambda group_id, callback: callback(group_id, group_id == 101)
+    )
+    sys.modules[memory.__name__] = memory
+    calls = []
+    executor = types.ModuleType(f"{BASE_NAME}.timer.executor")
+    executor.sync_auto_response_for_group = (
+        lambda received, group_id, active, *, register_job: calls.append(
+            (received, group_id, active, register_job)
+        )
+    )
+    sys.modules[executor.__name__] = executor
+
+    timer.reconcile_auto_responses()
+
+    assert calls == [
+        (store, 101, True, True),
+        (store, 202, False, False),
+    ]
+
+
 @pytest.mark.asyncio
 async def test_init_scheduler_orders_recovery_memory_group_auto_response_and_cleanup():
     timer = _load_timer_init(type("Store", (), {}))
@@ -128,7 +185,8 @@ async def test_init_scheduler_orders_recovery_memory_group_auto_response_and_cle
     executor.refresh_auto_responses = auto
     executor.register_cleanup_job = cleanup
     sys.modules[executor.__name__] = executor
+    timer.reconcile_auto_responses = lambda: calls.append("reconcile")
 
     await timer.init_scheduler((101, 202), (101,))
 
-    assert calls == ["sync", "recover", "auto", "cleanup"]
+    assert calls == ["sync", "recover", "auto", "cleanup", "reconcile"]

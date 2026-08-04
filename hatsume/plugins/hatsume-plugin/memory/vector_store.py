@@ -199,9 +199,8 @@ def migrate_sqlite_vectors(
     embed_documents: Callable[[list[str]], list[list[float]]],
     *,
     batch_size: int = 100,
-    legacy_group_id: int | None = None,
 ) -> MigrationReport:
-    """Copy legacy SQLite vectors into Milvus without opening SQLite writable."""
+    """Reconcile explicitly group-owned SQLite rows into Milvus read-only."""
     if batch_size <= 0:
         raise ValueError("batch_size must be positive")
 
@@ -216,23 +215,11 @@ def migrate_sqlite_vectors(
         columns = {
             str(row[1]) for row in connection.execute("PRAGMA table_info(memories)")
         }
-        if not {"id", "content"}.issubset(columns):
-            raise ValueError("SQLite memories table must contain id and content")
+        if not {"id", "group_id", "content"}.issubset(columns):
+            raise ValueError(
+                "SQLite memories table must contain id, group_id, and content"
+            )
         embedding_expression = "embedding" if "embedding" in columns else "NULL"
-        if "group_id" in columns:
-            group_expression = "group_id"
-        else:
-            row_count = int(
-                connection.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
-            )
-            if row_count and legacy_group_id is None:
-                raise ValueError(
-                    "legacy_group_id is required for unscoped SQLite vectors"
-                )
-            assert legacy_group_id is not None or row_count == 0
-            group_expression = str(
-                _validate_group_id(legacy_group_id) if legacy_group_id else 1
-            )
         total = int(
             connection.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
         )
@@ -242,9 +229,7 @@ def migrate_sqlite_vectors(
             rows = connection.execute(
                 "SELECT id, content, "
                 + embedding_expression
-                + " AS embedding, "
-                + group_expression
-                + " AS group_id FROM memories "
+                + " AS embedding, group_id FROM memories "
                 "WHERE id > ? ORDER BY id LIMIT ?",
                 (last_id, batch_size),
             ).fetchall()
@@ -270,7 +255,7 @@ def migrate_sqlite_vectors(
                 group_id = _validate_group_id(int(raw_group_id))
                 if memory_id in existing:
                     continue
-                vector = _decode_legacy_vector(
+                vector = _decode_sqlite_vector(
                     raw_blob,
                     dimension=vector_store.dimension,
                 )
@@ -329,7 +314,6 @@ def migrate_sqlite_vectors(
             connection,
             vector_store,
             batch_size=batch_size,
-            legacy_group_id=legacy_group_id,
         )
     finally:
         connection.close()
@@ -345,7 +329,7 @@ def migrate_sqlite_vectors(
     )
 
 
-def _decode_legacy_vector(blob: bytes | None, *, dimension: int) -> list[float] | None:
+def _decode_sqlite_vector(blob: bytes | None, *, dimension: int) -> list[float] | None:
     if blob is None or len(blob) % np.dtype(np.float32).itemsize != 0:
         return None
     vector = np.frombuffer(blob, dtype=np.float32)
@@ -368,23 +352,13 @@ def _verified_sqlite_ids(
     vector_store: MilvusVectorStore,
     *,
     batch_size: int,
-    legacy_group_id: int | None,
 ) -> int:
     verified = 0
     last_id = -1
     while True:
-        columns = {
-            str(row[1]) for row in connection.execute("PRAGMA table_info(memories)")
-        }
-        group_expression = (
-            "group_id"
-            if "group_id" in columns
-            else str(_validate_group_id(legacy_group_id or 1))
-        )
         rows = connection.execute(
-            "SELECT id, "
-            + group_expression
-            + " AS group_id FROM memories WHERE id > ? ORDER BY id LIMIT ?",
+            "SELECT id, group_id FROM memories "
+            "WHERE id > ? ORDER BY id LIMIT ?",
             (last_id, batch_size),
         ).fetchall()
         if not rows:

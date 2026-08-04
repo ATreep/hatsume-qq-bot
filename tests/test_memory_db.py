@@ -4,8 +4,8 @@ from __future__ import annotations
 import json
 import sqlite3
 import sys
+import threading
 import types
-import tempfile
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -62,22 +62,7 @@ def _load_db_module():
     )
     sys.modules["nonebot_plugin_localstore"] = store_mod
 
-    # Provide normalize_memory_object stub (was in store, now merged into engine)
     store_mod = types.ModuleType("hatsume.plugins.hatsume-plugin.memory.engine")
-
-    def normalize_memory_object(obj):
-        if not isinstance(obj, dict):
-            return None, True
-        content = obj.get("content", "")
-        if not isinstance(content, str) or content.strip() == "":
-            return None, True
-        try:
-            t = int(obj.get("time"))
-        except (TypeError, ValueError):
-            return None, True
-        return {"content": content, "time": t, "people": obj.get("people", [])}, obj.get("people") is None
-
-    store_mod.normalize_memory_object = normalize_memory_object
     sys.modules["hatsume.plugins.hatsume-plugin.memory.engine"] = store_mod
 
     import importlib.util
@@ -111,7 +96,7 @@ def test_init_db_creates_tables():
     }
 
 
-def _create_legacy_memory_table(conn: sqlite3.Connection) -> None:
+def _create_unscoped_memory_table(conn: sqlite3.Connection) -> None:
     conn.execute(
         """CREATE TABLE memories (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -125,51 +110,19 @@ def _create_legacy_memory_table(conn: sqlite3.Connection) -> None:
     )
 
 
-def test_init_db_migrates_legacy_rows_once_without_changing_identity():
+def test_init_db_rejects_schema_without_group_ownership_without_mutation():
     db = _load_db_module()
     conn = sqlite3.connect(":memory:")
-    _create_legacy_memory_table(conn)
-    conn.executemany(
-        "INSERT INTO memories (id, content, time, people, tokens, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        [
-            (4, "legacy-a", 10, '[]', '[["a", "n"]]', 100),
-            (9, "legacy-b", 20, '[]', '[["b", "n"]]', 200),
-        ],
-    )
-    conn.commit()
-
-    db.init_db(conn, legacy_group_id=GROUP_ID)
-    first_rows = conn.execute(
-        "SELECT id, group_id, content, time, tokens, created_at "
-        "FROM memories ORDER BY id"
-    ).fetchall()
-    db.init_db(conn, legacy_group_id=OTHER_GROUP_ID)
-    second_rows = conn.execute(
-        "SELECT id, group_id, content, time, tokens, created_at "
-        "FROM memories ORDER BY id"
-    ).fetchall()
-
-    assert first_rows == [
-        (4, GROUP_ID, "legacy-a", 10, '[["a", "n"]]', 100),
-        (9, GROUP_ID, "legacy-b", 20, '[["b", "n"]]', 200),
-    ]
-    assert second_rows == first_rows
-
-
-def test_init_db_invalid_legacy_group_leaves_source_unchanged():
-    db = _load_db_module()
-    conn = sqlite3.connect(":memory:")
-    _create_legacy_memory_table(conn)
+    _create_unscoped_memory_table(conn)
     conn.execute(
         "INSERT INTO memories (id, content, time, people, tokens, created_at) "
         "VALUES (?, ?, ?, ?, ?, ?)",
-        (7, "keep-me", 42, '[]', '[]', 99),
+        (7, "keep-me", 42, "[]", "[]", 99),
     )
     conn.commit()
 
-    with pytest.raises(RuntimeError, match="AUTO_RESPONSE_GROUP_ID"):
-        db.init_db(conn, legacy_group_id=0)
+    with pytest.raises(RuntimeError, match="group_id"):
+        db.init_db(conn)
 
     columns = {
         row[1] for row in conn.execute("PRAGMA table_info(memories)")
@@ -179,10 +132,6 @@ def test_init_db_invalid_legacy_group_leaves_source_unchanged():
     ).fetchall()
     assert "group_id" not in columns
     assert rows == [(7, "keep-me", 42, "[]", "[]", 99)]
-    assert conn.execute(
-        "SELECT 1 FROM sqlite_master "
-        "WHERE type='table' AND name='memories_legacy_group_migration'"
-    ).fetchone() is None
 
 
 def test_runtime_memory_paths_share_memory_db_directory(tmp_path):
@@ -237,14 +186,103 @@ def test_insert_memory_persists_metadata_without_sqlite_embedding():
     assert row[5] is None
 
 
-def test_list_memory_group_ids_returns_distinct_positive_owners():
+def test_refresh_activated_groups_records_distinct_positive_owners():
     memory = _load_db_module()
     conn = memory.init_db(sqlite3.connect(":memory:"))
     memory.insert_memory(conn, OTHER_GROUP_ID, "other", 10, [], [])
     memory.insert_memory(conn, GROUP_ID, "first", 20, [], [])
     memory.insert_memory(conn, GROUP_ID, "second", 30, [], [])
 
-    assert memory.list_memory_group_ids(conn) == (GROUP_ID, OTHER_GROUP_ID)
+    assert memory.refresh_activated_groups(conn) == (GROUP_ID, OTHER_GROUP_ID)
+    assert memory.get_activated_group_ids() == (GROUP_ID, OTHER_GROUP_ID)
+    assert memory.is_group_activated(GROUP_ID)
+    assert not memory.is_group_activated(303)
+
+
+def test_refresh_does_not_overwrite_concurrent_group_activation(monkeypatch):
+    memory = _load_db_module()
+    conn = memory.init_db(sqlite3.connect(":memory:", check_same_thread=False))
+    query_started = threading.Event()
+    update_attempted = threading.Event()
+    update_completed = threading.Event()
+    allow_query_return = threading.Event()
+    activation_updates: list[tuple[int, bool]] = []
+    original_query = memory._query_memory_group_ids
+
+    def delayed_query(connection):
+        group_ids = original_query(connection)
+        query_started.set()
+        assert update_attempted.wait(timeout=1)
+        update_completed.wait(timeout=0.1)
+        assert allow_query_return.wait(timeout=1)
+        return group_ids
+
+    def activate_group():
+        update_attempted.set()
+        memory._update_activated_group(GROUP_ID, True)
+        update_completed.set()
+
+    monkeypatch.setattr(memory, "_query_memory_group_ids", delayed_query)
+    memory.configure_activated_group_callback(
+        lambda group_id, active: activation_updates.append((group_id, active))
+    )
+    refresh_thread = threading.Thread(
+        target=memory.refresh_activated_groups,
+        args=(conn,),
+        kwargs={"notify": True},
+    )
+    update_thread = threading.Thread(target=activate_group)
+
+    refresh_thread.start()
+    assert query_started.wait(timeout=1)
+    update_thread.start()
+    assert update_attempted.wait(timeout=1)
+    allow_query_return.set()
+    refresh_thread.join(timeout=1)
+    update_thread.join(timeout=1)
+
+    assert not refresh_thread.is_alive()
+    assert not update_thread.is_alive()
+    assert memory.get_activated_group_ids() == (GROUP_ID,)
+    assert activation_updates == [(GROUP_ID, True)]
+
+
+def test_refresh_retries_failed_inactive_group_callback():
+    memory = _load_db_module()
+    conn = memory.init_db(sqlite3.connect(":memory:"))
+    memory.insert_memory(conn, GROUP_ID, "expiring", 10, [], [])
+    memory.refresh_activated_groups(conn)
+    activation_updates: list[tuple[int, bool]] = []
+
+    def sync_group(group_id: int, active: bool) -> None:
+        activation_updates.append((group_id, active))
+        if len(activation_updates) == 1:
+            raise RuntimeError("timer unavailable")
+
+    memory.configure_activated_group_callback(sync_group)
+    conn.execute("DELETE FROM memories WHERE group_id = ?", (GROUP_ID,))
+    conn.commit()
+
+    memory.refresh_activated_groups(conn, notify=True)
+    memory.refresh_activated_groups(conn, notify=True)
+
+    assert memory.get_activated_group_ids() == ()
+    assert activation_updates == [(GROUP_ID, False), (GROUP_ID, False)]
+
+
+def test_synchronize_activated_group_supplies_current_state_to_callback():
+    memory = _load_db_module()
+    conn = memory.init_db(sqlite3.connect(":memory:"))
+    memory.insert_memory(conn, GROUP_ID, "active", 10, [], [])
+    memory.refresh_activated_groups(conn)
+    synchronized: list[tuple[int, bool]] = []
+
+    memory.synchronize_activated_group(
+        GROUP_ID,
+        lambda group_id, active: synchronized.append((group_id, active)),
+    )
+
+    assert synchronized == [(GROUP_ID, True)]
 
 
 def test_get_recent_user_memories_queries_sqlite_newest_first():
@@ -579,8 +617,10 @@ def test_add_mem_writes_sqlite_first_and_vector_to_milvus():
     memory._get_vector_store = lambda: vectors
     memory.ensure_embedding_model = lambda: _DocumentEmbeddingStub()
     memory.tokenize_with_pos = lambda _text: [("苹果", "n")]
-    ensured_groups = []
-    memory.configure_auto_response_timer_callback(ensured_groups.append)
+    activation_updates = []
+    memory.configure_activated_group_callback(
+        lambda group_id, active: activation_updates.append((group_id, active))
+    )
 
     memory.add_mem(
         "喜欢苹果",
@@ -598,7 +638,8 @@ def test_add_mem_writes_sqlite_first_and_vector_to_milvus():
     assert row[4] is None
     assert vectors.rows == [(row[0], GROUP_ID, [1.0, 0.0, 0.0])]
     assert vectors.close_calls == 1
-    assert ensured_groups == [GROUP_ID]
+    assert memory.get_activated_group_ids() == (GROUP_ID,)
+    assert activation_updates == [(GROUP_ID, True)]
 
 
 def test_add_mem_keeps_sqlite_row_when_milvus_write_fails():
@@ -635,6 +676,7 @@ def test_init_memory_system_does_not_load_full_memory_table(tmp_path: Path):
     assert conn.execute(
         "SELECT value FROM memory_meta WHERE key='vectors_reconciled'"
     ).fetchone() == ("1",)
+    assert memory.get_activated_group_ids() == (GROUP_ID,)
     assert vectors.close_calls == 1
 
 
@@ -681,69 +723,7 @@ def test_engine_exposes_no_full_memory_loader_or_resident_indexes():
         "tokenized_corpus_pos",
         "embedding_vectors",
         "bm25_dirty",
+        "migrate_" "from_json",
+        "normalize_memory_" "object",
     ):
         assert not hasattr(memory, name)
-
-
-def test_migrate_from_json():
-    """migrate_from_json reads memory.json-style data and inserts into SQLite."""
-    db = _load_db_module()
-    conn = sqlite3.connect(":memory:")
-    conn = db.init_db(conn)
-    recent = int(time.time())
-    json_data = json.dumps([
-        {"content": "old-mem-1", "time": recent, "people": []},
-        {"content": "old-mem-2", "time": recent - 1000, "people": [{"user_id": 1, "user_name": "X"}]},
-    ], ensure_ascii=False)
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8") as f:
-        f.write(json_data)
-        json_path = f.name
-    class StubEmbedder:
-        def embed_documents(self, texts):
-            return [[float(i + 1)] * 3 for i in range(len(texts))]
-    class StubVectors:
-        def __init__(self):
-            self.rows = []
-            self.close_calls = 0
-        def upsert(self, rows):
-            self.rows.extend(rows)
-        def close(self):
-            self.close_calls += 1
-    vectors = StubVectors()
-    db._get_vector_store = lambda: vectors
-    try:
-        count = db.migrate_from_json(
-            conn, json_path, StubEmbedder(), group_id=GROUP_ID
-        )
-        assert count == 2
-        rows = conn.execute(
-            "SELECT id, group_id, content, embedding FROM memories ORDER BY id"
-        ).fetchall()
-        assert rows == [
-            (1, GROUP_ID, "old-mem-1", None),
-            (2, GROUP_ID, "old-mem-2", None),
-        ]
-        assert vectors.rows == [
-            (1, GROUP_ID, [1.0, 1.0, 1.0]),
-            (2, GROUP_ID, [1.0, 1.0, 1.0]),
-        ]
-        assert vectors.close_calls == 1
-    finally:
-        Path(json_path).unlink(missing_ok=True)
-
-
-def test_migration_empty_json():
-    """migrate_from_json handles empty JSON array."""
-    db = _load_db_module()
-    conn = sqlite3.connect(":memory:")
-    conn = db.init_db(conn)
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8") as f:
-        f.write("[]")
-        json_path = f.name
-    try:
-        count = db.migrate_from_json(
-            conn, json_path, None, group_id=GROUP_ID
-        )
-        assert count == 0
-    finally:
-        Path(json_path).unlink(missing_ok=True)

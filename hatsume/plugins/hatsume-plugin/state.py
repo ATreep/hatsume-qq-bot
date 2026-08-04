@@ -46,7 +46,6 @@ class ConversationState:
     # Graph state
     is_graph_running: bool = False
     _graph_task: Any = None  # asyncio.Task | None — set in start_new_conversation
-    face_cooling_count: int = 0
     current_query_user_id: int | None = None
 
     # Memory recording

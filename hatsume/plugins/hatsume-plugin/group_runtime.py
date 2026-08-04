@@ -31,7 +31,6 @@ class GroupRuntime:
 
     auxiliary_messages_queue: list[dict] = field(default_factory=list)
     auxiliary_source_queue: list[dict] = field(default_factory=list)
-    face_cooling_count: int = 0
     last_was_auxiliary_only: bool = False
     last_was_system_trigger: bool = False
 
@@ -180,8 +179,8 @@ class GroupRuntimeRegistry:
             discovered.append(group_id)
         return tuple(discovered)
 
-    def unbind_bot(self, bot: Any) -> None:
-        """Remove routes owned by a disconnected Bot without touching state."""
+    def unbind_bot(self, bot: Any) -> tuple[int, ...]:
+        """Remove and return routes owned by a disconnected Bot."""
         group_ids = [
             group_id
             for group_id, registered in self._group_bots.items()
@@ -192,6 +191,7 @@ class GroupRuntimeRegistry:
             runtime = self._runtimes.get(group_id)
             if runtime is not None and runtime.bot is bot:
                 runtime.bot = None
+        return tuple(sorted(group_ids))
 
     def get_existing(self, group_id: int) -> GroupRuntime | None:
         return self._runtimes.get(validate_group_id(group_id))

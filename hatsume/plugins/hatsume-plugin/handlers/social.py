@@ -13,7 +13,7 @@ import nonebot_plugin_localstore as store
 from nonebot.adapters import Bot
 from nonebot.adapters.onebot.v11 import GroupMessageEvent, Message
 
-from ..config import ADMIN_QQ_ID, AUTO_RESPONSE_GROUP_ID
+from ..config import ADMIN_QQ_ID
 from ..group_runtime import validate_group_id
 from ..utils import get_group_member_name
 
@@ -76,22 +76,8 @@ def _load_like_groups(path: Path | None = None) -> dict[str, dict[str, int]]:
     if not isinstance(raw, dict):
         raise ValueError("likes.json must contain an object")
 
-    is_legacy = all(
-        not isinstance(value, dict) for value in raw.values()
-    )
-    if is_legacy:
-        legacy = _normalize_counter_map(raw)
-        if not legacy:
-            return {}
-        try:
-            original_group_id = validate_group_id(AUTO_RESPONSE_GROUP_ID)
-        except ValueError as exc:
-            raise RuntimeError(
-                "AUTO_RESPONSE_GROUP_ID must be positive to migrate likes"
-            ) from exc
-        migrated = {str(original_group_id): legacy}
-        _atomic_write_likes(resolved_path, migrated)
-        return migrated
+    if any(not isinstance(value, dict) for value in raw.values()):
+        raise ValueError("likes.json must use group-scoped counters")
 
     groups: dict[str, dict[str, int]] = {}
     for raw_group_id, counters in raw.items():

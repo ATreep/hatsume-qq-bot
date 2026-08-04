@@ -21,13 +21,13 @@ from nonebot.adapters.onebot.v11 import (
 from PIL import Image
 
 from ..config import (
-    AUTO_RESPONSE_GROUP_ID,
     IMAGE_MAX_PIXELS,
     IMAGE_MAX_SIZE_BYTES,
     MESSAGE_MAX_LENGTH,
     REPLY_MAX_LENGTH,
     USER_INPUT_CONFIRM_DURING_TIME,
 )
+from ..memory import is_group_activated
 from ..graph.builder import graph
 from ..group_runtime import (
     GroupRuntime,
@@ -454,12 +454,8 @@ async def handle_group_increase(
     bot: Bot,
     event: GroupIncreaseNoticeEvent,
 ) -> None:
-    """Welcome members who join the configured auto-response group."""
-    if (
-        AUTO_RESPONSE_GROUP_ID <= 0
-        or event.group_id != AUTO_RESPONSE_GROUP_ID
-        or event.user_id == event.self_id
-    ):
+    """Welcome members who join a group activated by long-term memory."""
+    if event.user_id == event.self_id or not is_group_activated(event.group_id):
         return
 
     member_name = await get_group_member_name(bot, event.group_id, event.user_id)

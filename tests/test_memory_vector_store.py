@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import hashlib
+import inspect
 from pathlib import Path
 import sqlite3
 import subprocess
@@ -115,17 +116,21 @@ def test_milvus_vector_store_close_releases_data_directory_lock(tmp_path: Path):
     assert probe.returncode == 0, probe.stderr
 
 
-def _create_legacy_memory_db(path: Path, rows: list[tuple[int, str, bytes | None]]):
+def _create_memory_db(
+    path: Path, rows: list[tuple[int, int, str, bytes | None]]
+):
     conn = sqlite3.connect(path)
     conn.execute(
         """CREATE TABLE memories (
             id INTEGER PRIMARY KEY,
+            group_id INTEGER NOT NULL,
             content TEXT NOT NULL,
             embedding BLOB
         )"""
     )
     conn.executemany(
-        "INSERT INTO memories (id, content, embedding) VALUES (?, ?, ?)",
+        "INSERT INTO memories (id, group_id, content, embedding) "
+        "VALUES (?, ?, ?, ?)",
         rows,
     )
     conn.commit()
@@ -139,12 +144,17 @@ def _sha256(path: Path) -> str:
 def test_migrate_sqlite_vectors_is_read_only_and_idempotent(tmp_path: Path):
     vector_store = _load_vector_store_module()
     sqlite_path = tmp_path / "memory.db"
-    _create_legacy_memory_db(
+    _create_memory_db(
         sqlite_path,
         [
-            (1, "copied", np.asarray([1.0, 0.0, 0.0], dtype=np.float32).tobytes()),
-            (2, "generated", None),
-            (3, "invalid", np.asarray([9.0], dtype=np.float32).tobytes()),
+            (
+                1,
+                GROUP_ID,
+                "copied",
+                np.asarray([1.0, 0.0, 0.0], dtype=np.float32).tobytes(),
+            ),
+            (2, GROUP_ID, "generated", None),
+            (3, GROUP_ID, "invalid", np.asarray([9.0], dtype=np.float32).tobytes()),
         ],
     )
     before_hash = _sha256(sqlite_path)
@@ -160,14 +170,12 @@ def test_migrate_sqlite_vectors_is_read_only_and_idempotent(tmp_path: Path):
             store,
             lambda texts: [generated[text] for text in texts],
             batch_size=2,
-            legacy_group_id=GROUP_ID,
         )
         second = vector_store.migrate_sqlite_vectors(
             sqlite_path,
             store,
             lambda _texts: pytest.fail("idempotent migration re-embedded rows"),
             batch_size=2,
-            legacy_group_id=GROUP_ID,
         )
 
         assert first == vector_store.MigrationReport(
@@ -194,10 +202,18 @@ def test_migrate_sqlite_vectors_is_read_only_and_idempotent(tmp_path: Path):
         store.close()
 
 
+def test_migrate_sqlite_vectors_has_no_unscoped_group_fallback():
+    vector_store = _load_vector_store_module()
+
+    assert "legacy_" "group_id" not in inspect.signature(
+        vector_store.migrate_sqlite_vectors
+    ).parameters
+
+
 def test_migrate_sqlite_vectors_reports_wrong_generated_dimension(tmp_path: Path):
     vector_store = _load_vector_store_module()
     sqlite_path = tmp_path / "memory.db"
-    _create_legacy_memory_db(sqlite_path, [(5, "missing", None)])
+    _create_memory_db(sqlite_path, [(5, GROUP_ID, "missing", None)])
     before_hash = _sha256(sqlite_path)
     store = vector_store.MilvusVectorStore(tmp_path / "vectors.db", dimension=3)
 
@@ -206,7 +222,6 @@ def test_migrate_sqlite_vectors_reports_wrong_generated_dimension(tmp_path: Path
             sqlite_path,
             store,
             lambda _texts: [[1.0, 0.0]],
-            legacy_group_id=GROUP_ID,
         )
 
         assert report.failed == 1
@@ -220,7 +235,7 @@ def test_migrate_sqlite_vectors_reports_wrong_generated_dimension(tmp_path: Path
 def test_migrate_sqlite_vectors_reports_missing_generated_vector(tmp_path: Path):
     vector_store = _load_vector_store_module()
     sqlite_path = tmp_path / "memory.db"
-    _create_legacy_memory_db(sqlite_path, [(9, "missing", None)])
+    _create_memory_db(sqlite_path, [(9, GROUP_ID, "missing", None)])
     store = vector_store.MilvusVectorStore(tmp_path / "vectors.db", dimension=3)
 
     try:
@@ -228,7 +243,6 @@ def test_migrate_sqlite_vectors_reports_missing_generated_vector(tmp_path: Path)
             sqlite_path,
             store,
             lambda _texts: [],
-            legacy_group_id=GROUP_ID,
         )
 
         assert report.failed == 1

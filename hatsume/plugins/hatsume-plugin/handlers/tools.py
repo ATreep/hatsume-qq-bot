@@ -510,16 +510,11 @@ async def handle_autoresponse(bot, event, matcher, args: Message) -> None:
     """
     from ..graph.nodes import inject_timer
     from ..prompts import get_auto_response_prompt
-    from ..config import AUTO_RESPONSE_GROUP_ID
 
     custom_prompt = args.extract_plain_text().strip()
     group_id = event.group_id
     group_runtime_registry.bind_bot(event.group_id, bot)
-    if args.extract_plain_text().strip() == "prod":
-        prompt = get_auto_response_prompt()
-        group_id = AUTO_RESPONSE_GROUP_ID
-    else:
-        prompt = custom_prompt if custom_prompt else get_auto_response_prompt()
+    prompt = custom_prompt if custom_prompt else get_auto_response_prompt()
 
     inject_timer(
         user_id=0,

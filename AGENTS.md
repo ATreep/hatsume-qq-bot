@@ -20,10 +20,10 @@ Hatsume 是 Python 3.12+ 的 QQ 群聊 AI 机器人，以 NoneBot2 插件运行�
 
 - 对话：@/关键词触发、每群单图串行、跨群并行、空闲旁听、10 秒输入合并、5 分钟等待、结束检测、辅助上下文压缩、Markdown 图片化。
 - 消息：文本、回复、@、图片、多模态输入、OneBot 标准/厂商变体合并转发、嵌套 forward。
-- 记忆：按群隔离的显式 `[memoryrecord]` 写入、`[memorykeyman]` 关联用户、SQLite LIKE、临时 BM25、Milvus Lite + BGE-M3、150 天清理。
+- 记忆：按群隔离的可重复 `[memory: ... MEMORYCONTENTEND, keyman: ...]` 记忆卡写入、SQLite LIKE、临时 BM25、Milvus Lite + BGE-M3、150 天清理。
 - 工具：搜索、Shell、记忆、图片/视频生成、图片发送、QQ 头像、ACG 相册、Timer、Skill、成员搜索、Agent 派发、stdin 回复。
 - Agent：`coding_agent`、`background_shell`、实例状态、中间通知、完成通知、交互输入。
-- Timer：普通多触发任务、群内管理、重启恢复、漏触发补偿、按记忆群独立自动回复。
+- Timer：普通多触发任务、群内管理、重启恢复、漏触发补偿、按非黑名单 activated group 独立自动回复。
 - 社交：点赞、累计点赞排行榜、白名单群戳一戳随机图片。
 - 运维：高级模型热切换、每群 Docker 容器与引用计数、延迟停止、沙盒重置、Agent 监控、凭证脱敏。
 
@@ -67,8 +67,8 @@ hatsume/plugins/hatsume-plugin/
 - `hatsume/plugins/hatsume-plugin/graph/tools.py`：聊天工具定义与 `CHAT_TOOLS` 唯一注册点。
 - `hatsume/plugins/hatsume-plugin/graph/agents.py`：`AGENT_REGISTRY`、实例状态、内置 Agent 与 stdin 队列。
 - `hatsume/plugins/hatsume-plugin/memory/__init__.py`：记忆 API 统一导出。
-- `hatsume/plugins/hatsume-plugin/memory/engine.py`：记忆 SQLite、按需 BM25、写入、检索和每日维护。
-- `hatsume/plugins/hatsume-plugin/memory/vector_store.py`：Milvus Lite 向量 CRUD、搜索和只读 SQLite 向量迁移。
+- `hatsume/plugins/hatsume-plugin/memory/engine.py`：记忆 SQLite、activated-group RAM 集合、按需 BM25、写入、检索和每日维护。
+- `hatsume/plugins/hatsume-plugin/memory/vector_store.py`：Milvus Lite 向量 CRUD、搜索和只读 SQLite 向量协调。
 - `hatsume/plugins/hatsume-plugin/memory/tokenizer.py`：Jieba 词性分词规则。
 - `hatsume/plugins/hatsume-plugin/character_proxy.py`：每群 RAM 角色代理、自动终止、群内记忆画像生成和 @ 目标 peer 激活。
 - `hatsume/plugins/hatsume-plugin/timer/__init__.py`：TimerStore 单例与启动恢复。
@@ -91,11 +91,12 @@ hatsume/plugins/hatsume-plugin/
 3. 每群 `ConversationState` 必须继续拥有 `idle/pending/human` 消息与来源队列、图任务和限流状态；辅助队列属于同群 runtime，修改其生命周期时必须同步检查 finish 和压缩。
 4. 入口消息先在 `handlers/dialogue.py` 或 `handlers/forward.py` 归一化，领域层不得依赖特定 OneBot 实现的原始结构。
 5. Agent/Timer 标记必须绕过结束判断并进入 `ai_node`。
-6. 对话结束把本轮内容放回辅助上下文，但长期记忆只由显式 `[memoryrecord]` 写入。
+6. 对话结束把本轮内容放回辅助上下文，但长期记忆只由显式、可重复的 `[memory: ... MEMORYCONTENTEND]` 记忆卡写入；每张卡可内联可选 `keyman` QQ 号列表。
 7. 角色代理每群只允许一个 RAM 对象，不得持久化、不得新增任务管理器；@ 被代理用户时只通过所属群的 `ConversationState.activate_chat()` 加入 peer 并复用现有图流程。
 8. 角色代理关闭时 chat_agent 只暴露 `create_character_proxy`，开启时只暴露 `terminate_character_proxy`；行为 Prompt 与外号仅在 RAM 中保存并仅在开启期间注入 role system prompt；最新消息正文命中代理昵称或外号时跳过结束检测。
 9. `end_conversation` 必须通过 `ConversationState` 停止消息投递并让当前图尽快进入 finish；调用后的当前轮不得继续发送文本或表情，直到新的主动提及重新激活对话。
 10. 戳一戳只允许 `POKE_GROUP_WHITELIST` 中的群；白名单检查必须早于图片导出、runtime 绑定和消息发送，其他群静默返回。
+11. 新成员欢迎只允许 memory 层 activated-group RAM 集合中的群；集合在启动时从 `memory.db` 的 distinct 正整数群号加载，并随成功写入和最后一条记忆清理而更新。
 
 ### Memory
 
@@ -103,8 +104,8 @@ hatsume/plugins/hatsume-plugin/
 2. 不得把全部记忆、分词语料、BM25 或向量矩阵常驻内存；关键词从 SQLite 按需查询，BM25 只为有限候选临时构建。
 3. 关联用户结构固定为 `{"user_id": int, "user_name": str}`。
 4. 查询必须限定当前群，先保留全部合格的 SQLite LIKE 精确命中，再用同群临时 BM25 与 Milvus cosine 结果补足，并保持单轮内容去重。
-5. 现阶段 SQLite 的 legacy `embedding` 列仅作迁移回滚来源；新写入和运行时查询不得读写该列。
-6. 跨库迁移必须使用 SQLite 只读连接、以 ID 幂等 upsert，并测试已有数据库、失败恢复和源文件不变。
+5. SQLite 的 `embedding` 列仅作当前 schema 的向量协调来源；新写入和运行时查询不得读写该列。
+6. SQLite 到 Milvus 的协调只接受带显式 `group_id` 的当前 schema，必须使用 SQLite 只读连接、以 ID 幂等 upsert，并测试已有数据库、失败恢复和源文件不变。
 7. Milvus Lite 客户端只允许在单次向量操作期间存在，结束后必须关闭客户端并停止 embedded server；不得让 gRPC 线程跨越 Shell/Docker 等 fork 路径。
 
 ### Timers
@@ -113,8 +114,9 @@ hatsume/plugins/hatsume-plugin/
 2. 数据库记录与 APScheduler 作业必须同步：创建/更新后注册，删除/更新前取消。
 3. 启动恢复必须区分未来、容忍窗口内漏触发和过期触发。
 4. 普通 Timer 与 auto-response 最终都使用记录中的显式 `group_id` 注入对应群图，不另建独立聊天 Agent。
-5. `memory.db` 中拥有至少一条记忆的正整数群号是 `auto_response` 的群集合；每群启动时自动保证只有一个未来 exact point，新记忆写入成功后必须幂等检查并补建所属群任务。未取得显式 Bot 路由的群只保留持久任务，不注册或恢复 APScheduler 作业。
+5. memory 层 activated-group 集合是 `auto_response` 的候选群集合；不在 `AUTO_RESPONSE_GROUP_BLACKLIST` 中的 activated group 启动时自动保证只有一个未来 exact point。记忆写入和最后一条记忆清理必须通过同一 activated-group callback 幂等补建或删除所属群任务，失败更新保留并在下次刷新重试；黑名单群不得持有任务；未取得显式 Bot 路由的群只保留持久任务，不注册、恢复或消费 APScheduler 作业，Bot 断开时必须取消对应运行中注册但保留持久 point。
 6. 活动数据库必须通过 `nonebot_plugin_localstore` 定位到插件数据目录，schema 只包含当前 `timer_tasks` 与 `timer_schedule_points`，不得加入旧路径或旧 schema 兼容逻辑。
+7. auto_response 执行后的资格同步必须由 memory 层在 activated-group lock 内读取当前状态并调用 Timer callback，禁止用锁外快照写回；TimerStore 的共享 SQLite connection 必须以 reentrant operation lock 串行化跨事件循环与 APScheduler worker 的读写和事务。
 
 ## Extension Rules
 

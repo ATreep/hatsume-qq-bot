@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import sqlite3
 import sys
+import threading
 import types
 from datetime import datetime
 from pathlib import Path
@@ -327,6 +328,42 @@ def test_transaction_rolls_back_all_uncommitted_inserts(store, daily_plan):
             raise RuntimeError("abort")
 
     assert store.list_tasks_by_group(1) == []
+
+
+def test_store_operations_wait_for_open_transaction(store, at_plan):
+    store.upsert_auto_response(101, at_plan.points[0].exact_at)
+    transaction_started = threading.Event()
+    allow_transaction_finish = threading.Event()
+    delete_started = threading.Event()
+    delete_finished = threading.Event()
+
+    def hold_transaction():
+        with store.transaction():
+            transaction_started.set()
+            assert allow_transaction_finish.wait(timeout=1)
+
+    def delete_auto_response():
+        delete_started.set()
+        store.delete_auto_response_tasks(101)
+        delete_finished.set()
+
+    transaction_thread = threading.Thread(target=hold_transaction)
+    delete_thread = threading.Thread(target=delete_auto_response)
+    transaction_thread.start()
+    assert transaction_started.wait(timeout=1)
+    delete_thread.start()
+    assert delete_started.wait(timeout=1)
+
+    delete_was_blocked = not delete_finished.wait(timeout=0.1)
+    allow_transaction_finish.set()
+    transaction_thread.join(timeout=1)
+    delete_thread.join(timeout=1)
+
+    assert delete_was_blocked
+    assert not transaction_thread.is_alive()
+    assert not delete_thread.is_alive()
+    assert delete_finished.is_set()
+    assert store.get_auto_response_point(101) is None
 
 
 def test_delete_finished_tasks_excludes_active_and_auto_response(store, at_plan):

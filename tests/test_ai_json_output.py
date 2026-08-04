@@ -96,6 +96,17 @@ def test_role_prompt_documents_sandbox_image_paths():
     assert "file:///tmp/hatsume-user-images/..." in role
 
 
+def test_role_prompt_documents_repeatable_memory_cards():
+    prompts = _load_prompts()
+    role = prompts.role_sys_prompt
+
+    assert "[memory: 简要描述（50字内），用户名用「...」包围 MEMORYCONTENTEND]" in role
+    assert "MEMORYCONTENTEND, keyman: QQ号1, QQ号2, ..." in role
+    assert "可以添加多条 memory" in role
+    assert "[memoryrecord:" not in role
+    assert "[memorykeyman:" not in role
+
+
 def test_admin_mode_prompt_contains_admin_id_and_sensitive_permissions():
     prompts = _load_prompts()
     prompt = prompts.build_admin_mode_prompt("12345")

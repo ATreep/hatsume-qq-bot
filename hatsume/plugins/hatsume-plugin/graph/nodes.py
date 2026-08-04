@@ -59,12 +59,15 @@ from ..config import ADMIN_QQ_ID, CONTEXT_QUEUE_LEN
 # ---------------------------------------------------------------------------
 FACE_TAG_PATTERN = re.compile(r"\[[ \t]*hatsumeface:(.*?)\]")
 MEMORY_RECORD_PATTERN = re.compile(
-    r"\[[ \t]*memoryrecord:\s*(.+?)\]", re.DOTALL
+    r"\[[ \t]*memory:[ \t]*(?P<content>.*?)"
+    r"[ \t]+MEMORYCONTENTEND"
+    r"(?:[ \t]*,[ \t]*keyman:[ \t]*(?P<keyman>[^\]\r\n]*))?"
+    r"[ \t]*\]",
+    re.DOTALL,
 )
-MEMORY_KEYMAN_PATTERN = re.compile(r"\[[ \t]*memorykeyman:\s*(.+?)\]")
 REPLY_DIRECTIVE_PATTERN = re.compile(r"\[[ \t]*reply:\s*([^\]\r\n]*)\]")
 SYSTEM_TRIGGER_KEY = "_hatsume_system_trigger"
-ADMIN_MODE_KEYWORD = "WORLDSKY"
+ADMIN_MODE_KEYWORD = "BYPASS"
 
 def _runtime():
     return get_current_group_runtime()
@@ -86,35 +89,26 @@ def bind_state(conversation_state: Any) -> None:
 # ---------------------------------------------------------------------------
 # Memory record extraction
 # ---------------------------------------------------------------------------
-def _extract_memory_records(text: str) -> tuple[dict | None, str]:
-    """Extract at most one [memoryrecord: ...] and optional [memorykeyman: ...] from text.
+def _extract_memory_records(text: str) -> tuple[list[dict], str]:
+    """Extract all sentinel-delimited memory cards and remove them from text."""
+    records: list[dict] = []
 
-    Returns (record: dict with 'content' and 'qq_numbers' or None, cleaned_text).
-    """
-    cleaned = text
-
-    # Extract keyman tag first (before removing record tag)
-    keyman_match = MEMORY_KEYMAN_PATTERN.search(cleaned)
-    qq_numbers: list[int] = []
-    if keyman_match:
-        qq_str = keyman_match.group(1).strip()
-        for part in qq_str.split(","):
-            part = part.strip()
+    def _collect(match: re.Match[str]) -> str:
+        content = match.group("content").strip()
+        qq_numbers: list[int] = []
+        for part in (match.group("keyman") or "").split(","):
             try:
-                qq_numbers.append(int(part))
+                qq_number = int(part.strip())
             except ValueError:
-                pass
-        cleaned = cleaned[: keyman_match.start()] + cleaned[keyman_match.end() :]
-
-    # Extract memory record tag
-    record_match = MEMORY_RECORD_PATTERN.search(cleaned)
-    if record_match:
-        content = record_match.group(1).strip()
-        cleaned = cleaned[: record_match.start()] + cleaned[record_match.end() :]
+                continue
+            if qq_number not in qq_numbers:
+                qq_numbers.append(qq_number)
         if content:
-            return {"content": content, "qq_numbers": qq_numbers}, cleaned.strip()
+            records.append({"content": content, "qq_numbers": qq_numbers})
+        return ""
 
-    return None, text
+    cleaned = MEMORY_RECORD_PATTERN.sub(_collect, text)
+    return records, cleaned.strip()
 
 
 # ---------------------------------------------------------------------------
@@ -604,30 +598,21 @@ async def ai_node(state: MessagesState) -> dict:
     sys_prompt += _build_current_todo_prompt()
     print("[todo] Injected todo policy and active items into system prompt")
 
-    # ── Face injection gate ──
-
-    runtime.face_cooling_count += 1
-    _face_allowed = (
-        random.randint(0, 1) == 0
-        and runtime.face_cooling_count >= 1
-    )
+    # Inject the available face-mark vocabulary on every invocation.
     _face_dict: dict[str, list[str]] = {}
-    if _face_allowed:
-        face_list = [
-            f.name
-            for f in store.get_plugin_data_file("faces").iterdir()
-            if f.is_file() and f.name.lower().endswith((".png", ".jpg", ".jpeg"))
-        ]
-        if face_list:
-            for fname in face_list:
-                emotion = fname.split("_")[0]
-                _face_dict.setdefault(emotion, []).append(fname)
-            emotions = list(_face_dict.keys())
-            face_prompt = build_face_injection_prompt(emotions)
-            if face_prompt:
-                sys_prompt += face_prompt
-                print(f"[face] Injected face prompt with {len(emotions)} emotions")
-        runtime.face_cooling_count = 0
+    face_list = [
+        f.name
+        for f in store.get_plugin_data_file("faces").iterdir()
+        if f.is_file() and f.name.lower().endswith((".png", ".jpg", ".jpeg"))
+    ]
+    for fname in face_list:
+        emotion = fname.split("_")[0]
+        _face_dict.setdefault(emotion, []).append(fname)
+    emotions = list(_face_dict.keys())
+    face_prompt = build_face_injection_prompt(emotions)
+    if face_prompt:
+        sys_prompt += face_prompt
+        print(f"[face] Injected face prompt with {len(emotions)} emotions")
 
     sys_prompt += f"\n\n# 当前日期与时间\n{get_date()}"
 
@@ -709,9 +694,9 @@ async def ai_node(state: MessagesState) -> dict:
         print(f"[face] Detected face tag: {face_emotion}")
 
     # ── Extract memory record from ai_text ──
-    mem_record, ai_text_clean = _extract_memory_records(ai_text_clean)
-    if mem_record:
-        print("[memory] Extracted memory record from AI response")
+    mem_records, ai_text_clean = _extract_memory_records(ai_text_clean)
+    if mem_records:
+        print(f"[memory] Extracted {len(mem_records)} memory record(s)")
 
     ai_text_clean = ai_text_clean.strip()
     end_requested = conversation_state.end_requested
@@ -735,7 +720,7 @@ async def ai_node(state: MessagesState) -> dict:
 
     # ── Resolve QQ numbers → usernames and save memory record ──
     from ..memory import add_mem
-    if mem_record:
+    for mem_record in mem_records:
         content = str(mem_record.get("content", "")).strip()
         qq_numbers = mem_record.get("qq_numbers", [])
         if content:

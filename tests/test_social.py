@@ -17,7 +17,7 @@ PLUGIN_DIR = ROOT / "hatsume/plugins/hatsume-plugin"
 SOCIAL_PATH = PLUGIN_DIR / "handlers/social.py"
 
 
-def _load_social(monkeypatch, tmp_path: Path, *, original_group_id=101):
+def _load_social(monkeypatch, tmp_path: Path):
     packages = [
         ("hatsume", ROOT / "hatsume"),
         ("hatsume.plugins", ROOT / "hatsume/plugins"),
@@ -47,7 +47,6 @@ def _load_social(monkeypatch, tmp_path: Path, *, original_group_id=101):
 
     config = types.ModuleType("hatsume.plugins.hatsume-plugin.config")
     config.ADMIN_QQ_ID = "999"
-    config.AUTO_RESPONSE_GROUP_ID = original_group_id
     monkeypatch.setitem(sys.modules, config.__name__, config)
 
     group_runtime = types.ModuleType(
@@ -100,18 +99,16 @@ class _Args:
         return self.text
 
 
-def test_flat_likes_migrate_once_to_original_group(monkeypatch, tmp_path):
-    social = _load_social(monkeypatch, tmp_path, original_group_id=101)
+def test_flat_likes_are_rejected_without_rewriting(monkeypatch, tmp_path):
+    social = _load_social(monkeypatch, tmp_path)
     path = tmp_path / "likes.json"
-    path.write_text(json.dumps({"7": 12, "8": 3}), encoding="utf-8")
+    original = json.dumps({"7": 12, "8": 3})
+    path.write_text(original, encoding="utf-8")
 
-    first = social._load_like_groups(path)
-    first_bytes = path.read_bytes()
-    second = social._load_like_groups(path)
+    with pytest.raises(ValueError, match="group-scoped"):
+        social._load_like_groups(path)
 
-    assert first == {"101": {"7": 12, "8": 3}}
-    assert second == first
-    assert path.read_bytes() == first_bytes
+    assert path.read_text(encoding="utf-8") == original
 
 
 def test_group_like_accumulation_is_isolated(monkeypatch, tmp_path):
@@ -131,7 +128,7 @@ def test_group_like_accumulation_is_isolated(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize("invalid_count", [True, 1.5, "2"])
-def test_invalid_legacy_counter_does_not_replace_file(
+def test_invalid_flat_counter_does_not_replace_file(
     monkeypatch,
     tmp_path,
     invalid_count,
@@ -141,19 +138,7 @@ def test_invalid_legacy_counter_does_not_replace_file(
     original = json.dumps({"7": invalid_count})
     path.write_text(original, encoding="utf-8")
 
-    with pytest.raises(ValueError, match="invalid like counter"):
-        social._load_like_groups(path)
-
-    assert path.read_text(encoding="utf-8") == original
-
-
-def test_invalid_original_group_does_not_replace_legacy_file(monkeypatch, tmp_path):
-    social = _load_social(monkeypatch, tmp_path, original_group_id=0)
-    path = tmp_path / "likes.json"
-    original = '{"7": 4}'
-    path.write_text(original, encoding="utf-8")
-
-    with pytest.raises(RuntimeError, match="AUTO_RESPONSE_GROUP_ID"):
+    with pytest.raises(ValueError, match="group-scoped"):
         social._load_like_groups(path)
 
     assert path.read_text(encoding="utf-8") == original
