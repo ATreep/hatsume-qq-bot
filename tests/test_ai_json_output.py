@@ -103,6 +103,7 @@ def test_role_prompt_documents_repeatable_memory_cards():
     assert "[memory: 简要描述（50字内），用户名用「...」包围 MEMORYCONTENTEND]" in role
     assert "MEMORYCONTENTEND, keyman: QQ号1, QQ号2, ..." in role
     assert "可以添加多条 memory" in role
+    assert "**MEMORYCONTENTEND 必须紧跟在每条记忆正文之后" in role
     assert "[memoryrecord:" not in role
     assert "[memorykeyman:" not in role
 

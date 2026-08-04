@@ -80,7 +80,7 @@ def _patched_convert_msg(message, **kwargs):
 _openai_base._convert_dict_to_message = _patched_convert_dict
 _openai_base._convert_message_to_dict = _patched_convert_msg
 
-ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh"]
+ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"]
 
 
 def get_volcengine_api_model(
@@ -134,7 +134,7 @@ def get_google_api_model(
 
 def get_advance_model(
     thinking: bool = True,
-    reasoning_effort: ReasoningEffort = "high",
+    reasoning_effort: ReasoningEffort = "max",
 ) -> BaseChatModel:
     model_name = _config.ADVANCE_MODEL_NAME
     print(f"⚡ Using {model_name} for advance model")

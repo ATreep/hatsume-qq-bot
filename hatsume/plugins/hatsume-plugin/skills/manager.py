@@ -8,13 +8,12 @@ import yaml
 
 
 class SkillManager:
-    """Manages skill files: scanning, lazy loading, caching, deduplication, removal."""
+    """Manages skill files: scanning, lazy loading, caching, and removal."""
 
     def __init__(self, skills_dir: Path, *, create_dir: bool = True) -> None:
         self._skills_dir = skills_dir
         self._create_dir = create_dir
         self._content_cache: dict[str, str] = {}
-        self._loaded_this_conversation: set[str] = set()
         if create_dir:
             self._ensure_dir()
 
@@ -55,8 +54,8 @@ class SkillManager:
         """Load a skill's full content by name.
 
         Returns the skill content on success, or an error message if not found.
-        Deduplicates: returns an 'already loaded' message if called twice in
-        the same conversation.
+        Cached content is returned on subsequent calls without re-reading the
+        skill file.
         """
 
         try:
@@ -65,7 +64,6 @@ class SkillManager:
             return "错误：技能名称无效。"
 
         if name in self._content_cache:
-            self._loaded_this_conversation.add(name)
             return self._content_cache[name]
 
         file_path = self._skills_dir / f"{name}.md"
@@ -76,7 +74,6 @@ class SkillManager:
         try:
             content = file_path.read_text(encoding="utf-8")
             self._content_cache[name] = content
-            self._loaded_this_conversation.add(name)
             print(f"✅ [skills] Loaded skill '{name}' successfully")
             return content
         except Exception as e:
@@ -128,14 +125,6 @@ class SkillManager:
         else:
             print(f"✅ [skills] Created skill '{name}'")
             return f"✅ 技能 '{name}' 已创建。"
-
-    def reset_conversation(self) -> None:
-        """Clear the per-conversation deduplication set.
-
-        Call this when a conversation ends so skills can be loaded again
-        in the next conversation.
-        """
-        self._loaded_this_conversation.clear()
 
     @staticmethod
     def validate_skill_name(name: str) -> str:
@@ -244,7 +233,6 @@ class GroupSkillManager:
     ) -> None:
         self._common_manager = common_manager
         self._local_manager = SkillManager(local_dir, create_dir=create_local)
-        self._loaded_this_conversation: set[str] = set()
 
     def _common_names(self) -> set[str]:
         return {skill["name"] for skill in self._common_manager.list_skills()}
@@ -264,14 +252,10 @@ class GroupSkillManager:
             name = self._local_manager.validate_skill_name(name)
         except ValueError:
             return "错误：技能名称无效。"
-        if name in self._loaded_this_conversation:
-            return f"技能 '{name}' 已在本轮对话中加载。"
         if name in self._common_names():
             result = self._common_manager.load_skill(name)
         else:
             result = self._local_manager.load_skill(name)
-        if not result.startswith("错误："):
-            self._loaded_this_conversation.add(name)
         return result
 
     def remove_skill(self, name: str) -> str:
@@ -281,9 +265,7 @@ class GroupSkillManager:
             return "错误：技能名称无效。"
         if name in self._common_names():
             return f"错误：技能 '{name}' 是公共技能，不能删除。"
-        result = self._local_manager.remove_skill(name)
-        self._loaded_this_conversation.discard(name)
-        return result
+        return self._local_manager.remove_skill(name)
 
     def save_skill(self, name: str, content: str) -> str:
         try:
@@ -292,14 +274,7 @@ class GroupSkillManager:
             return "错误：技能名称无效。"
         if name in self._common_names():
             return f"错误：技能 '{name}' 是公共技能，不能覆盖。"
-        result = self._local_manager.save_skill(name, content)
-        if not result.startswith("错误："):
-            self._loaded_this_conversation.discard(name)
-        return result
+        return self._local_manager.save_skill(name, content)
 
     def parse_frontmatter_text(self, text: str) -> dict[str, str] | None:
         return self._local_manager.parse_frontmatter_text(text)
-
-    def reset_conversation(self) -> None:
-        self._loaded_this_conversation.clear()
-        self._local_manager.reset_conversation()

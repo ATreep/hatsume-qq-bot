@@ -60,7 +60,7 @@ from ..config import ADMIN_QQ_ID, CONTEXT_QUEUE_LEN
 FACE_TAG_PATTERN = re.compile(r"\[[ \t]*hatsumeface:(.*?)\]")
 MEMORY_RECORD_PATTERN = re.compile(
     r"\[[ \t]*memory:[ \t]*(?P<content>.*?)"
-    r"[ \t]+MEMORYCONTENTEND"
+    r"[ \t]*MEMORYCONTENTEND"
     r"(?:[ \t]*,[ \t]*keyman:[ \t]*(?P<keyman>[^\]\r\n]*))?"
     r"[ \t]*\]",
     re.DOTALL,
@@ -895,9 +895,6 @@ async def finish_conversation_node(state: MessagesState) -> dict:
 
     # Container auto-stop is handled by infra's reference counting; finish does
     # not forcefully tear it down here.
-
-    # Reset skill dedup for next conversation
-    get_skill_manager().reset_conversation()
 
     # ── Save this conversation round to auxiliary queue for future context ──
     conv_messages: list[dict] = []

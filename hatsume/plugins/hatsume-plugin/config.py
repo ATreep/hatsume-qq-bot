@@ -75,7 +75,7 @@ GPT_5_5 = "gpt-5.5"
 GEMINI_3_5_FLASH = "gemini-3.5-flash"
 GROK_4_5 = "grok-4.5"
 
-ADVANCE_MODEL_NAME: str = GPT_5_6_TERRA 
+ADVANCE_MODEL_NAME: str = GPT_5_6_LUNA 
 LITE_MODEL_NAME =  GPT_5_6_LUNA
 
 

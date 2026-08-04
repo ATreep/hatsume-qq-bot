@@ -175,7 +175,7 @@ class TestSkillManagerListSkills:
 
 
 class TestSkillManagerLoadSkill:
-    """FR-003, FR-006, FR-008, FR-009: lazy load, cache, dedup."""
+    """FR-003, FR-006, FR-008, FR-009: lazy load and cache."""
 
     def test_load_valid_skill(self):
         """load_skill() returns full content for a valid skill name."""
@@ -194,33 +194,19 @@ class TestSkillManagerLoadSkill:
             result = mgr.load_skill("nonexistent")
             assert "不存在" in result
 
-    @pytest.mark.skip(reason="Deduplication early-return was intentionally removed from production code")
-    def test_load_deduplication(self):
-        """Loading same skill twice returns already-loaded message."""
+    def test_load_twice_returns_full_content(self):
+        """Repeated loads return the skill content from the cache."""
         with tempfile.TemporaryDirectory() as tmp:
             dir_path = Path(tmp)
             make_skill_file(dir_path, "test", "desc", "Content here")
             mgr = SkillManager(dir_path)
             first = mgr.load_skill("test")
             assert "Content here" in first
-            second = mgr.load_skill("test")
-            assert "已" in second
-
-    def test_load_after_reset(self):
-        """After reset_conversation(), same skill can be loaded again."""
-        with tempfile.TemporaryDirectory() as tmp:
-            dir_path = Path(tmp)
-            make_skill_file(dir_path, "test", "desc", "Content here")
-            mgr = SkillManager(dir_path)
-            first = mgr.load_skill("test")
-            assert "Content here" in first
-            mgr.reset_conversation()
             second = mgr.load_skill("test")
             assert "Content here" in second
 
-    @pytest.mark.skip(reason="Deduplication early-return was intentionally removed from production code")
     def test_content_cache(self):
-        """Content cache is used on second load (after reset) rather than re-reading."""
+        """Content cache is used on the second load rather than re-reading."""
         with tempfile.TemporaryDirectory() as tmp:
             dir_path = Path(tmp)
             file_path = make_skill_file(dir_path, "test", "desc", "Original")
@@ -231,13 +217,9 @@ class TestSkillManagerLoadSkill:
             file_path.write_text(
                 "---\nname: test\ndescription: desc\n---\nModified", encoding="utf-8"
             )
-            # Same conversation - still dedup-blocked
+            # The repeated call returns the cached original content.
             result = mgr.load_skill("test")
-            assert "已" in result
-            # Reset and reload - should use cache
-            mgr.reset_conversation()
-            result2 = mgr.load_skill("test")
-            assert "Original" in result2
+            assert "Original" in result
 
 
 class TestSkillManagerRemoveSkill:
@@ -285,24 +267,6 @@ class TestSkillManagerAutoCreateDir:
             assert skills_dir.is_dir()
 
 
-class TestSkillManagerResetConversation:
-    """FR-007: reset_conversation clears dedup set."""
-
-    def test_reset_clears_dedup(self):
-        """After reset, previously loaded skills can be loaded again."""
-        with tempfile.TemporaryDirectory() as tmp:
-            dir_path = Path(tmp)
-            make_skill_file(dir_path, "a", "desc a", "Content A")
-            make_skill_file(dir_path, "b", "desc b", "Content B")
-            mgr = SkillManager(dir_path)
-            mgr.load_skill("a")
-            mgr.load_skill("b")
-            assert "a" in mgr._loaded_this_conversation
-            assert "b" in mgr._loaded_this_conversation
-            mgr.reset_conversation()
-            assert len(mgr._loaded_this_conversation) == 0
-
-
 class TestGroupSkillManager:
     """Common Skills are read-only and local Skills are group-owned."""
 
@@ -330,7 +294,7 @@ class TestGroupSkillManager:
         )
         assert "Original common content" in common_file.read_text(encoding="utf-8")
 
-    def test_local_skills_and_load_dedup_are_isolated_by_group(self, tmp_path):
+    def test_local_skills_load_full_content_on_each_call_and_are_isolated_by_group(self, tmp_path):
         common_dir = tmp_path / "common"
         common_dir.mkdir()
         make_skill_file(common_dir, "shared", "Shared", "Common body")
@@ -356,13 +320,12 @@ class TestGroupSkillManager:
         }
         assert [skill["name"] for skill in second.list_skills()] == ["shared"]
         assert "Local body" in first.load_skill("local-only")
-        assert "已在本轮对话中加载" in first.load_skill("local-only")
+        assert "Local body" in first.load_skill("local-only")
         assert "Common body" in first.load_skill("shared")
         assert "Common body" in second.load_skill("shared")
 
-        first.reset_conversation()
         assert "Local body" in first.load_skill("local-only")
-        assert "已在本轮对话中加载" in second.load_skill("shared")
+        assert "Common body" in second.load_skill("shared")
 
     def test_read_only_inspection_does_not_create_local_directory(self, tmp_path):
         common_dir = tmp_path / "common"

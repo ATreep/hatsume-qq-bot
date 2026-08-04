@@ -2,6 +2,10 @@
 
 FROM ubuntu:26.04
 
+ARG CLAWMAIL_API_KEY
+ARG DS_API_KEY
+ARG GH_TOKEN
+
 ENV DEBIAN_FRONTEND=noninteractive
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
@@ -88,15 +92,10 @@ RUN npm install -g @anthropic-ai/claude-code
 RUN npm install -g @tencent-qqmail/agently-cli \
     && npm install -g --force @clawemail/mail-cli
 
-RUN --mount=type=secret,id=clawmail_api_key,required=true \
-    --mount=type=secret,id=ds_api_key,required=true \
-    install -d -m 700 /root/.config/hatsume \
+RUN install -d -m 700 /root/.config/hatsume \
     && install -d -m 755 /etc/hatsume \
-    && install -m 600 \
-        /run/secrets/ds_api_key \
-        /root/.config/hatsume/ds_api_key \
     && if ! mail-cli auth apikey set \
-        "$(cat /run/secrets/clawmail_api_key)" > /dev/null 2>&1; then \
+        "${CLAWMAIL_API_KEY}" > /dev/null 2>&1; then \
         echo 'Failed to configure mail-cli API authentication.' >&2; \
         exit 1; \
     fi \
@@ -109,9 +108,10 @@ ENV PATH="/root/.local/bin:${PATH}" \
     ANTHROPIC_DEFAULT_OPUS_MODEL="deepseek-v4-flash" \
     ANTHROPIC_DEFAULT_SONNET_MODEL="deepseek-v4-flash" \
     ANTHROPIC_DEFAULT_HAIKU_MODEL="deepseek-v4-flash" \
-    ANTHROPIC_AUTH_TOKEN="$(cat /root/.config/hatsume/ds_api_key)" \
+    ANTHROPIC_AUTH_TOKEN="${DS_API_KEY}" \
     CLAUDE_CODE_SUBAGENT_MODEL="deepseek-v4-flash" \
     CLAUDE_CODE_EFFORT_LEVEL="max" \
-    CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS="0"
+    CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS="0" \
+    GH_TOKEN="${GH_TOKEN}"
 
 WORKDIR /work

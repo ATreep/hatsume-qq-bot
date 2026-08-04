@@ -504,6 +504,24 @@ def test_extract_memory_records_accepts_multiple_new_cards():
     assert cleaned == "回答"
 
 
+def test_extract_memory_records_accepts_sentinel_touching_content():
+    nodes = _load_nodes_module()
+    raw_text = (
+        "[memory:「盛宴」转发“中国免除非洲1800亿债务”短视频，"
+        "关注其真实性。MEMORYCONTENTEND, keyman: 779496101]"
+    )
+
+    records, cleaned = nodes._extract_memory_records(raw_text)
+
+    assert records == [
+        {
+            "content": "「盛宴」转发“中国免除非洲1800亿债务”短视频，关注其真实性。",
+            "qq_numbers": [779496101],
+        }
+    ]
+    assert cleaned == ""
+
+
 def test_extract_memory_records_rejects_retired_tags():
     nodes = _load_nodes_module()
 

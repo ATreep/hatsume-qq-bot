@@ -63,7 +63,7 @@ flowchart LR
 | 群聊待办 | create_todo、mark_todo、/todo、每轮自动检查 | 每群最多 15 条，当前聊天可触发主动创建；/todo 显示当前群全部活动项；48 小时过期，条件满足后删除并 @ 发起人 | handlers/tools.py、graph/tools.py、graph/nodes.py、prompts.py、todo/ |
 | 自动回复 | auto_response 记录或 /autoresponse | activated-group 集合中每个非黑名单群各自主动参与话题并独立排期；每 30 分钟至 2 小时续排，02:00 至 06:00 只推进不注入 | memory/、timer/、prompts.py |
 | 新成员欢迎 | activated group 的 OneBot `group_increase` 事件 | 激活新成员 peer，并向现有图注入欢迎任务或在无对话时启动新图 | memory/、handlers/dialogue.py |
-| Skill 加载 | /skills [群号]、skill_loader | 公共只读 Skill 加群本地 Skill；缓存与单轮去重按群隔离 | skills/ |
+| Skill 加载 | /skills [群号]、skill_loader | 公共只读 Skill 加群本地 Skill；缓存按群隔离，每次调用返回完整内容 | skills/ |
 | Skill 增删 | skill_create、skill_download、skill_remove | 只修改 `SKILLS_DIR/groups/<group-id>`；公共同名 Skill 不可覆盖或删除 | graph/tools.py、skills/manager.py |
 | 群成员搜索 | /membersearch 或 membersearch | 昵称和群名片子串优先，再按字符重叠排序；缓存五分钟 | handlers/tools.py、`utils/__init__.py` |
 | 点赞与排行榜 | “赞我 / 互赞 / 点赞”、/likerank [群号] | 点赞计数和榜单按群隔离；跨群查看仅管理员 | handlers/social.py |
