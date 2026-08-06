@@ -38,6 +38,7 @@ DS_API_KEY = os.environ.get("DS_API_KEY", "")
 AR_API_KET = os.environ.get("AR_API_KEY", "")
 RUOLI_API_KEY = os.environ.get("ROULI_API_KEY", "")
 PIXELS_API_KEY: str = os.environ.get("PIXELS_API_KEY", "")
+WAWAPI_API_KEY: str = os.environ.get("WAWAPI_API_KEY", "")
 
 # ---------------------------------------------------------------------------
 # Base URLs (No `v1` suffix)
@@ -54,6 +55,7 @@ DS_BASE_URL = "https://api.deepseek.com"
 AR_BASE_URL = "https://agentrouter.org"
 RUOLI_BASE_URL = "https://ruoli.dev"
 PEXELS_BASE_URL = "https://api.pexels.com"
+WAWAPI_BASE_URL = "https://wawapii.com"
 
 
 # ---------------------------------------------------------------------------
@@ -66,16 +68,14 @@ SEEDREAM_5_0_LITE: str = "doubao-seedream-5.0-lite"
 SEEDANCE_1_5: str = "doubao-seedance-1-5-pro-251215"
 SEEDANCE_1_0: str = "doubao-seedance-1-0-pro-250528"
 GPT_IMAGE_2 = "gpt-image-2:stable"
-GROK_IMAGINE_IMAGE = "grok-imagine-image:stable"
-GPT_5_6_LUNA_XHIGH = "gpt-5.6-luna-xhigh:stable"
 GPT_5_6_LUNA = "gpt-5.6-luna"
-GPT_5_4_NANO = "gpt-5.4-nano-2026-03-17:stable"
 GPT_5_6_TERRA = "gpt-5.6-terra"
 GPT_5_5 = "gpt-5.5"
 GEMINI_3_5_FLASH = "gemini-3.5-flash"
 GROK_4_5 = "grok-4.5"
+GROK_IMAGINE_IMAGE = "grok-imagine-image:stable"
 
-ADVANCE_MODEL_NAME: str = GPT_5_6_LUNA 
+ADVANCE_MODEL_NAME: str = GPT_5_6_LUNA
 LITE_MODEL_NAME =  GPT_5_6_LUNA
 
 
@@ -87,10 +87,10 @@ EMBEDDING_MODEL: str = "BAAI/bge-m3"
 # ---------------------------------------------------------------------------
 # Provider selection
 # ---------------------------------------------------------------------------
-PROVIDER: Literal["volc", "volc_plan", "kege", "zhth", "ar", "ruoli"] = "ruoli"
+PROVIDER: Literal["volc", "volc_plan", "kege", "zhth", "ar", "ruoli", "ds", "waw"] = "zhth"
 
 def get_base_url(
-    provider: Literal["volc", "volc_plan", "sf", "kege", "zhth", "ar", "ruoli"] = PROVIDER,
+    provider: Literal["volc", "volc_plan", "sf", "kege", "zhth", "ar", "ruoli", "ds", "waw"] = PROVIDER,
 ) -> str:
     match provider:
         case "volc_plan":
@@ -107,10 +107,14 @@ def get_base_url(
             return AR_BASE_URL
         case "ruoli":
             return RUOLI_BASE_URL
+        case "ds":
+            return DS_BASE_URL
+        case "waw":
+            return WAWAPI_BASE_URL
  
 
 def get_api_key(
-    provider: Literal["volc", "volc_plan", "sf", "kege", "zhth", "ar", "ruoli"] = PROVIDER,
+    provider: Literal["volc", "volc_plan", "sf", "kege", "zhth", "ar", "ruoli", "ds", "waw"] = PROVIDER,
 ) -> Callable[[], str]:
     match provider:
         case "volc_plan":
@@ -127,6 +131,10 @@ def get_api_key(
             return lambda: AR_API_KET
         case "ruoli":
             return lambda: RUOLI_API_KEY
+        case "ds":
+            return lambda: DS_API_KEY
+        case "waw":
+            return lambda: WAWAPI_API_KEY
 
 # ---------------------------------------------------------------------------
 # Behavioral constants

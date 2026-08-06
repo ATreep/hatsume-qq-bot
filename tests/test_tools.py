@@ -456,24 +456,24 @@ class TestSearchImage:
 
 
 # -----------------------------------------------------------------------
-# view_image: lite-model image description
+# view_image: dedicated image-model description
 # -----------------------------------------------------------------------
 
 
 class TestViewImage:
     @staticmethod
-    def _set_lite_model(content="图片描述"):
+    def _set_view_image_model(content="图片描述"):
         model = types.SimpleNamespace(
             ainvoke=AsyncMock(return_value=types.SimpleNamespace(content=content))
         )
         models = sys.modules["hatsume.plugins.hatsume-plugin.models"]
-        models.get_lite_model = MagicMock(return_value=model)
+        models.get_view_image_model = MagicMock(return_value=model)
         return model
 
     @pytest.mark.asyncio
-    async def test_passes_http_image_to_lite_model(self):
+    async def test_passes_http_image_to_dedicated_view_image_model(self):
         tools = _load_tools_module()
-        model = self._set_lite_model("一张海边日落的照片")
+        model = self._set_view_image_model("一张海边日落的照片")
 
         result = await tools.view_image("https://example.com/sunset.jpg")
 
@@ -490,7 +490,7 @@ class TestViewImage:
     async def test_reads_file_url_from_sandbox_as_data_uri(self):
         tools = _load_tools_module()
         runtime = _bind_tool_runtime(tools)
-        model = self._set_lite_model([{"type": "text", "text": "沙盒图片描述"}])
+        model = self._set_view_image_model([{"type": "text", "text": "沙盒图片描述"}])
         tools.read_sandbox_image_data_uri = AsyncMock(
             return_value="data:image/png;base64,aW1hZ2U="
         )
@@ -514,7 +514,7 @@ class TestViewImage:
     )
     async def test_rejects_unsupported_or_non_absolute_input(self, image_url):
         tools = _load_tools_module()
-        model = self._set_lite_model()
+        model = self._set_view_image_model()
 
         result = await tools.view_image(image_url)
 
@@ -525,7 +525,7 @@ class TestViewImage:
     async def test_rejects_non_image_sandbox_file(self):
         tools = _load_tools_module()
         runtime = _bind_tool_runtime(tools)
-        model = self._set_lite_model()
+        model = self._set_view_image_model()
         tools.read_sandbox_image_data_uri = AsyncMock(
             side_effect=ValueError("sandbox file is not a valid image")
         )

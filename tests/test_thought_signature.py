@@ -229,3 +229,23 @@ class TestAdvanceModelSelection:
         self.models.get_advance_model(thinking=False, reasoning_effort="high")
 
         assert captured_efforts == ["medium", "none"]
+
+    def test_view_image_model_uses_zhth_luna(self):
+        captured: dict[str, object] = {}
+        sentinel = object()
+
+        def _capture(**kwargs):
+            captured.update(kwargs)
+            return sentinel
+
+        self.models.ChatOpenAI = _capture
+        self.models.get_base_url = lambda provider: f"https://{provider}.example"
+        self.models.get_api_key = lambda provider: f"{provider}-api-key"
+
+        assert self.models.get_view_image_model() is sentinel
+        assert captured == {
+            "base_url": "https://zhth.example/v1",
+            "model": self.models._config.GPT_5_6_LUNA,
+            "api_key": "zhth-api-key",
+            "reasoning_effort": "medium",
+        }

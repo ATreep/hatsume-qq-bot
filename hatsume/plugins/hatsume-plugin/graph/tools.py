@@ -428,7 +428,7 @@ def get_avatar(qq_id: int) -> str:
 @tool
 async def view_image(image_url: str) -> str:
     """
-    使用轻量模型读取一张图片，并返回客观、详细的文字描述。此工具不会发送图片。
+    使用指定视觉模型读取一张图片，并返回客观、详细的文字描述。此工具不会发送图片。
 
     ## 参数：
     - image_url: 图片地址，支持：
@@ -467,14 +467,14 @@ async def view_image(image_url: str) -> str:
         return "❌ 错误：仅支持 HTTP/HTTPS URL 或 file:// 沙盒绝对路径。"
 
     from langchain.messages import HumanMessage
-    from ..models import get_lite_model
+    from ..models import get_view_image_model
 
     prompt = (
         "请客观、详细地描述这张图片。说明其中可见的人物、物体、场景、动作、"
         "画面风格和重要细节，并准确抄录清晰可见的文字。只返回图片描述。"
     )
     try:
-        response = await get_lite_model().ainvoke(
+        response = await get_view_image_model().ainvoke(
             [
                 HumanMessage(
                     content=[

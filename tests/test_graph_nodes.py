@@ -1785,12 +1785,11 @@ def test_admin_mode_detector_accepts_qualifying_message_in_merged_batch():
     assert nodes.is_admin_mode_message(merged_content, "12345")
 
 
-def test_ai_node_admin_mode_applies_model_prompt_and_image_filter_per_round():
+def test_ai_node_admin_mode_preserves_model_prompt_and_image_filter_per_round():
     nodes = _load_nodes_module()
     sys_prompts: list[str] = []
     chosen_models: list[object] = []
     input_contents: list[list[object]] = []
-    admin_model = object()
     advance_model = object()
 
     class _FakeAgent:
@@ -1805,7 +1804,6 @@ def test_ai_node_admin_mode_applies_model_prompt_and_image_filter_per_round():
 
     original_create_agent = nodes.create_agent
     original_get_advance_model = nodes.get_advance_model
-    original_get_code_model = nodes.get_code_model
     original_randint = random.randint
 
     def _tracking_create_agent(model, tools, system_prompt=None, **kw):
@@ -1822,7 +1820,6 @@ def test_ai_node_admin_mode_applies_model_prompt_and_image_filter_per_round():
     ]
     nodes.create_agent = _tracking_create_agent
     nodes.get_advance_model = lambda **kw: advance_model
-    nodes.get_code_model = lambda **kw: admin_model
     random.randint = lambda a, b: 5
     try:
         for content in (admin_content, regular_content):
@@ -1843,10 +1840,9 @@ def test_ai_node_admin_mode_applies_model_prompt_and_image_filter_per_round():
     finally:
         nodes.create_agent = original_create_agent
         nodes.get_advance_model = original_get_advance_model
-        nodes.get_code_model = original_get_code_model
         random.randint = original_randint
 
-    assert chosen_models == [admin_model, advance_model]
+    assert chosen_models == [advance_model, advance_model]
     assert "# 管理员模式" in sys_prompts[0]
     assert "QQ ID = 12345" in sys_prompts[0]
     assert "# 管理员模式" not in sys_prompts[1]

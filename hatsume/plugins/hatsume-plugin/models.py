@@ -122,7 +122,7 @@ def get_standard_api_model(
 
 def get_google_api_model(
     model_name: str,
-    reasoning_effort: ReasoningEffort = "medium",
+    reasoning_effort: ReasoningEffort = "low",
 ) -> ChatGoogleGenerativeAI:
     return ChatGoogleGenerativeAI(
         base_url=get_base_url(),
@@ -146,6 +146,16 @@ def get_advance_model(
 
 def get_lite_model() -> BaseChatModel:
     return get_standard_api_model(LITE_MODEL_NAME)
+
+
+def get_view_image_model() -> BaseChatModel:
+    """Create the dedicated vision model used by ``view_image``."""
+    return ChatOpenAI(
+        base_url=get_base_url("zhth") + "/v1",
+        model=_config.GPT_5_6_LUNA,
+        api_key=get_api_key("zhth"),
+        reasoning_effort="medium",
+    )
 
 
 def get_mini_model() -> BaseChatModel:
@@ -239,7 +249,7 @@ def generate_image_for_kege(
     base_url: str = KEGEAI_BASE_URL,
     api_key: str = KEGEAI_API_KEY,
 ) -> str:
-    """Generate image via Kege AI (grok-imagine-image). Returns image URL."""
+    """Generate image via grok-imagine-image. Returns image URL."""
     import requests as _requests
 
 

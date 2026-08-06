@@ -25,7 +25,7 @@ from langchain_core.messages import RemoveMessage
 from langgraph.graph import MessagesState
 from nonebot.adapters.onebot.v11 import MessageSegment
 
-from ..models import get_advance_model, get_code_model, get_lite_model, get_mini_model
+from ..models import get_advance_model, get_lite_model, get_mini_model
 from ..group_runtime import (
     get_current_group_runtime,
     group_runtime_registry,
@@ -327,7 +327,7 @@ def inject_agent_notification(
         f"(SYSTEM) Agent '{agent_name}' 执行完毕。\n"
         f"{notified_user_prompt}"
         f"{context_line}"
-        f"请你简单复述一下任务原文内容，然后告诉用户执行结果。\n\n"
+        f"请简单提及任务原文内容，然后告诉用户执行结果。\n\n"
         f"## 该 Agent 执行的任务原文\n\n"
         "```\n"
         f"{task[:200]}\n\n"
@@ -558,13 +558,11 @@ async def ai_node(state: MessagesState) -> dict:
     print("Memory retrieved: \n" + memory_summary)
 
     admin_mode_enabled = is_admin_mode_message(last_content, ADMIN_QQ_ID)
-    model_chosen = (
-        get_code_model() if admin_mode_enabled else get_advance_model(thinking=True)
-    )
+    model_chosen = get_advance_model(thinking=True)
     sys_prompt = get_role_sys_prompt()
     if admin_mode_enabled:
         sys_prompt += build_admin_mode_prompt(ADMIN_QQ_ID)
-        print("[admin] Enabled ADMIN MODE with DEEPSEEK_V4_FLASH")
+        print("[admin] Enabled ADMIN MODE")
 
     from ..character_proxy import (
         build_active_character_proxy_role_prompt,
