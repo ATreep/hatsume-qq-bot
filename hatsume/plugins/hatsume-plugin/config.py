@@ -75,8 +75,8 @@ GEMINI_3_5_FLASH = "gemini-3.5-flash"
 GROK_4_5 = "grok-4.5"
 GROK_IMAGINE_IMAGE = "grok-imagine-image:stable"
 
-ADVANCE_MODEL_NAME: str = GPT_5_6_LUNA
-LITE_MODEL_NAME =  GPT_5_6_LUNA
+ADVANCE_MODEL_NAME: str = DEEPSEEK_V4_FLASH
+LITE_MODEL_NAME =  DEEPSEEK_V4_FLASH
 
 
 # ---------------------------------------------------------------------------
@@ -87,7 +87,7 @@ EMBEDDING_MODEL: str = "BAAI/bge-m3"
 # ---------------------------------------------------------------------------
 # Provider selection
 # ---------------------------------------------------------------------------
-PROVIDER: Literal["volc", "volc_plan", "kege", "zhth", "ar", "ruoli", "ds", "waw"] = "zhth"
+PROVIDER: Literal["volc", "volc_plan", "kege", "zhth", "ar", "ruoli", "ds", "waw"] = "ds"
 
 def get_base_url(
     provider: Literal["volc", "volc_plan", "sf", "kege", "zhth", "ar", "ruoli", "ds", "waw"] = PROVIDER,
