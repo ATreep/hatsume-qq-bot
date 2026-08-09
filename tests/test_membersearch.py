@@ -7,6 +7,7 @@ import contextlib
 import sys
 import types
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -470,6 +471,7 @@ def _load_tools_module_for_membersearch():
     infra_mod.run_cmd = lambda *a, **kw: ""
     infra_mod.ensure_container_running = lambda *a, **kw: None
     infra_mod.delete_container = lambda *a, **kw: None
+    infra_mod.cache_sandbox_message_image = AsyncMock()
     async def _mock_read_sandbox_image_data_uri(*args, **kwargs):
         return "data:image/png;base64,aW1hZ2U="
 
@@ -643,6 +645,7 @@ def _load_commands_for_membersearch(patch_search=None):
     infra_mod.run_cmd = lambda *a, **kw: ""
     infra_mod.delete_container = lambda *a, **kw: None
     infra_mod.cleanup_persistent_container = lambda: None
+    infra_mod.cache_sandbox_message_image = AsyncMock()
     infra_mod.container_name_for_group = (
         lambda group_id: f"hatsume-space-{group_id}"
     )

@@ -41,6 +41,8 @@ def _setup_package_hierarchy():
         sys.modules[config_name] = config_mod
     config_mod = sys.modules[config_name]
     config_mod.DOCKER_ENV_PATH = Path("/tmp/test_docker")
+    config_mod.IMAGE_MAX_PIXELS = 36_000_000
+    config_mod.IMAGE_MAX_SIZE_BYTES = 9 * 1024 * 1024
     config_mod.SHELL_MAX_OUTPUT = 1000
     config_mod.SHELL_TIMEOUT = 10
     config_mod.CONTAINER_NAME_BASE = "hatsume-space"

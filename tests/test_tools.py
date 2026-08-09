@@ -284,6 +284,7 @@ def _load_tools_module():
     )
     infra_mod.ensure_container_running = lambda *a, **kw: None
     infra_mod.delete_container = lambda *a, **kw: None
+    infra_mod.cache_sandbox_message_image = AsyncMock()
 
     async def _mock_read_sandbox_image_data_uri(*args, **kwargs):
         return "data:image/png;base64,aW1hZ2U="
@@ -1249,6 +1250,7 @@ def _load_commands_module():
     infra_mod.run_cmd = lambda *a, **kw: ""
     infra_mod.delete_container = lambda *a, **kw: None
     infra_mod.cleanup_persistent_container = lambda: None
+    infra_mod.cache_sandbox_message_image = AsyncMock()
 
     # Ensure memory.engine stub exists
     mem_engine = sys.modules.get("hatsume.plugins.hatsume-plugin.memory.engine")
@@ -2729,15 +2731,19 @@ def test_character_proxy_tools_are_mutually_exclusive():
     character_proxy.get_character_proxy = lambda: active
     sys.modules[module_name] = character_proxy
 
-    off_names = {item.__name__ for item in tools.get_chat_tools()}
+    def registered_name(item):
+        return item["type"] if isinstance(item, dict) else item.__name__
+
+    off_names = {registered_name(item) for item in tools.get_chat_tools()}
     assert "view_image" in off_names
+    assert "web_search" in off_names
     assert "send_video" in off_names
     assert "end_conversation" in off_names
     assert "create_character_proxy" in off_names
     assert "terminate_character_proxy" not in off_names
 
     active = object()
-    on_names = {item.__name__ for item in tools.get_chat_tools()}
+    on_names = {registered_name(item) for item in tools.get_chat_tools()}
     assert "send_video" in on_names
     assert "end_conversation" in on_names
     assert "terminate_character_proxy" in on_names

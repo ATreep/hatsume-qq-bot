@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import os
 import random
+import tempfile
 import time
 from typing import Any, Literal, Optional
 
 from langchain_core.language_models import BaseChatModel
+from openai import OpenAI
 
 from . import config as _config
 from .config import (
@@ -20,12 +23,14 @@ from .config import (
     LITE_MODEL_NAME,
     SEEDANCE_1_0,
     SEEDANCE_1_5,
+    SEEDREAM_4_0,
     SEEDREAM_5_0_LITE,
     VOLCENGINE_BASE_URL,
     DS_BASE_URL,
     DS_API_KEY,
     get_api_key,
     get_base_url,
+    WAWAPI_IMAGE_API_KEY,
 )
 
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
@@ -100,19 +105,20 @@ def get_volcengine_api_model(
 
 def get_openai_api_model(
     model_name: str,
-    reasoning_effort: ReasoningEffort = "medium",
+    reasoning_effort: ReasoningEffort,
 ) -> ChatOpenAI:
     return ChatOpenAI(
         base_url=get_base_url() + "/v1",
         model=model_name,
         api_key=get_api_key(),
         reasoning_effort=reasoning_effort,
+        output_version="response/v1"
     )
 
 
 def get_standard_api_model(
     model_name: str,
-    reasoning_effort: ReasoningEffort = "medium",
+    reasoning_effort: ReasoningEffort = "low",
 ) -> ChatOpenAI:
     """Create the standard OpenAI-compatible chat model."""
     return get_openai_api_model(
@@ -134,7 +140,7 @@ def get_google_api_model(
 
 def get_advance_model(
     thinking: bool = True,
-    reasoning_effort: ReasoningEffort = "max",
+    reasoning_effort: ReasoningEffort = "high",
 ) -> BaseChatModel:
     model_name = _config.ADVANCE_MODEL_NAME
     print(f"⚡ Using {model_name} for advance model")
@@ -212,6 +218,59 @@ async def _resolve_image_srcs(images: list[str]) -> list[str]:
             resolved.append(src)
     return resolved
 
+async def generate_image_for_openai(
+    prompt: str,
+    images: list[str],
+    base_url: str = get_base_url("waw") + "/v1",
+    api_key: str = WAWAPI_IMAGE_API_KEY,
+) -> str:
+    """Generate an image and save it in the current group's sandbox."""
+    client = OpenAI(base_url=base_url, api_key=api_key)
+    images = await _resolve_image_srcs(images)
+    if len(images) > 0:
+        result = client.images.edit(
+            model="gpt-image-2",
+            prompt=prompt,
+            image=images,  # type: ignore[arg-type]
+        )
+    else:
+        # No input images: create from prompt
+        result = client.images.generate(
+            model="gpt-image-2",
+            prompt=prompt,
+        )
+
+    if not result.data or not result.data[0].b64_json:
+        raise ValueError("OpenAI image response missing base64 data")
+
+    b64_json = result.data[0].b64_json
+    image_bytes = base64.b64decode(b64_json)
+
+    from .group_runtime import get_current_group_id
+    from .infra import copy_host_file_to_sandbox
+
+    sandbox_path = f"/tmp/generate-img-{time.time_ns()}.png"
+    temporary_path: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            prefix="hatsume-generate-img-",
+            suffix=".png",
+            delete=False,
+        ) as temporary_file:
+            temporary_file.write(image_bytes)
+            temporary_path = temporary_file.name
+
+        await copy_host_file_to_sandbox(
+            temporary_path,
+            sandbox_path,
+            group_id=get_current_group_id(),
+        )
+    finally:
+        if temporary_path is not None:
+            os.unlink(temporary_path)
+
+    return sandbox_path
+
 
 async def generate_image_for_volc(
     prompt: str,
@@ -219,9 +278,9 @@ async def generate_image_for_volc(
 ) -> str:
     """Generate image via Seedream. Returns HTTP URL."""
     images = await _resolve_image_srcs(images)
-    client = Ark(base_url=get_base_url("volc_plan") + "/v3", api_key=get_api_key("volc_plan")())
+    client = Ark(base_url=get_base_url("volc") + "/v3", api_key=get_api_key("volc")())
 
-    model_name = SEEDREAM_5_0_LITE
+    model_name = SEEDREAM_4_0
 
     response = client.images.generate(
         model=model_name,
@@ -237,10 +296,6 @@ async def generate_image_for_volc(
     img_url = response.data[0].url
     assert img_url.startswith("http")
     return img_url
-
-
-
-
 
 def generate_image_for_kege(
     prompt: str,

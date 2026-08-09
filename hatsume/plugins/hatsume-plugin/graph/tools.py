@@ -34,6 +34,8 @@ from ..group_runtime import (
     set_current_group_runtime,
 )
 
+from ..config import GENERATE_IMAGE_RATE_LIMIT_SECONDS
+
 from ..memory import query_mems
 from .agents import get_agent_list, get_agent_handler
 
@@ -793,23 +795,17 @@ async def generate_image(prompt: str, image_urls: list[str]) -> str:
     - 如果你要向 image_urls 传入多张图片，你需要在 prompts 中用序号标注 图1、图2、... ，并分别描述这些图片的内容。
     - 在得到生成图片的 URL 或路径后，请迅速通过 send_image 工具发送给用户，或者保存到特定位置。禁止将图片 URL 直接返回给用户。
     """
-    from ..models import generate_image_for_volc, generate_image_for_kege
+    from ..models import generate_image_for_volc
 
     runtime = get_current_group_runtime()
     if runtime.is_generate_image_rate_limited_callback():
-        return "❌ 图片生成请求过于频繁，请 3 分钟后再试。"
+        return f"❌ 图片生成请求过于频繁，请 {GENERATE_IMAGE_RATE_LIMIT_SECONDS // 60} 分钟后再试。"
 
     print(f"Generate image: {prompt}")
     runtime.update_generate_image_time_callback()
     try:
-        if random.random() <= 0.5 or len(image_urls) > 0:
-            print("Using Seedream 5.0 Lite...")
-            url = await generate_image_for_volc(prompt, images=image_urls)
-            result_msg = f"图片生成成功。\n临时 URL：{url}\n"
-        else:
-            print("Using grok-imagine-image...")
-            url = generate_image_for_kege(prompt)
-            result_msg = f"图片生成成功（此次请求不支持参考图）\n临时 URL：{url}"
+        url = await generate_image_for_volc(prompt, images=image_urls)
+        result_msg = f"图片已成功生成并上传到临时链接：{url}\n"
     except Exception as e:
         print(f"❌ generate_image failed: {e}")
         traceback.print_exc()
@@ -1758,13 +1754,13 @@ def end_conversation() -> str:
 
 # Single registration point consumed by graph.nodes. Add new chat-facing tools here.
 CHAT_TOOLS = [
-    search_web,
+    # search_web,
     search_image,
     shell_executor,
     find_memory,
     view_image,
     generate_image,
-    generate_video,
+    # generate_video,
     send_image,
     send_video,
     get_avatar,
@@ -1787,6 +1783,7 @@ CHAT_TOOLS = [
     create_character_proxy,
     terminate_character_proxy,
     end_conversation,
+    {"type": "web_search"}
 ]
 
 

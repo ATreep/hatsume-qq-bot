@@ -10,7 +10,11 @@ from nonebot.adapters.onebot.v11 import Message, MessageSegment, PokeNotifyEvent
 
 from ..config import ADMIN_QQ_ID
 from ..group_runtime import bind_group_runtime, group_runtime_registry
-from ..infra import cleanup_persistent_container, run_cmd
+from ..infra import (
+    cache_sandbox_message_image,
+    cleanup_persistent_container,
+    run_cmd,
+)
 
 
 # ---- Section 1: Poke Handler ----
@@ -47,7 +51,27 @@ async def handle_poke(bot: Bot, event: PokeNotifyEvent) -> None:
             with open(host_file, "rb") as f:
                 img_data = f.read()
             b64 = base64.b64encode(img_data).decode("ascii")
-            await bot.send(event, MessageSegment.image(f"base64://{b64}"))
+            send_result = await bot.send(
+                event,
+                MessageSegment.image(f"base64://{b64}"),
+            )
+            if isinstance(send_result, dict):
+                raw_message_id = send_result.get("message_id")
+                if isinstance(raw_message_id, (int, str)) and not isinstance(
+                    raw_message_id,
+                    bool,
+                ):
+                    try:
+                        message_id = int(raw_message_id)
+                    except (TypeError, ValueError):
+                        pass
+                    else:
+                        await cache_sandbox_message_image(
+                            img_data,
+                            message_id,
+                            1,
+                            group_id=group_id,
+                        )
         except Exception:
             # File read / network errors: also silent
             return

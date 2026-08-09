@@ -911,6 +911,8 @@ def _load_docker_module():
     # Stub config module
     config_mod = types.ModuleType("hatsume.plugins.hatsume-plugin.config")
     config_mod.DOCKER_ENV_PATH = "/tmp/test_docker"
+    config_mod.IMAGE_MAX_PIXELS = 36_000_000
+    config_mod.IMAGE_MAX_SIZE_BYTES = 9 * 1024 * 1024
     config_mod.SHELL_MAX_OUTPUT = 1000
     config_mod.SHELL_TIMEOUT = 10
     sys.modules["hatsume.plugins.hatsume-plugin.config"] = config_mod
@@ -1427,11 +1429,15 @@ def test_ai_node_can_reply_to_auxiliary_top_level_message_id():
     assert sent == [("history answer", 111)]
 
 
-def test_ai_node_does_not_send_empty_reply_directive():
+def test_ai_node_reinvokes_after_directive_only_response():
     nodes = _load_nodes_module()
     nodes.auxiliary_messages_queue.clear()
     nodes.auxiliary_source_queue.clear()
-    answer = AsyncMock()
+    sent: list[tuple[object, int | None]] = []
+
+    async def answer(msg, reply_to_message_id=None):
+        sent.append((msg, reply_to_message_id))
+
     mock_state = types.SimpleNamespace(
         human_queue=[],
         human_source_queue=[],
@@ -1443,18 +1449,30 @@ def test_ai_node_does_not_send_empty_reply_directive():
     nodes.bind_state(mock_state)
 
     class _FakeAgent:
+        def __init__(self):
+            self.invocations: list[dict] = []
+
         def with_retry(self, **kw):
             return self
 
-        async def ainvoke(self, *a, **kw):
+        async def ainvoke(self, payload, *a, **kw):
+            self.invocations.append(payload)
+            if len(self.invocations) == 1:
+                return {
+                    "messages": [
+                        types.SimpleNamespace(
+                            content="[reply: 4321]", type="ai", tool_calls=[]
+                        )
+                    ]
+                }
             return {
-                "messages": [
-                    types.SimpleNamespace(content="[reply: 4321]", type="ai")
-                ]
+                "messages": payload["messages"]
+                + [types.SimpleNamespace(content="补充回答", type="ai", tool_calls=[])]
             }
 
     original_create_agent = nodes.create_agent
-    nodes.create_agent = lambda *a, **kw: _FakeAgent()
+    fake_agent = _FakeAgent()
+    nodes.create_agent = lambda *a, **kw: fake_agent
     human_msg = types.SimpleNamespace(
         type="human",
         content=[_normalized_text(4321)],
@@ -1464,8 +1482,79 @@ def test_ai_node_does_not_send_empty_reply_directive():
     finally:
         nodes.create_agent = original_create_agent
 
-    answer.assert_not_awaited()
-    assert result["messages"][0].content == ""
+    assert len(fake_agent.invocations) == 2
+    assert fake_agent.invocations[1]["messages"][0].content == "[reply: 4321]"
+    assert sent == [("补充回答", 4321)]
+    assert result["messages"][0].content == "补充回答"
+
+
+def test_ai_node_reinvokes_after_tool_only_response():
+    nodes = _load_nodes_module()
+    nodes.auxiliary_messages_queue.clear()
+    nodes.auxiliary_source_queue.clear()
+    memory_pkg = sys.modules["hatsume.plugins.hatsume-plugin.memory"]
+    saved: list[tuple[str, list[dict]]] = []
+    answer = AsyncMock()
+    mock_state = types.SimpleNamespace(
+        human_queue=[],
+        human_source_queue=[],
+        is_graph_running=True,
+        current_query_user_id=None,
+        end_requested=False,
+        ai_answer=answer,
+    )
+    nodes.bind_state(mock_state)
+
+    tool_call = types.SimpleNamespace(
+        content="[memory: 「小明」喜欢爵士乐 MEMORYCONTENTEND]",
+        type="ai",
+        tool_calls=[{"name": "find_memory", "args": {}, "id": "call-1"}],
+    )
+    tool_result = types.SimpleNamespace(
+        content="internal tool result",
+        type="tool",
+        tool_calls=[],
+    )
+
+    class _FakeAgent:
+        def __init__(self):
+            self.invocations: list[dict] = []
+
+        def with_retry(self, **kw):
+            return self
+
+        async def ainvoke(self, payload, *a, **kw):
+            self.invocations.append(payload)
+            if len(self.invocations) == 1:
+                return {"messages": [tool_call, tool_result]}
+            return {
+                "messages": payload["messages"]
+                + [types.SimpleNamespace(content="最终回答", type="ai", tool_calls=[])]
+            }
+
+    original_create_agent = nodes.create_agent
+    original_add_mem = memory_pkg.add_mem
+    fake_agent = _FakeAgent()
+    nodes.create_agent = lambda *a, **kw: fake_agent
+    memory_pkg.add_mem = lambda content, people: saved.append((content, people))
+    try:
+        result = asyncio.run(
+            nodes.ai_node(
+                {"messages": [types.SimpleNamespace(content="hello", type="human")]}
+            )
+        )
+    finally:
+        nodes.create_agent = original_create_agent
+        memory_pkg.add_mem = original_add_mem
+
+    assert len(fake_agent.invocations) == 2
+    assert fake_agent.invocations[1]["messages"] == [tool_call, tool_result]
+    answer.assert_awaited_once()
+    assert answer.await_args.args[0].data["text"] == "最终回答"
+    assert saved == [("「小明」喜欢爵士乐", [])]
+    assert result["messages"][0].content == (
+        "[memory: 「小明」喜欢爵士乐 MEMORYCONTENTEND]\n最终回答"
+    )
 
 
 def test_ai_node_suppresses_reply_after_end_conversation_tool():

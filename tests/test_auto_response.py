@@ -17,6 +17,13 @@ BASE_NAME = "hatsume.plugins.hatsume-plugin"
 SHANGHAI = timezone(timedelta(hours=8))
 
 
+def _future_non_quiet_timestamp() -> float:
+    """Return a future Shanghai-noon timestamp for non-quiet execution tests."""
+    return (
+        datetime.now(SHANGHAI) + timedelta(days=1)
+    ).replace(hour=12, minute=0, second=0, microsecond=0).timestamp()
+
+
 def _is_stubbed_namespace(name: str) -> bool:
     return name == "hatsume" or name.startswith("hatsume.") or name in {
         "nonebot",
@@ -90,7 +97,8 @@ def _load_modules():
 
     group_runtime = types.ModuleType(f"{BASE_NAME}.group_runtime")
     group_runtime.group_runtime_registry = types.SimpleNamespace(
-        get_bot=lambda _group_id: object()
+        get_bot=lambda _group_id: object(),
+        get_existing=lambda _group_id: None,
     )
     sys.modules[group_runtime.__name__] = group_runtime
 
@@ -369,7 +377,7 @@ async def test_recovery_skips_groups_without_registered_bot_routes(
     modules, store, monkeypatch
 ):
     _, executor, scheduler, nodes = modules
-    current = datetime.now(SHANGHAI).timestamp()
+    current = _future_non_quiet_timestamp()
     trigger_at = current - 60
     successor_at = current + 3600
     store.upsert_auto_response(123, trigger_at, "routable")
@@ -428,7 +436,7 @@ async def test_auto_response_marks_before_injection_and_registers_successor(
     modules, store, monkeypatch
 ):
     _, executor, scheduler, nodes = modules
-    trigger_at = datetime.now(SHANGHAI).timestamp() + 60
+    trigger_at = _future_non_quiet_timestamp()
     successor_at = trigger_at + 3600
     store.upsert_auto_response(456, trigger_at, "participate in chat")
     point = store.get_auto_response_point(456)
@@ -461,11 +469,41 @@ async def test_auto_response_marks_before_injection_and_registers_successor(
 
 
 @pytest.mark.asyncio
+async def test_auto_response_skips_active_conversation_and_registers_successor(
+    modules, store, monkeypatch
+):
+    _, executor, scheduler, nodes = modules
+    group_id = 456
+    trigger_at = _future_non_quiet_timestamp()
+    successor_at = trigger_at + 3600
+    store.upsert_auto_response(group_id, trigger_at, "participate in chat")
+    point = store.get_auto_response_point(group_id)
+    assert point is not None
+    group_runtime = sys.modules[f"{BASE_NAME}.group_runtime"]
+    group_runtime.group_runtime_registry.get_existing = MagicMock(
+        return_value=types.SimpleNamespace(
+            conversation=types.SimpleNamespace(is_chatting=True)
+        )
+    )
+    monkeypatch.setattr(executor, "_random_response_trigger", lambda: successor_at)
+    scheduler.reset_mock()
+
+    await executor._execute_point(point["id"], store, scheduled_at=trigger_at)
+
+    nodes.inject_timer.assert_not_called()
+    successor = store.get_auto_response_point(group_id)
+    assert successor is not None
+    assert successor["exact_at"] == successor_at
+    assert scheduler.add_job.call_count == 1
+    assert scheduler.add_job.call_args.kwargs["id"] == successor["job_id"]
+
+
+@pytest.mark.asyncio
 async def test_auto_response_registers_successor_when_injection_fails(
     modules, store, monkeypatch
 ):
     _, executor, scheduler, nodes = modules
-    trigger_at = datetime.now(SHANGHAI).timestamp() + 60
+    trigger_at = _future_non_quiet_timestamp()
     successor_at = trigger_at + 3600
     store.upsert_auto_response(456, trigger_at, "participate in chat")
     point = store.get_auto_response_point(456)
@@ -494,7 +532,7 @@ async def test_inflight_auto_response_does_not_resurrect_deactivated_group(
 ):
     _, executor, scheduler, nodes = modules
     group_id = 456
-    trigger_at = datetime.now(SHANGHAI).timestamp()
+    trigger_at = _future_non_quiet_timestamp()
     store.upsert_auto_response(group_id, trigger_at, "participate in chat")
     point = store.get_auto_response_point(group_id)
     task = store.get_task(point["task_id"])
@@ -524,7 +562,7 @@ async def test_successor_sync_uses_memory_owned_current_activation(
 ):
     _, executor, scheduler, nodes = modules
     group_id = 456
-    trigger_at = datetime.now(SHANGHAI).timestamp()
+    trigger_at = _future_non_quiet_timestamp()
     store.upsert_auto_response(group_id, trigger_at, "participate in chat")
     point = store.get_auto_response_point(group_id)
     memory = sys.modules[f"{BASE_NAME}.memory"]

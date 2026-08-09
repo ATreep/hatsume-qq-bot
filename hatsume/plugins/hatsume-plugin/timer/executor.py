@@ -241,7 +241,7 @@ def _synchronize_current_auto_response(store: TimerStore, group_id: int) -> None
 async def _execute_auto_response(
     task: dict[str, Any], store: TimerStore, *, triggered_at: float
 ) -> None:
-    """Inject an internal auto-response and immediately schedule its successor."""
+    """Process an auto-response point and immediately schedule its successor."""
     group_id = int(task["group_id"])
     if group_id <= 0:
         print(f"[auto_response] Skipped invalid group_id={group_id}")
@@ -255,6 +255,13 @@ async def _execute_auto_response(
     try:
         if _is_auto_response_quiet_time(triggered_at):
             print("[auto_response] Skipped: scheduled during quiet hours")
+            return
+
+        from ..group_runtime import group_runtime_registry
+
+        runtime = group_runtime_registry.get_existing(group_id)
+        if runtime is not None and runtime.conversation.is_chatting:
+            print("[auto_response] Skipped: conversation is still active")
             return
 
         from ..graph.nodes import inject_timer

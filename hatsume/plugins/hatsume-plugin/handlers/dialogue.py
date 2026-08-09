@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import time
 import traceback
@@ -23,6 +24,7 @@ from PIL import Image
 from ..config import (
     IMAGE_MAX_PIXELS,
     IMAGE_MAX_SIZE_BYTES,
+    MAX_REAL_AT_SEGMENTS,
     MESSAGE_MAX_LENGTH,
     REPLY_MAX_LENGTH,
     USER_INPUT_CONFIRM_DURING_TIME,
@@ -49,7 +51,7 @@ from ..utils import (
     get_qq_avatar_url,
     mask_secret_keys,
     message_to_json,
-    render_cq_at_placeholders,
+    resolve_cq_at_mentions,
 )
 from ..utils.md_to_image import auto_convert_text
 
@@ -58,6 +60,7 @@ from .forward import (
     has_forward_segment,
     resolve_forward_content,
 )
+from .qqface import render_qqface
 
 # ---- Section 2: Message Pipeline & Assembly ----
 
@@ -84,6 +87,23 @@ async def _store_user_image(
     response.raise_for_status()
     image_bytes = response.content
 
+    return await _store_image_bytes(
+        image_bytes,
+        message_id,
+        image_order,
+        group_id=group_id,
+    )
+
+
+async def _store_image_bytes(
+    image_bytes: bytes,
+    message_id: int,
+    image_order: int,
+    *,
+    group_id: int,
+) -> str:
+    """Validate image bytes and cache them under their QQ message position."""
+
     if len(image_bytes) > IMAGE_MAX_SIZE_BYTES:
         size_mb = len(image_bytes) / (1024 * 1024)
         raise ValueError(f"Image file size {size_mb:.2f}MB exceeds 9MB limit")
@@ -104,6 +124,92 @@ async def _store_user_image(
         extension,
         group_id=group_id,
     )
+
+
+def _sent_message_id(send_result: Any) -> int | None:
+    if not isinstance(send_result, dict):
+        return None
+    raw_message_id = send_result.get("message_id")
+    if isinstance(raw_message_id, bool) or not isinstance(
+        raw_message_id,
+        (int, str),
+    ):
+        return None
+    try:
+        return int(raw_message_id)
+    except (TypeError, ValueError):
+        return None
+
+
+async def _cache_sent_images(
+    segments: list[Any],
+    send_result: Any,
+    *,
+    group_id: int,
+) -> None:
+    """Cache successfully sent bot images for later reply resolution."""
+    message_id = _sent_message_id(send_result)
+    if message_id is None:
+        return
+
+    image_order = 0
+    for segment in segments:
+        if _segment_type(segment) != "image":
+            continue
+        image_order += 1
+        data = getattr(segment, "data", None)
+        if not isinstance(data, dict):
+            continue
+        source = data.get("file") or data.get("url")
+
+        try:
+            if isinstance(source, bytes):
+                await _store_image_bytes(
+                    source,
+                    message_id,
+                    image_order,
+                    group_id=group_id,
+                )
+                continue
+            if not isinstance(source, str) or not source:
+                continue
+            if source.startswith("base64://"):
+                image_bytes = base64.b64decode(
+                    source.removeprefix("base64://"),
+                    validate=True,
+                )
+                await _store_image_bytes(
+                    image_bytes,
+                    message_id,
+                    image_order,
+                    group_id=group_id,
+                )
+                continue
+            if source.startswith("data:image/"):
+                header, separator, encoded = source.partition(",")
+                if not separator or ";base64" not in header:
+                    raise ValueError("unsupported image data URI")
+                image_bytes = base64.b64decode(encoded, validate=True)
+                await _store_image_bytes(
+                    image_bytes,
+                    message_id,
+                    image_order,
+                    group_id=group_id,
+                )
+                continue
+            if source.startswith(("http://", "https://")):
+                await _store_user_image(
+                    source,
+                    message_id,
+                    image_order,
+                    group_id=group_id,
+                )
+        except Exception as exc:
+            print(
+                "Cannot cache sent image: "
+                f"group={group_id} message={message_id} order={image_order} err={exc}"
+            )
+            traceback.print_exc()
 
 
 async def _resolve_user_image_markdown(
@@ -239,6 +345,8 @@ async def get_human_message(bot: Bot, event: MessageEvent) -> tuple[list[dict], 
                         find_existing=True,
                         group_id=group_id,
                     )
+                case "face":
+                    re_message += render_qqface(msg_seg.data)
                 case "forward":
                     reply_has_forward = True
 
@@ -292,6 +400,8 @@ async def get_human_message(bot: Bot, event: MessageEvent) -> tuple[list[dict], 
                     find_existing=False,
                     group_id=group_id,
                 )
+            case "face":
+                plain_message += render_qqface(msg_seg.data)
             case "forward":
                 forward_id_in_loop = msg_seg.data.get("id", "")
                 plain_message += f" [合并转发消息 id={forward_id_in_loop}] "
@@ -576,22 +686,42 @@ def _message_payload_for_segments(segments: list[Any], force_message: bool = Fal
     return Message(segments)
 
 
-def _replace_cq_at_with_segments(text: str) -> list[MessageSegment]:
+def _replace_cq_at_with_segments(
+    text: str,
+    mentions: list[tuple[int, str]],
+    max_real_at_segments: int,
+) -> list[MessageSegment]:
     segments: list[MessageSegment] = []
     cursor = 0
-    for match in CQ_AT_PATTERN.finditer(text):
+    for index, match in enumerate(CQ_AT_PATTERN.finditer(text)):
         if match.start() > cursor:
             segments.append(MessageSegment.text(text[cursor:match.start()]))
-        segments.append(MessageSegment.at(int(match.group(1))))
+        uid, display_name = mentions[index]
+        if index < max_real_at_segments:
+            segments.append(MessageSegment.at(uid))
+        else:
+            segments.append(MessageSegment.text(f"@{display_name}"))
         cursor = match.end()
     if cursor < len(text):
         segments.append(MessageSegment.text(text[cursor:]))
     return segments
 
 
+def _render_cq_at_display_names(
+    text: str,
+    mentions: list[tuple[int, str]],
+) -> str:
+    mention_iter = iter(mentions)
+    return CQ_AT_PATTERN.sub(
+        lambda _match: f"@{next(mention_iter)[1]}",
+        text,
+    )
+
+
 async def _build_text_response_segments(
     text: str,
     group_id: int | None,
+    max_real_at_segments: int = MAX_REAL_AT_SEGMENTS,
 ) -> tuple[list[Any], bool]:
     text = mask_secret_keys(text)
     if not text.strip():
@@ -599,14 +729,23 @@ async def _build_text_response_segments(
     if not CQ_AT_PATTERN.search(text):
         return await auto_convert_text(text), False
 
-    at_user_ids = [int(match.group(1)) for match in CQ_AT_PATTERN.finditer(text)]
-    rendered_text, _ = await render_cq_at_placeholders(text, group_id)
+    mentions = await resolve_cq_at_mentions(text, group_id)
+    rendered_text = _render_cq_at_display_names(text, mentions)
     rendered_segments = await auto_convert_text(rendered_text)
     if any(_segment_type(seg) == "image" for seg in rendered_segments):
-        at_segments = [MessageSegment.at(uid) for uid in at_user_ids]
-        return at_segments + rendered_segments, bool(at_segments)
+        mention_segments = [
+            MessageSegment.at(uid)
+            if index < max_real_at_segments
+            else MessageSegment.text(f"@{display_name}")
+            for index, (uid, display_name) in enumerate(mentions)
+        ]
+        return mention_segments + rendered_segments, bool(mention_segments)
 
-    return _replace_cq_at_with_segments(text), True
+    return _replace_cq_at_with_segments(
+        text,
+        mentions,
+        max_real_at_segments,
+    ), True
 
 
 async def _build_ai_response_segments(
@@ -631,14 +770,25 @@ async def _build_ai_response_segments(
         else:
             segments = []
             force_message = False
+            remaining_real_at_segments = max(
+                0,
+                MAX_REAL_AT_SEGMENTS
+                - sum(_segment_type(seg) == "at" for seg in raw_segments),
+            )
             for seg in raw_segments:
                 if _is_text_segment(seg):
                     built, force = await _build_text_response_segments(
                         str(seg.data.get("text", "")),
                         group_id,
+                        remaining_real_at_segments,
                     )
                     segments.extend(built)
                     force_message = force_message or force
+                    remaining_real_at_segments = max(
+                        0,
+                        remaining_real_at_segments
+                        - sum(_segment_type(item) == "at" for item in built),
+                    )
                 else:
                     segments.append(seg)
 
@@ -662,10 +812,11 @@ async def _send_group_ai_message(
     if not segments:
         return False
     try:
-        await bot.send_group_msg(
+        send_result = await bot.send_group_msg(
             group_id=group_id,
             message=_message_payload_for_segments(segments, force_message),
         )
+        await _cache_sent_images(segments, send_result, group_id=group_id)
     except Exception:
         if reply_to_message_id is None:
             raise
@@ -677,12 +828,17 @@ async def _send_group_ai_message(
             msg,
             group_id,
         )
-        await bot.send_group_msg(
+        fallback_result = await bot.send_group_msg(
             group_id=group_id,
             message=_message_payload_for_segments(
                 fallback_segments,
                 fallback_force,
             )
+        )
+        await _cache_sent_images(
+            fallback_segments,
+            fallback_result,
+            group_id=group_id,
         )
     return True
 

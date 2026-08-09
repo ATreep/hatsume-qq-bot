@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import importlib.util
 import sys
 import types
@@ -25,6 +26,7 @@ def _cleanup_modules():
         "langchain",
         "langchain_core",
         "langchain_openai",
+        "openai",
         "volcenginesdkarkruntime",
         "PIL",
         "requests",
@@ -282,3 +284,85 @@ class TestGenerateImageForVolc:
             "data:image/png;base64,cmVmZXJlbmNlLWltYWdl",
             "https://example.com/second.png",
         ]
+
+
+class TestGenerateImageForOpenAI:
+    def test_uses_function_base_url_and_api_key_for_client(self):
+        _full_setup()
+        models = _load_models_module()
+        infra = sys.modules["hatsume.plugins.hatsume-plugin.infra"]
+        infra.read_sandbox_image_data_uri = AsyncMock()
+        infra.copy_host_file_to_sandbox = AsyncMock()
+
+        openai_client = MagicMock()
+        openai_client.images.generate.return_value = types.SimpleNamespace(
+            data=[
+                types.SimpleNamespace(
+                    b64_json=base64.b64encode(b"generated-image").decode("ascii")
+                )
+            ]
+        )
+        models.OpenAI = MagicMock(return_value=openai_client)
+
+        asyncio.run(
+            models.generate_image_for_openai(
+                "draw a lighthouse",
+                images=[],
+                base_url="https://images.example.test/v1",
+                api_key="function-api-key",
+            )
+        )
+
+        models.OpenAI.assert_called_once_with(
+            base_url="https://images.example.test/v1",
+            api_key="function-api-key",
+        )
+
+    def test_copies_generated_image_to_timestamped_sandbox_tmp_path(
+        self,
+        monkeypatch,
+    ):
+        _full_setup()
+        models = _load_models_module()
+        infra = sys.modules["hatsume.plugins.hatsume-plugin.infra"]
+        generated_bytes = b"generated-image-bytes"
+        copied: dict[str, object] = {}
+        infra.read_sandbox_image_data_uri = AsyncMock()
+
+        async def copy_to_sandbox(host_path, destination, **kwargs):
+            copied["host_path"] = Path(host_path)
+            copied["image_bytes"] = Path(host_path).read_bytes()
+            copied["destination"] = destination
+            copied["kwargs"] = kwargs
+
+        infra.copy_host_file_to_sandbox = AsyncMock(side_effect=copy_to_sandbox)
+        openai_client = MagicMock()
+        openai_client.images.generate.return_value = types.SimpleNamespace(
+            data=[
+                types.SimpleNamespace(
+                    b64_json=base64.b64encode(generated_bytes).decode("ascii")
+                )
+            ]
+        )
+        models.OpenAI = MagicMock(return_value=openai_client)
+        monkeypatch.setattr(
+            models.time,
+            "time_ns",
+            MagicMock(return_value=1_725_000_000_123_456_789),
+        )
+
+        result = asyncio.run(
+            models.generate_image_for_openai(
+                "draw a lighthouse",
+                images=[],
+                base_url="https://images.example.test/v1",
+                api_key="function-api-key",
+            )
+        )
+
+        expected_path = "/tmp/generate-img-1725000000123456789.png"
+        assert result == expected_path
+        assert copied["destination"] == expected_path
+        assert copied["image_bytes"] == generated_bytes
+        assert copied["kwargs"] == {"group_id": 123}
+        assert not copied["host_path"].exists()

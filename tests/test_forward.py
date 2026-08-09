@@ -206,6 +206,27 @@ class TestParseForwardMessages:
         assert messages[0]["content"] == "今天天气真好"
 
     @pytest.mark.asyncio
+    async def test_qqface_segment_uses_known_description_and_skips_unknown_id(self):
+        mock_bot = MagicMock()
+        mock_bot.call_api = AsyncMock(return_value={
+            "message": [{
+                "type": "node",
+                "data": {
+                    "user_id": "123456",
+                    "nickname": "张三",
+                    "content": [
+                        {"type": "face", "data": {"id": "14"}},
+                        {"type": "face", "data": {"id": "9999"}},
+                    ],
+                },
+            }]
+        })
+
+        messages = await self.forward.parse_forward_messages(mock_bot, "test_id")
+
+        assert messages[0]["content"] == "[qqface: 微笑]"
+
+    @pytest.mark.asyncio
     async def test_flat_forward_multiple_nodes(self):
         mock_bot = MagicMock()
         mock_bot.call_api = AsyncMock(return_value=[

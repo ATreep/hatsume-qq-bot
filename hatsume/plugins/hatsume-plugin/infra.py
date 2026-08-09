@@ -18,7 +18,13 @@ from typing import Any, BinaryIO
 
 from PIL import Image, UnidentifiedImageError
 
-from .config import CONTAINER_NAME_BASE, DOCKER_ENV_PATH, SHELL_TIMEOUT
+from .config import (
+    CONTAINER_NAME_BASE,
+    DOCKER_ENV_PATH,
+    IMAGE_MAX_PIXELS,
+    IMAGE_MAX_SIZE_BYTES,
+    SHELL_TIMEOUT,
+)
 from .group_runtime import get_current_group_id, validate_group_id
 
 # ===========================================================================
@@ -421,6 +427,47 @@ async def save_sandbox_user_image(
             temporary_path.unlink(missing_ok=True)
 
     return destination
+
+
+async def cache_sandbox_message_image(
+    image_bytes: bytes,
+    message_id: int,
+    image_order: int,
+    *,
+    group_id: int,
+) -> str:
+    """Validate and cache an inbound or outbound QQ message image."""
+    if len(image_bytes) > IMAGE_MAX_SIZE_BYTES:
+        size_mb = len(image_bytes) / (1024 * 1024)
+        raise ValueError(f"Image file size {size_mb:.2f}MB exceeds 9MB limit")
+
+    try:
+        with Image.open(BytesIO(image_bytes)) as image:
+            if image.width * image.height >= IMAGE_MAX_PIXELS:
+                raise ValueError(
+                    f"Image pixel size {image.width * image.height} "
+                    "exceeds 36000000 pixel limit"
+                )
+            image_format = image.format
+            image.verify()
+    except (UnidentifiedImageError, OSError, SyntaxError) as exc:
+        raise ValueError("message image is not a valid image") from exc
+
+    if not image_format:
+        raise ValueError("Image format could not be detected")
+    extension = image_format.lower()
+    if extension == "jpeg":
+        extension = "jpg"
+    if not extension.isalnum():
+        raise ValueError(f"Unsupported image format: {image_format}")
+
+    return await save_sandbox_user_image(
+        image_bytes,
+        message_id,
+        image_order,
+        extension,
+        group_id=group_id,
+    )
 
 
 async def copy_host_file_to_sandbox(

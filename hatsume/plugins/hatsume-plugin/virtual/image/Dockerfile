@@ -110,7 +110,7 @@ ENV PATH="/root/.local/bin:${PATH}" \
     ANTHROPIC_DEFAULT_HAIKU_MODEL="deepseek-v4-flash" \
     ANTHROPIC_AUTH_TOKEN="${DS_API_KEY}" \
     CLAUDE_CODE_SUBAGENT_MODEL="deepseek-v4-flash" \
-    CLAUDE_CODE_EFFORT_LEVEL="max" \
+    CLAUDE_CODE_EFFORT_LEVEL="high" \
     CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS="0" \
     GH_TOKEN="${GH_TOKEN}"
 

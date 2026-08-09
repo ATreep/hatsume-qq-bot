@@ -329,7 +329,6 @@ def _get_coding_agent_tools() -> list[Any]:
     from .tools import (
         generate_image,
         search_image,
-        search_web,
         shell_executor,
         skill_create,
         skill_download,
@@ -340,7 +339,8 @@ def _get_coding_agent_tools() -> list[Any]:
     return [
         shell_executor,
         skill_loader,
-        search_web,
+        # search_web,
+        {"type": "web_search"},
         search_image,
         skill_remove,
         skill_download,

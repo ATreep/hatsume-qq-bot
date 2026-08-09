@@ -83,8 +83,14 @@ def _setup_package_hierarchy() -> None:
         infra.cleanup_persistent_container = AsyncMock(return_value=False)
         infra.ensure_container_running = lambda: None
         infra.render_html_to_image = AsyncMock(return_value=b"")
+        infra.cache_sandbox_message_image = AsyncMock()
         sys.modules[infra_name] = infra
         sys.modules["hatsume.plugins.hatsume_plugin.infra"] = infra
+
+    infra = sys.modules[infra_name]
+    if not hasattr(infra, "cache_sandbox_message_image"):
+        infra.cache_sandbox_message_image = AsyncMock()
+    sys.modules["hatsume.plugins.hatsume_plugin.infra"] = infra
 
     # Stub models module
     models_name = "hatsume.plugins.hatsume-plugin.models"

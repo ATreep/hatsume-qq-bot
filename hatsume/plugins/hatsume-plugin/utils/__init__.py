@@ -44,9 +44,26 @@ async def render_cq_at_placeholders(
     group_id: int | None,
 ) -> tuple[str, list[int]]:
     """Replace CQ at placeholders with @display names and return IDs to notify."""
-    user_ids = extract_cq_at_user_ids(text)
-    if not user_ids:
+    mentions = await resolve_cq_at_mentions(text, group_id)
+    if not mentions:
         return text, []
+
+    mention_iter = iter(mentions)
+    rendered_text = CQ_AT_PATTERN.sub(
+        lambda _match: f"@{next(mention_iter)[1]}",
+        text,
+    )
+    return rendered_text, list(dict.fromkeys(uid for uid, _name in mentions))
+
+
+async def resolve_cq_at_mentions(
+    text: str,
+    group_id: int | None,
+) -> list[tuple[int, str]]:
+    """Resolve every CQ at placeholder to its QQ ID and group display name."""
+    mention_ids = [int(match.group(1)) for match in CQ_AT_PATTERN.finditer(text)]
+    if not mention_ids:
+        return []
 
     bot = None
     if group_id is not None:
@@ -58,7 +75,7 @@ async def render_cq_at_placeholders(
             bot = None
 
     display_names: dict[int, str] = {}
-    for uid in user_ids:
+    for uid in dict.fromkeys(mention_ids):
         if bot is None:
             display_names[uid] = str(uid)
             continue
@@ -67,11 +84,7 @@ async def render_cq_at_placeholders(
         except Exception:
             display_names[uid] = str(uid)
 
-    def _replace(match: re.Match[str]) -> str:
-        uid = int(match.group(1))
-        return f"@{display_names.get(uid, str(uid))}"
-
-    return CQ_AT_PATTERN.sub(_replace, text), user_ids
+    return [(uid, display_names.get(uid, str(uid))) for uid in mention_ids]
 
 
 def get_date() -> str:

@@ -7,11 +7,13 @@ import base64
 import importlib.util
 import sys
 import types
+from io import BytesIO
 from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
+from PIL import Image
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -33,6 +35,8 @@ def _load_infra():
     config = types.ModuleType("hatsume.plugins.hatsume_plugin.config")
     config.CONTAINER_NAME_BASE = "hatsume-space"
     config.DOCKER_ENV_PATH = Path("/tmp/hatsume-container-tests")
+    config.IMAGE_MAX_PIXELS = 36_000_000
+    config.IMAGE_MAX_SIZE_BYTES = 9 * 1024 * 1024
     config.SHELL_TIMEOUT = 10
     sys.modules[config.__name__] = config
 
@@ -322,6 +326,35 @@ async def test_user_image_copy_targets_current_group(monkeypatch):
         "hatsume-space-101:/tmp/hatsume-user-images/9-1.png"
     )
     assert not Path(create.await_args.args[2]).exists()
+
+
+@pytest.mark.asyncio
+async def test_message_image_cache_detects_format_and_uses_message_position(
+    monkeypatch,
+):
+    output = BytesIO()
+    Image.new("RGB", (2, 3), color="red").save(output, format="JPEG")
+    image_bytes = output.getvalue()
+    save = AsyncMock(return_value="/tmp/hatsume-user-images/44-2.jpg")
+    monkeypatch.setattr(infra, "save_sandbox_user_image", save)
+    cache_image = getattr(infra, "cache_sandbox_message_image", None)
+    assert cache_image is not None
+
+    result = await cache_image(
+        image_bytes,
+        44,
+        2,
+        group_id=101,
+    )
+
+    assert result == "/tmp/hatsume-user-images/44-2.jpg"
+    save.assert_awaited_once_with(
+        image_bytes,
+        44,
+        2,
+        "jpg",
+        group_id=101,
+    )
 
 
 @pytest.mark.asyncio

@@ -59,6 +59,7 @@ hatsume/plugins/hatsume-plugin/
 - `hatsume/plugins/hatsume-plugin/handlers/__init__.py`：handlers 包说明。
 - `hatsume/plugins/hatsume-plugin/handlers/dialogue.py`：消息标准化、队列、防抖、图启动和回复发送。
 - `hatsume/plugins/hatsume-plugin/handlers/forward.py`：OneBot forward 兼容层与递归解析。
+- `hatsume/plugins/hatsume-plugin/handlers/qqface.py`：QQ 系统表情 ID 到文本描述的映射；未知 ID 不进入模型文本。
 - `hatsume/plugins/hatsume-plugin/handlers/social.py`：点赞及本地排行榜。
 - `hatsume/plugins/hatsume-plugin/handlers/tools.py`：命令和戳一戳处理；戳一戳先检查群白名单，群相关操作显式绑定或选择目标 runtime。
 - `hatsume/plugins/hatsume-plugin/graph/__init__.py`：graph 包说明。

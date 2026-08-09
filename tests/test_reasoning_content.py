@@ -62,7 +62,7 @@ config_mod.DS_API_KEY = "test-key"
 config_mod.GPT_5_4_NANO = "gpt-5.4-nano-2026-03-17:stable"
 config_mod.KEGEAI_API_KEY = "test-key"
 config_mod.OPENCODE_API_KEY = "test-key"
-config_mod.get_api_key = lambda prov=None: "test-key"
+config_mod.get_api_key = lambda prov=None: lambda: "test-key"
 config_mod.get_base_url = lambda prov=None: "https://ai.kegeai.top/v1"
 sys.modules["hatsume.plugins.hatsume-plugin.config"] = config_mod
 

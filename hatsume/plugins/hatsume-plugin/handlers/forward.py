@@ -12,6 +12,7 @@ from nonebot.adapters.onebot.v11 import Message
 
 from ..config import FORWARD_API_TIMEOUT_SECONDS, MAX_FORWARD_DEPTH
 from ..utils import message_to_json
+from .qqface import render_qqface
 
 logger = logging.getLogger(__name__)
 
@@ -176,7 +177,7 @@ def _render_segment(segment_type: str, data: dict[str, Any]) -> str:
     if segment_type == "at":
         return f" @{data.get('qq', '未知用户')} "
     if segment_type == "face":
-        return f" [表情 id={data.get('id', '')}] "
+        return render_qqface(data)
     if segment_type in {"record", "video"}:
         source = data.get("url") or data.get("file", "")
         return f" [{segment_type} {source}] "

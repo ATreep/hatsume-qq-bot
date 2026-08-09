@@ -64,6 +64,7 @@ def _load_handler():
     sys.modules[group_runtime.__name__] = group_runtime
 
     infra = types.ModuleType(f"{BASE_NAME}.infra")
+    infra.cache_sandbox_message_image = AsyncMock()
     infra.cleanup_persistent_container = AsyncMock()
     infra.run_cmd = AsyncMock()
     sys.modules[infra.__name__] = infra
@@ -108,3 +109,26 @@ async def test_poke_in_whitelist_reaches_photo_export():
 
     registry.bind_bot.assert_called_once_with(ALLOWED_GROUP_ID, bot)
     graph_tools._export_random_acg_photo.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_poke_image_is_cached_by_sent_message_id(tmp_path):
+    handler, graph_tools, _ = _load_handler()
+    image_path = tmp_path / "poke.png"
+    image_bytes = b"bot image bytes"
+    image_path.write_bytes(image_bytes)
+    graph_tools._export_random_acg_photo.return_value = str(image_path)
+    bot = types.SimpleNamespace(
+        send=AsyncMock(return_value={"message_id": 2468})
+    )
+    event = types.SimpleNamespace(group_id=ALLOWED_GROUP_ID)
+    infra = sys.modules[f"{BASE_NAME}.infra"]
+
+    await handler.handle_poke(bot, event)
+
+    infra.cache_sandbox_message_image.assert_awaited_once_with(
+        image_bytes,
+        2468,
+        1,
+        group_id=ALLOWED_GROUP_ID,
+    )

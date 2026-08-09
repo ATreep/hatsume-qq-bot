@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import importlib.util
 import re
 import sys
@@ -56,6 +57,7 @@ def _stub_config():
     mod.FORWARD_API_TIMEOUT_SECONDS = 10
     mod.MESSAGE_MAX_LENGTH = 2000
     mod.REPLY_MAX_LENGTH = 200
+    mod.MAX_REAL_AT_SEGMENTS = 3
     mod.USER_INPUT_CONFIRM_DURING_TIME = 3
     mod.DOCKER_ENV_PATH = "/tmp"
     mod.SHELL_MAX_OUTPUT = 1000
@@ -222,7 +224,12 @@ def _load_conversation_module():
     )
     utils_mod.mask_secret_keys = MagicMock(side_effect=lambda text: text)
     utils_mod.message_to_json = MagicMock(return_value={})
-    utils_mod.render_cq_at_placeholders = AsyncMock(side_effect=lambda text, group_id: (text, []))
+    utils_mod.resolve_cq_at_mentions = AsyncMock(
+        side_effect=lambda text, group_id: [
+            (int(match.group(1)), str(match.group(1)))
+            for match in utils_mod.CQ_AT_PATTERN.finditer(text)
+        ]
+    )
 
     # Stub memory.engine (imported by tools.py)
     mem_engine_name = "hatsume.plugins.hatsume-plugin.memory.engine"
@@ -773,7 +780,9 @@ def test_handle_ai_message_replaces_cq_at_in_pure_text():
     dialogue.auto_convert_text = AsyncMock(
         return_value=[types.SimpleNamespace(type="text", data={"text": "hi @Treep"})]
     )
-    dialogue.render_cq_at_placeholders = AsyncMock(return_value=("hi @Treep", [123456]))
+    dialogue.resolve_cq_at_mentions = AsyncMock(
+        return_value=[(123456, "Treep")]
+    )
     dialogue.MessageSegment.text = MagicMock(
         side_effect=lambda text: types.SimpleNamespace(type="text", data={"text": text})
     )
@@ -790,11 +799,104 @@ def test_handle_ai_message_replaces_cq_at_in_pure_text():
     assert payload[1].data["qq"] == 123456
 
 
+def test_handle_ai_message_limits_real_at_segments_and_renders_overflow_names():
+    dialogue = _load_conversation_module()
+    names = {
+        101: "Alice",
+        102: "Bob",
+        103: "Carol",
+        104: "Dave",
+        105: "Eve",
+    }
+
+    dialogue.resolve_cq_at_mentions = AsyncMock(
+        side_effect=lambda text, group_id: [
+            (int(match.group(1)), names[int(match.group(1))])
+            for match in dialogue.CQ_AT_PATTERN.finditer(text)
+        ]
+    )
+    dialogue.auto_convert_text = AsyncMock(
+        side_effect=lambda text: [
+            types.SimpleNamespace(type="text", data={"text": text})
+        ]
+    )
+    dialogue.MessageSegment.text = MagicMock(
+        side_effect=lambda text: types.SimpleNamespace(
+            type="text", data={"text": text}
+        )
+    )
+    dialogue.MessageSegment.at = MagicMock(
+        side_effect=lambda uid: types.SimpleNamespace(type="at", data={"qq": uid})
+    )
+    bot = types.SimpleNamespace(send_group_msg=AsyncMock())
+
+    asyncio.run(
+        dialogue.handle_ai_message(
+            "[CQ:at,qq=101], [CQ:at,qq=102], [CQ:at,qq=103], "
+            "[CQ:at,qq=104], [CQ:at,qq=105]",
+            bot,
+            group_id=7,
+        )
+    )
+
+    payload = bot.send_group_msg.await_args.kwargs["message"]
+    assert [seg.data["qq"] for seg in payload if seg.type == "at"] == [101, 102, 103]
+    text = "".join(seg.data["text"] for seg in payload if seg.type == "text")
+    assert text == ", , , @Dave, @Eve"
+
+
+def test_handle_ai_message_shares_at_limit_across_text_segments():
+    dialogue = _load_conversation_module()
+    names = {101: "Alice", 102: "Bob", 103: "Carol", 104: "Dave"}
+    dialogue.resolve_cq_at_mentions = AsyncMock(
+        side_effect=lambda text, group_id: [
+            (int(match.group(1)), names[int(match.group(1))])
+            for match in dialogue.CQ_AT_PATTERN.finditer(text)
+        ]
+    )
+    dialogue.auto_convert_text = AsyncMock(
+        side_effect=lambda text: [
+            types.SimpleNamespace(type="text", data={"text": text})
+        ]
+    )
+    dialogue.MessageSegment.text = MagicMock(
+        side_effect=lambda text: types.SimpleNamespace(
+            type="text", data={"text": text}
+        )
+    )
+    dialogue.MessageSegment.at = MagicMock(
+        side_effect=lambda uid: types.SimpleNamespace(type="at", data={"qq": uid})
+    )
+    bot = types.SimpleNamespace(send_group_msg=AsyncMock())
+    message = dialogue.Message(
+        [
+            types.SimpleNamespace(
+                type="text",
+                data={"text": "[CQ:at,qq=101] [CQ:at,qq=102] "},
+            ),
+            types.SimpleNamespace(
+                type="text",
+                data={"text": "[CQ:at,qq=103] [CQ:at,qq=104]"},
+            ),
+        ]
+    )
+
+    asyncio.run(dialogue.handle_ai_message(message, bot, group_id=7))
+
+    payload = bot.send_group_msg.await_args.kwargs["message"]
+    assert [seg.data["qq"] for seg in payload if seg.type == "at"] == [101, 102, 103]
+    assert "@Dave" in [
+        seg.data["text"] for seg in payload if seg.type == "text"
+    ]
+
+
 def test_handle_ai_message_puts_cq_at_segments_before_rendered_image():
     dialogue = _load_conversation_module()
     image_seg = types.SimpleNamespace(type="image", data={"file": "img"})
     dialogue.auto_convert_text = AsyncMock(return_value=[image_seg])
-    dialogue.render_cq_at_placeholders = AsyncMock(return_value=("# @Treep\nresult", [123456]))
+    dialogue.resolve_cq_at_mentions = AsyncMock(
+        return_value=[(123456, "Treep")]
+    )
     dialogue.MessageSegment.at = MagicMock(
         side_effect=lambda uid: types.SimpleNamespace(type="at", data={"qq": uid})
     )
@@ -805,6 +907,56 @@ def test_handle_ai_message_puts_cq_at_segments_before_rendered_image():
     payload = bot.send_group_msg.await_args.kwargs["message"]
     assert [seg.type for seg in payload] == ["at", "image"]
     assert payload[0].data["qq"] == 123456
+
+
+def test_handle_ai_message_limits_at_segments_before_rendered_image():
+    dialogue = _load_conversation_module()
+    names = {
+        101: "Alice",
+        102: "Bob",
+        103: "Carol",
+        104: "Dave",
+        105: "Eve",
+    }
+
+    image_seg = types.SimpleNamespace(type="image", data={"file": "img"})
+    dialogue.resolve_cq_at_mentions = AsyncMock(
+        side_effect=lambda text, group_id: [
+            (int(match.group(1)), names[int(match.group(1))])
+            for match in dialogue.CQ_AT_PATTERN.finditer(text)
+        ]
+    )
+    dialogue.auto_convert_text = AsyncMock(return_value=[image_seg])
+    dialogue.MessageSegment.text = MagicMock(
+        side_effect=lambda text: types.SimpleNamespace(
+            type="text", data={"text": text}
+        )
+    )
+    dialogue.MessageSegment.at = MagicMock(
+        side_effect=lambda uid: types.SimpleNamespace(type="at", data={"qq": uid})
+    )
+    bot = types.SimpleNamespace(send_group_msg=AsyncMock())
+
+    asyncio.run(
+        dialogue.handle_ai_message(
+            "# [CQ:at,qq=101] [CQ:at,qq=102] [CQ:at,qq=103] "
+            "[CQ:at,qq=104] [CQ:at,qq=105]",
+            bot,
+            group_id=7,
+        )
+    )
+
+    payload = bot.send_group_msg.await_args.kwargs["message"]
+    assert [seg.type for seg in payload] == [
+        "at",
+        "at",
+        "at",
+        "text",
+        "text",
+        "image",
+    ]
+    assert [seg.data["qq"] for seg in payload[:3]] == [101, 102, 103]
+    assert [seg.data["text"] for seg in payload[3:5]] == ["@Dave", "@Eve"]
 
 
 def _make_received_event(
@@ -839,6 +991,138 @@ def _image_response(image_format: str):
     return response
 
 
+def test_handle_ai_message_caches_rendered_image_by_sent_message_id():
+    dialogue = _load_conversation_module()
+    image_bytes = _make_image_bytes("PNG")
+    encoded = base64.b64encode(image_bytes).decode("ascii")
+    image_segment = types.SimpleNamespace(
+        type="image",
+        data={"file": f"base64://{encoded}"},
+    )
+    dialogue.auto_convert_text = AsyncMock(return_value=[image_segment])
+    dialogue.save_sandbox_user_image = AsyncMock(
+        return_value="/tmp/hatsume-user-images/812-1.png"
+    )
+    bot = types.SimpleNamespace(
+        send_group_msg=AsyncMock(return_value={"message_id": 812})
+    )
+
+    asyncio.run(dialogue.handle_ai_message("# rendered", bot, group_id=7))
+
+    dialogue.save_sandbox_user_image.assert_awaited_once_with(
+        image_bytes,
+        812,
+        1,
+        "png",
+        group_id=7,
+    )
+
+
+def test_bot_image_cache_is_reused_when_user_replies():
+    dialogue = _load_conversation_module()
+    image_bytes = _make_image_bytes("PNG")
+    encoded = base64.b64encode(image_bytes).decode("ascii")
+    image_segment = types.SimpleNamespace(
+        type="image",
+        data={"file": f"base64://{encoded}"},
+    )
+    cached_paths: dict[tuple[int, int, int], str] = {}
+
+    async def save_image(
+        _image_bytes,
+        message_id,
+        image_order,
+        extension,
+        *,
+        group_id,
+    ):
+        path = (
+            f"/tmp/hatsume-user-images/{message_id}-{image_order}.{extension}"
+        )
+        cached_paths[(group_id, message_id, image_order)] = path
+        return path
+
+    async def find_image(message_id, image_order, *, group_id):
+        return cached_paths.get((group_id, message_id, image_order))
+
+    dialogue.auto_convert_text = AsyncMock(return_value=[image_segment])
+    dialogue.save_sandbox_user_image = AsyncMock(side_effect=save_image)
+    dialogue.find_sandbox_user_image = AsyncMock(side_effect=find_image)
+    bot = types.SimpleNamespace(
+        send_group_msg=AsyncMock(return_value={"message_id": 812})
+    )
+
+    asyncio.run(dialogue.handle_ai_message("# rendered", bot, group_id=7))
+
+    dialogue.message_to_json.reset_mock()
+    dialogue.message_to_json.return_value = {"type": "message"}
+    dialogue.has_forward_segment = MagicMock(return_value=None)
+    dialogue.requests.get = MagicMock()
+    reply = types.SimpleNamespace(
+        message_id=812,
+        sender=types.SimpleNamespace(user_id=84),
+        message=dialogue.Message(
+            [
+                types.SimpleNamespace(type="text", data={"text": "bot image"}),
+                types.SimpleNamespace(
+                    type="image",
+                    data={"url": "https://qq/temporary-bot-image"},
+                ),
+            ]
+        ),
+    )
+    event = _make_received_event(
+        dialogue,
+        message_id=813,
+        segments=[types.SimpleNamespace(type="text", data={"text": "look"})],
+        reply=reply,
+    )
+
+    asyncio.run(dialogue.get_human_message(MagicMock(), event))
+
+    reply_to = dialogue.message_to_json.call_args.kwargs["reply_to"]
+    assert reply_to["content"] == (
+        "bot image ![图片](/tmp/hatsume-user-images/812-1.png) "
+    )
+    dialogue.find_sandbox_user_image.assert_awaited_once_with(
+        812,
+        1,
+        group_id=7,
+    )
+    dialogue.requests.get.assert_not_called()
+
+
+def test_handle_ai_message_caches_http_image_by_sent_message_id():
+    dialogue = _load_conversation_module()
+    image_bytes = _make_image_bytes("JPEG")
+    image_segment = types.SimpleNamespace(
+        type="image",
+        data={"file": "https://qq.example/bot-image"},
+    )
+    dialogue.auto_convert_text = AsyncMock(return_value=[image_segment])
+    dialogue.requests.get = MagicMock(return_value=_image_response("JPEG"))
+    dialogue.save_sandbox_user_image = AsyncMock(
+        return_value="/tmp/hatsume-user-images/913-1.jpg"
+    )
+    bot = types.SimpleNamespace(
+        send_group_msg=AsyncMock(return_value={"message_id": 913})
+    )
+
+    asyncio.run(dialogue.handle_ai_message(image_segment, bot, group_id=7))
+
+    dialogue.requests.get.assert_called_once_with(
+        "https://qq.example/bot-image",
+        timeout=10,
+    )
+    dialogue.save_sandbox_user_image.assert_awaited_once_with(
+        image_bytes,
+        913,
+        1,
+        "jpg",
+        group_id=7,
+    )
+
+
 def test_get_human_message_passes_normal_event_message_id():
     dialogue = _load_conversation_module()
     dialogue.message_to_json.reset_mock()
@@ -854,6 +1138,55 @@ def test_get_human_message_passes_normal_event_message_id():
 
     assert dialogue.message_to_json.call_args.kwargs["message_id"] == 321
     assert source["source_id"] == "m321"
+
+
+def test_get_human_message_renders_known_qqfaces_and_skips_unknown_ids():
+    dialogue = _load_conversation_module()
+    dialogue.message_to_json.reset_mock()
+    dialogue.message_to_json.return_value = {"type": "message"}
+    dialogue.has_forward_segment = MagicMock(return_value=None)
+    event = _make_received_event(
+        dialogue,
+        message_id=322,
+        segments=[
+            types.SimpleNamespace(type="text", data={"text": "before"}),
+            types.SimpleNamespace(type="face", data={"id": "14"}),
+            types.SimpleNamespace(type="face", data={"id": "9999"}),
+            types.SimpleNamespace(type="text", data={"text": "after"}),
+        ],
+    )
+
+    asyncio.run(dialogue.get_human_message(MagicMock(), event))
+
+    assert dialogue.message_to_json.call_args.args[2] == "before[qqface: 微笑]after"
+
+
+def test_get_human_message_renders_qqface_in_replied_message():
+    dialogue = _load_conversation_module()
+    dialogue.message_to_json.reset_mock()
+    dialogue.message_to_json.return_value = {"type": "message"}
+    dialogue.has_forward_segment = MagicMock(return_value=None)
+    reply = types.SimpleNamespace(
+        message_id=320,
+        sender=types.SimpleNamespace(user_id=84),
+        message=dialogue.Message(
+            [
+                types.SimpleNamespace(type="text", data={"text": "old"}),
+                types.SimpleNamespace(type="face", data={"id": 14}),
+            ]
+        ),
+    )
+    event = _make_received_event(
+        dialogue,
+        message_id=323,
+        segments=[types.SimpleNamespace(type="text", data={"text": "replying"})],
+        reply=reply,
+    )
+
+    asyncio.run(dialogue.get_human_message(MagicMock(), event))
+
+    reply_to = dialogue.message_to_json.call_args.kwargs["reply_to"]
+    assert reply_to["content"] == "old[qqface: 微笑]"
 
 
 def test_get_human_message_passes_forward_event_message_id():
@@ -1226,8 +1559,8 @@ def test_reply_segment_stays_first_with_cq_at_output():
     dialogue.auto_convert_text = AsyncMock(
         return_value=[types.SimpleNamespace(type="text", data={"text": "hi @Treep"})]
     )
-    dialogue.render_cq_at_placeholders = AsyncMock(
-        return_value=("hi @Treep", [123456])
+    dialogue.resolve_cq_at_mentions = AsyncMock(
+        return_value=[(123456, "Treep")]
     )
     dialogue.MessageSegment.text = MagicMock(
         side_effect=lambda text: types.SimpleNamespace(

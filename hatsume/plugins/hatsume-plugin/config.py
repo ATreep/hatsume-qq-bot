@@ -39,7 +39,7 @@ AR_API_KET = os.environ.get("AR_API_KEY", "")
 RUOLI_API_KEY = os.environ.get("ROULI_API_KEY", "")
 PIXELS_API_KEY: str = os.environ.get("PIXELS_API_KEY", "")
 WAWAPI_API_KEY: str = os.environ.get("WAWAPI_API_KEY", "")
-
+WAWAPI_IMAGE_API_KEY: str = os.environ.get("WAWAPI_IMAGE_API_KEY", "")
 # ---------------------------------------------------------------------------
 # Base URLs (No `v1` suffix)
 # ---------------------------------------------------------------------------
@@ -65,6 +65,7 @@ DOUBAO_2_LITE: str = "doubao-seed-2-0-lite"
 DOUBAO_2_MINI: str = "doubao-seed-2-0-mini"
 DEEPSEEK_V4_FLASH = "deepseek-v4-flash"
 SEEDREAM_5_0_LITE: str = "doubao-seedream-5.0-lite"
+SEEDREAM_4_0 = "doubao-seedream-4-0-250828"
 SEEDANCE_1_5: str = "doubao-seedance-1-5-pro-251215"
 SEEDANCE_1_0: str = "doubao-seedance-1-0-pro-250528"
 GPT_IMAGE_2 = "gpt-image-2:stable"
@@ -75,8 +76,8 @@ GEMINI_3_5_FLASH = "gemini-3.5-flash"
 GROK_4_5 = "grok-4.5"
 GROK_IMAGINE_IMAGE = "grok-imagine-image:stable"
 
-ADVANCE_MODEL_NAME: str = DEEPSEEK_V4_FLASH
-LITE_MODEL_NAME =  DEEPSEEK_V4_FLASH
+ADVANCE_MODEL_NAME: str = GPT_5_6_LUNA
+LITE_MODEL_NAME =  GPT_5_6_LUNA
 
 
 # ---------------------------------------------------------------------------
@@ -87,7 +88,7 @@ EMBEDDING_MODEL: str = "BAAI/bge-m3"
 # ---------------------------------------------------------------------------
 # Provider selection
 # ---------------------------------------------------------------------------
-PROVIDER: Literal["volc", "volc_plan", "kege", "zhth", "ar", "ruoli", "ds", "waw"] = "ds"
+PROVIDER: Literal["volc", "volc_plan", "kege", "zhth", "ar", "ruoli", "ds", "waw"] = "zhth"
 
 def get_base_url(
     provider: Literal["volc", "volc_plan", "sf", "kege", "zhth", "ar", "ruoli", "ds", "waw"] = PROVIDER,
@@ -143,12 +144,13 @@ USER_INPUT_CONFIRM_DURING_TIME: int = 10
 CONTEXT_QUEUE_LEN: int = 60
 CONTEXT_QUEUE_OVERLAP_LEN: int = 7
 VIDEO_RATE_LIMIT_SECONDS: int = 60
-GENERATE_IMAGE_RATE_LIMIT_SECONDS: int = 60
+GENERATE_IMAGE_RATE_LIMIT_SECONDS: int = 180
 IMAGE_MAX_SIZE_BYTES: int = 9 * 1024 * 1024
 IMAGE_MAX_PIXELS: int = 36_000_000
 MESSAGE_MAX_LENGTH: int = 2000
 REPLY_MAX_LENGTH: int = 200
 MAX_FORWARD_DEPTH: int = 3
+MAX_REAL_AT_SEGMENTS: int = 3
 FORWARD_API_TIMEOUT_SECONDS: int = 10
 LONG_MSG_THRESHOLD: int = 500
 POKE_GROUP_WHITELIST: frozenset[int] = frozenset({738458661})
@@ -163,7 +165,7 @@ TODO_EXPIRY_SECONDS: int = 48 * 60 * 60
 # Auto response timer
 # ---------------------------------------------------------------------------
 AUTO_RESPONSE_GROUP_BLACKLIST: frozenset[int] = frozenset(
-    {376347217, 579996918}
+    {376347217, 579996918, 902317662}
 )
 AUTO_RESPONSE_MIN_INTERVAL_MINUTES: int = 30
 AUTO_RESPONSE_MAX_INTERVAL_MINUTES: int = 120

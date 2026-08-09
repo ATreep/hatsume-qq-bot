@@ -66,6 +66,9 @@ MEMORY_RECORD_PATTERN = re.compile(
     re.DOTALL,
 )
 REPLY_DIRECTIVE_PATTERN = re.compile(r"\[[ \t]*reply:\s*([^\]\r\n]*)\]")
+NON_TEXT_MARK_PATTERN = re.compile(
+    r"\[[ \t]*[^\[\]:\r\n]+:[^\]\r\n]*\]"
+)
 SYSTEM_TRIGGER_KEY = "_hatsume_system_trigger"
 ADMIN_MODE_KEYWORD = "BYPASS"
 
@@ -283,6 +286,40 @@ def _parse_reply_directive(
     if target not in replyable_ids:
         return cleaned, None
     return cleaned, target
+
+
+def _message_text(message: Any) -> str:
+    """Return user-facing text from an AI message, ignoring tool messages."""
+    if getattr(message, "type", None) != "ai":
+        return ""
+    content = getattr(message, "content", "")
+    if isinstance(content, list):
+        return "".join(
+            part.get("text", "") if isinstance(part, dict) else str(part)
+            for part in content
+        )
+    return str(content or "")
+
+
+def _has_visible_text(text: str) -> bool:
+    """Return whether text contains more than model control marks."""
+    without_memory = MEMORY_RECORD_PATTERN.sub("", text)
+    without_known_marks = FACE_TAG_PATTERN.sub("", without_memory)
+    without_known_marks = REPLY_DIRECTIVE_PATTERN.sub("", without_known_marks)
+    return bool(NON_TEXT_MARK_PATTERN.sub("", without_known_marks).strip())
+
+
+def _new_agent_messages(
+    invocation_messages: list[Any], response_messages: list[Any]
+) -> list[Any]:
+    """Return messages appended by one agent invocation."""
+    input_count = len(invocation_messages)
+    if (
+        len(response_messages) >= input_count
+        and response_messages[:input_count] == invocation_messages
+    ):
+        return response_messages[input_count:]
+    return response_messages
 
 
 # ---------------------------------------------------------------------------
@@ -656,19 +693,38 @@ async def ai_node(state: MessagesState) -> dict:
             agent_messages = _without_image_url_parts(agent_messages)
         replyable_message_ids = _extract_replyable_message_ids(agent_messages)
         set_shell_executor_limit(3)  # chat_agent: max 3 shell_executor calls per round
-        response = await chat_agent.with_retry(
-            stop_after_attempt=5
-        ).ainvoke(
-            {"messages": agent_messages},  # type: ignore
-            {"recursion_limit": 20},
-        )
-        ai_text = response["messages"][-1].content
-        if isinstance(ai_text, list):
-            # Flatten list content to string (some models return content as list)
-            ai_text = "".join(
-                part.get("text", "") if isinstance(part, dict) else str(part)
-                for part in ai_text
+        retrying_agent = chat_agent.with_retry(stop_after_attempt=5)
+        invocation_messages = agent_messages
+        response_texts: list[str] = []
+        for attempt in range(2):
+            response = await retrying_agent.ainvoke(
+                {"messages": invocation_messages},  # type: ignore
+                {"recursion_limit": 20},
             )
+            response_messages = response.get("messages", [])
+            new_messages = _new_agent_messages(
+                invocation_messages, response_messages
+            )
+            for message in new_messages[:-1]:
+                control_text = _message_text(message)
+                if control_text and not _has_visible_text(control_text):
+                    response_texts.append(control_text)
+            current_text = (
+                _message_text(new_messages[-1]) if new_messages else ""
+            )
+            if current_text:
+                response_texts.append(current_text)
+            if (
+                _has_visible_text(current_text)
+                or conversation_state.end_requested
+                or attempt == 1
+            ):
+                break
+            print("No visible AI text returned; invoking chat_agent again...")
+            if response_messages:
+                invocation_messages = response_messages
+
+        ai_text = "\n".join(response_texts)
 
         # LLM outputs plain text directly
         print(f"Raw AI response: {ai_text}")
