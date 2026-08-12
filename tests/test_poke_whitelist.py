@@ -3,19 +3,33 @@
 from __future__ import annotations
 
 import contextlib
+import ast
 import importlib.util
 import sys
 import types
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
 PLUGIN_DIR = ROOT / "hatsume/plugins/hatsume-plugin"
+GRAPH_TOOLS_PATH = PLUGIN_DIR / "graph/tools.py"
 BASE_NAME = "hatsume.plugins.hatsume-plugin"
 ALLOWED_GROUP_ID = 738458661
+
+
+def test_random_acg_photo_is_not_exposed_as_a_graph_tool():
+    module = ast.parse(GRAPH_TOOLS_PATH.read_text(encoding="utf-8"))
+    names = {
+        node.name
+        for node in module.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+
+    assert "random_acg_photo" not in names
+    assert "_export_random_acg_photo" not in names
 
 
 def _load_handler():
@@ -69,11 +83,6 @@ def _load_handler():
     infra.run_cmd = AsyncMock()
     sys.modules[infra.__name__] = infra
 
-    graph_tools = types.ModuleType(f"{BASE_NAME}.graph.tools")
-    graph_tools._export_random_acg_photo = AsyncMock(return_value="error")
-    graph_tools._cleanup_exported_acg_photo = MagicMock()
-    sys.modules[graph_tools.__name__] = graph_tools
-
     module_name = f"{BASE_NAME}.handlers.tools"
     spec = importlib.util.spec_from_file_location(
         module_name,
@@ -83,52 +92,138 @@ def _load_handler():
     module = importlib.util.module_from_spec(spec)
     sys.modules[module_name] = module
     spec.loader.exec_module(module)
-    return module, graph_tools, registry
+    return module, registry
 
 
 @pytest.mark.asyncio
 async def test_poke_outside_whitelist_is_silent():
-    handler, graph_tools, registry = _load_handler()
+    handler, registry = _load_handler()
     bot = types.SimpleNamespace(send=AsyncMock())
     event = types.SimpleNamespace(group_id=123456789)
+    export_photo = AsyncMock(return_value="error")
 
-    await handler.handle_poke(bot, event)
+    with patch.object(handler, "_export_random_acg_photo", export_photo):
+        await handler.handle_poke(bot, event)
 
-    graph_tools._export_random_acg_photo.assert_not_awaited()
+    export_photo.assert_not_awaited()
     registry.bind_bot.assert_not_called()
     bot.send.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_poke_in_whitelist_reaches_photo_export():
-    handler, graph_tools, registry = _load_handler()
+    handler, registry = _load_handler()
     bot = types.SimpleNamespace(send=AsyncMock())
     event = types.SimpleNamespace(group_id=ALLOWED_GROUP_ID)
+    export_photo = AsyncMock(return_value="error")
 
-    await handler.handle_poke(bot, event)
+    with patch.object(handler, "_export_random_acg_photo", export_photo):
+        await handler.handle_poke(bot, event)
 
     registry.bind_bot.assert_called_once_with(ALLOWED_GROUP_ID, bot)
-    graph_tools._export_random_acg_photo.assert_awaited_once_with()
+    export_photo.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio
 async def test_poke_image_is_cached_by_sent_message_id(tmp_path):
-    handler, graph_tools, _ = _load_handler()
+    handler, _ = _load_handler()
     image_path = tmp_path / "poke.png"
     image_bytes = b"bot image bytes"
     image_path.write_bytes(image_bytes)
-    graph_tools._export_random_acg_photo.return_value = str(image_path)
     bot = types.SimpleNamespace(
         send=AsyncMock(return_value={"message_id": 2468})
     )
     event = types.SimpleNamespace(group_id=ALLOWED_GROUP_ID)
     infra = sys.modules[f"{BASE_NAME}.infra"]
+    export_photo = AsyncMock(return_value=str(image_path))
+    cleanup_photo = MagicMock()
 
-    await handler.handle_poke(bot, event)
+    with (
+        patch.object(handler, "_export_random_acg_photo", export_photo),
+        patch.object(handler, "_cleanup_exported_acg_photo", cleanup_photo),
+    ):
+        await handler.handle_poke(bot, event)
 
     infra.cache_sandbox_message_image.assert_awaited_once_with(
         image_bytes,
         2468,
         1,
         group_id=ALLOWED_GROUP_ID,
+    )
+    cleanup_photo.assert_called_once_with(str(image_path))
+
+
+@pytest.mark.asyncio
+async def test_handler_export_returns_host_path_from_unique_directory():
+    handler, _ = _load_handler()
+    process = MagicMock(returncode=0, stdout=b"", stderr=b"")
+
+    with (
+        patch.object(handler.subprocess, "run", return_value=process),
+        patch.object(
+            handler.tempfile,
+            "mkdtemp",
+            return_value="/tmp/hatsume-acg-export-test",
+        ),
+        patch.object(handler._os, "listdir", return_value=["IMG_1234.jpg"]),
+        patch.object(handler._os.path, "isfile", return_value=True),
+        patch("shutil.rmtree") as remove_tree,
+    ):
+        result = await handler._export_random_acg_photo()
+
+    assert result == "/tmp/hatsume-acg-export-test/IMG_1234.jpg"
+    remove_tree.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_handler_export_cleans_directory_when_album_is_empty():
+    handler, _ = _load_handler()
+    process = MagicMock(
+        returncode=0,
+        stdout=b"ERROR:ALBUM_EMPTY",
+        stderr=b"",
+    )
+
+    with (
+        patch.object(handler.subprocess, "run", return_value=process),
+        patch.object(
+            handler.tempfile,
+            "mkdtemp",
+            return_value="/tmp/hatsume-acg-export-test",
+        ),
+        patch("shutil.rmtree") as remove_tree,
+    ):
+        result = await handler._export_random_acg_photo()
+
+    assert "没有照片" in result
+    remove_tree.assert_called_once_with(
+        "/tmp/hatsume-acg-export-test",
+        ignore_errors=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_handler_export_reports_when_photos_is_not_running():
+    handler, _ = _load_handler()
+    process = MagicMock(
+        returncode=1,
+        stdout=b"",
+        stderr=b"Application isn't running (-600)",
+    )
+
+    with (
+        patch.object(handler.subprocess, "run", return_value=process),
+        patch.object(
+            handler.tempfile,
+            "mkdtemp",
+            return_value="/tmp/hatsume-acg-export-test",
+        ),
+        patch("shutil.rmtree") as remove_tree,
+    ):
+        result = await handler._export_random_acg_photo()
+
+    assert "无法访问 Photos 应用" in result
+    remove_tree.assert_called_once_with(
+        "/tmp/hatsume-acg-export-test",
+        ignore_errors=True,
     )

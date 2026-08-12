@@ -21,7 +21,7 @@ Hatsume 是 Python 3.12+ 的 QQ 群聊 AI 机器人，以 NoneBot2 插件运行�
 - 对话：@/关键词触发、每群单图串行、跨群并行、空闲旁听、10 秒输入合并、5 分钟等待、结束检测、辅助上下文压缩、Markdown 图片化。
 - 消息：文本、回复、@、图片、多模态输入、OneBot 标准/厂商变体合并转发、嵌套 forward。
 - 记忆：按群隔离的可重复 `[memory: ... MEMORYCONTENTEND, keyman: ...]` 记忆卡写入、SQLite LIKE、临时 BM25、Milvus Lite + BGE-M3、150 天清理。
-- 工具：搜索、Shell、记忆、图片/视频生成、图片发送、QQ 头像、ACG 相册、Timer、Skill、成员搜索、Agent 派发、stdin 回复。
+- 工具：搜索、Shell、记忆、图片/视频生成、图片发送、QQ 头像、Timer、Skill、成员搜索、Agent 派发、stdin 回复。
 - Agent：`coding_agent`、`background_shell`、实例状态、中间通知、完成通知、交互输入。
 - Timer：普通多触发任务、群内管理、重启恢复、漏触发补偿、按非黑名单 activated group 独立自动回复。
 - 社交：点赞、累计点赞排行榜、白名单群戳一戳随机图片。

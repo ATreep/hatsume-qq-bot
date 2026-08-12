@@ -45,7 +45,7 @@ flowchart LR
 | 联网搜索 | web_search | 使用模型供应商原生联网搜索 | graph/tools.py |
 | QQ 头像 | get_avatar | 返回指定 QQ 号的头像 URL | graph/tools.py、`utils/__init__.py` |
 | 图片查看 | view_image | 使用 ZHTH 的 `GPT_5_6_LUNA` 专用客户端描述 HTTP/HTTPS 或沙盒 file:// 图片 | graph/tools.py、models.py、infra.py |
-| 随机 ACG 图片 | 白名单群戳一戳或 random_acg_photo | 从 macOS Photos 的 ACG 相册导出，可直接发送或复制到沙盒；非白名单群的戳一戳静默返回 | handlers/tools.py、graph/tools.py |
+| 随机 ACG 图片 | 白名单群戳一戳 | 从 macOS Photos 的 ACG 相册导出并直接发送；非白名单群静默返回 | handlers/tools.py |
 | 图片发送 | send_image | 支持 HTTP、base64 和沙盒 file:// 文件，每轮最多三张 | graph/tools.py |
 | 图片生成 | generate_image | 在 Seedream 与兼容图像接口之间选择，支持参考图和限流 | graph/tools.py、models.py、state.py |
 | 视频发送 | send_video | 支持 HTTP URL、沙盒绝对路径和沙盒 file:// 文件，每轮最多一个 | graph/tools.py |
@@ -456,7 +456,6 @@ flowchart LR
 | send_image | 发送 HTTP、base64 或沙盒文件；每轮最多三张 |
 | send_video | 发送 HTTP URL、沙盒绝对路径或沙盒文件；每轮最多一个 |
 | get_avatar | 获取 QQ 头像 URL |
-| random_acg_photo | 从 macOS Photos 导出 ACG 图片到沙盒 |
 | create_daily_timer | 创建含起止边界、1..5 个 `HH:MM:SS` 点和天间隔的任务；未指定结束时间时由 Agent 推断并在创建后告知用户 |
 | create_weekly_timer | 创建含 weekday/time 周期点和周间隔的任务；未指定结束时间时由 Agent 推断并在创建后告知用户 |
 | create_monthly_timer | 创建含 day/time 周期点和月间隔的任务；未指定结束时间时由 Agent 推断并在创建后告知用户 |
@@ -575,7 +574,7 @@ sequenceDiagram
 - view_image 将 HTTP/HTTPS 图片 URL 直接交给轻量模型；沙盒 file:// 绝对路径通过 infra.py 的统一读取边界传入当前 runtime 的显式群号，在对应容器读取 base64 后由宿主 Pillow 校验实际图片格式并生成 data URI，再返回模型生成的文字描述。该流程不依赖容器内的 `file` 命令或文件扩展名。
 - generate_image 在 Seedream 和兼容图像接口之间选择；有参考图时使用支持参考图的路径，沙盒 `file://` 参考图复用同一个按群读取和字节校验边界，再以 base64 data URI 交给 Ark SDK。
 - generate_video 在 Seedance 1.0 与 1.5 之间选择，轮询供应商任务直至完成或失败。
-- random_acg_photo 每次通过 AppleScript 导出到唯一宿主临时目录，再复制到当前群容器，成功或失败都清理该目录。
+- 白名单群戳一戳时通过 AppleScript 将随机 ACG 图片导出到唯一宿主临时目录，发送后清理该目录；导出失败时也会清理并静默返回。
 - 戳一戳路径先检查 `POKE_GROUP_WHITELIST`；集合外群不导出、不绑定 runtime、不发送。集合内调用直接读取该次宿主导出文件并以 base64 图片发送，成功时按返回的 QQ 消息 ID 缓存同一字节，随后清理宿主导出；失败时静默返回。
 
 ### 7.3 Markdown 渲染与脱敏
@@ -739,7 +738,7 @@ virtual/ 下是 Shell 和 Docker 构建、启动、停止、删除脚本，不�
 | tests/test_agents_command.py | `/agents [群号]` 的群过滤、可选参数、管理员跨群与非法参数。 |
 | tests/test_ai_json_output.py | 角色 Prompt 不再要求旧 JSON 输出格式、ADMIN MODE 动态 Prompt，以及 AI JSON 与非 JSON 兼容行为。 |
 | tests/test_auto_response.py | v2 自动回复随机时间范围、activated-group 同步、每群单例、路由丢失保留 point、孤立 job 修复、执行资格复查、活跃对话跳过注入与同群后继排期。 |
-| tests/test_poke_whitelist.py | 戳一戳白名单群进入图片导出、成功发送后的消息 ID 图片缓存，以及集合外群无导出、runtime 绑定或发送。 |
+| tests/test_poke_whitelist.py | handler 自有 ACG 导出、失败清理、戳一戳白名单、成功发送后的消息 ID 图片缓存，以及集合外群无导出、runtime 绑定或发送。 |
 | tests/test_background_shell_agent.py | 后台 Shell 注册、任务解析、决策和取消传播清理。 |
 | tests/test_background_shell_infra.py | 后台日志增量读取与进程终止清理。 |
 | tests/test_background_shell_prompts.py | Shell 决策 Prompt 和 stdin 解析 Prompt 约束。 |
@@ -760,7 +759,6 @@ virtual/ 下是 Shell 和 Docker 构建、启动、停止、删除脚本，不�
 | tests/test_models_mimo.py | 模型工厂与特定兼容模型配置。 |
 | tests/test_omni_model.py | 多模态或 Omni 模型选择判断。 |
 | tests/test_pipeline_json.py | 普通消息与合并转发统一 JSON 格式。 |
-| tests/test_random_acg_photo.py | 唯一临时目录、目标群容器复制、空相册、Photos 与 Docker 失败。 |
 | tests/test_reasoning_content.py | reasoning_content 在 LangChain 消息转换中的往返保留。 |
 | tests/test_secret_gate.py | 多类 API Key 脱敏与误报边界。 |
 | tests/test_skill_create.py | Skill 保存、覆盖、缓存失效与 frontmatter 校验。 |

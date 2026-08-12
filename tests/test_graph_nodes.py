@@ -340,7 +340,6 @@ def _load_nodes_module():
     tools_mod.respond_to_shell_prompt = None
     tools_mod.send_image = None
     tools_mod.send_video = None
-    tools_mod.random_acg_photo = None
     tools_mod.set_shell_executor_limit = lambda *a, **kw: None
     tools_mod.get_current_group_id = lambda: None
     tools_mod._current_group_id = None
@@ -355,7 +354,6 @@ def _load_nodes_module():
         tools_mod.send_image,
         tools_mod.send_video,
         tools_mod.get_avatar,
-        tools_mod.random_acg_photo,
         tools_mod.create_daily_timer,
         tools_mod.create_weekly_timer,
         tools_mod.create_monthly_timer,

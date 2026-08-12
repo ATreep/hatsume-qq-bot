@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import base64
+import os as _os
+import subprocess
+import tempfile
 from datetime import datetime
 
 from nonebot.adapters import Bot
@@ -20,6 +23,88 @@ from ..infra import (
 # ---- Section 1: Poke Handler ----
 
 
+async def _export_random_acg_photo() -> str:
+    """Export a random photo from the macOS Photos ``ACG`` album."""
+    import shutil as _shutil
+
+    export_dir = tempfile.mkdtemp(prefix="hatsume-acg-export-")
+    succeeded = False
+
+    try:
+        applescript = f'''
+    try
+        tell application "Photos"
+            if not (exists album "ACG") then
+                error "ALBUM_NOT_FOUND"
+            end if
+            set targetAlbum to album "ACG"
+            set allPhotos to every media item of targetAlbum
+            set photoCount to count of allPhotos
+            if photoCount is 0 then
+                error "ALBUM_EMPTY"
+            end if
+            set randomIndex to random number from 1 to photoCount
+            set thePhoto to item randomIndex of allPhotos
+            set exportDir to POSIX file "{export_dir}"
+            export {{thePhoto}} to exportDir with using originals
+        end tell
+    on error errMsg
+        return "ERROR:" & errMsg
+    end try
+    '''
+
+        try:
+            result = subprocess.run(
+                ["osascript", "-e", applescript],
+                capture_output=True,
+                timeout=30,
+            )
+        except subprocess.TimeoutExpired:
+            return "❌ 错误：Photos 操作超时。"
+
+        stdout_text = result.stdout.decode("utf-8", errors="replace").strip()
+        if stdout_text.startswith("ERROR:"):
+            err_msg = stdout_text[len("ERROR:") :].strip()
+            if "ALBUM_NOT_FOUND" in err_msg:
+                return "❌ 错误：未找到名为 'ACG' 的相簿。"
+            if "ALBUM_EMPTY" in err_msg:
+                return "❌ 错误：'ACG' 相簿中没有照片。"
+            return f"❌ 错误：Photos 操作失败：{err_msg}"
+
+        if result.returncode != 0:
+            stderr_text = result.stderr.decode("utf-8", errors="replace").strip()
+            combined = (stdout_text + " " + stderr_text).strip()
+            if (
+                "not running" in combined.lower()
+                or "application isn't running" in combined.lower()
+            ):
+                return "❌ 错误：无法访问 Photos 应用，请确认 Photos.app 已打开并授权。"
+            return f"❌ 错误：Photos 操作失败：{combined}"
+
+        exported = [
+            filename
+            for filename in _os.listdir(export_dir)
+            if _os.path.isfile(_os.path.join(export_dir, filename))
+        ]
+        if not exported:
+            return "❌ 错误：照片导出失败，未找到导出文件。"
+
+        succeeded = True
+        return _os.path.join(export_dir, exported[0])
+    finally:
+        if not succeeded:
+            _shutil.rmtree(export_dir, ignore_errors=True)
+
+
+def _cleanup_exported_acg_photo(host_file: str) -> None:
+    """Remove the unique host export directory created for one photo."""
+    import shutil as _shutil
+
+    export_dir = _os.path.dirname(host_file)
+    if _os.path.basename(export_dir).startswith("hatsume-acg-export-"):
+        _shutil.rmtree(export_dir, ignore_errors=True)
+
+
 async def handle_poke(bot: Bot, event: PokeNotifyEvent) -> None:
     """When the bot is poked, export and send a random ACG photo.
 
@@ -33,11 +118,6 @@ async def handle_poke(bot: Bot, event: PokeNotifyEvent) -> None:
 
     if group_id not in POKE_GROUP_WHITELIST:
         return
-
-    from ..graph.tools import (
-        _cleanup_exported_acg_photo,
-        _export_random_acg_photo,
-    )
 
     runtime = group_runtime_registry.bind_bot(group_id, bot)
     with bind_group_runtime(runtime):

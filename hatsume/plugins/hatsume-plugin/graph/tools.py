@@ -4,12 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
-import os as _os
-import random
 import shlex
 import ssl
-import subprocess
-import tempfile
 import traceback
 import urllib.request
 import urllib.error
@@ -22,7 +18,6 @@ from nonebot.adapters.onebot.v11 import MessageSegment
 from pydantic import Field
 
 from ..infra import (
-    copy_host_file_to_sandbox,
     ensure_container_running,
     read_sandbox_image_data_uri,
     run_cmd,
@@ -500,146 +495,6 @@ async def view_image(image_url: str) -> str:
     else:
         description = str(content).strip()
     return description or "❌ 图片读取失败：模型未返回描述。"
-
-
-# ---- Helper: export a random photo from macOS Photos "ACG" album ----
-# Returns the host file path on success, or an "❌ ..." error string on failure.
-# Extracted so both the random_acg_photo tool (LLM → Docker sandbox) and the
-# poke handler (direct send) can reuse the same Photo-export logic.
-
-async def _export_random_acg_photo() -> str:
-    """Export a random photo from the 'ACG' album in macOS Photos.
-
-    Returns the absolute host path to the exported file, or a string starting
-    with  "❌" describing the error.
-    """
-    import shutil as _shutil
-
-    export_dir = tempfile.mkdtemp(prefix="hatsume-acg-export-")
-    succeeded = False
-
-    try:
-        applescript = f'''
-    try
-        tell application "Photos"
-            if not (exists album "ACG") then
-                error "ALBUM_NOT_FOUND"
-            end if
-            set targetAlbum to album "ACG"
-            set allPhotos to every media item of targetAlbum
-            set photoCount to count of allPhotos
-            if photoCount is 0 then
-                error "ALBUM_EMPTY"
-            end if
-            set randomIndex to random number from 1 to photoCount
-            set thePhoto to item randomIndex of allPhotos
-            set exportDir to POSIX file "{export_dir}"
-            export {{thePhoto}} to exportDir with using originals
-        end tell
-    on error errMsg
-        return "ERROR:" & errMsg
-    end try
-    '''
-
-        try:
-            result = subprocess.run(
-                ["osascript", "-e", applescript],
-                capture_output=True,
-                timeout=30,
-            )
-        except subprocess.TimeoutExpired:
-            return "❌ 错误：Photos 操作超时。"
-
-        stdout_text = result.stdout.decode("utf-8", errors="replace").strip()
-
-        if stdout_text.startswith("ERROR:"):
-            err_msg = stdout_text[len("ERROR:"):].strip()
-            if "ALBUM_NOT_FOUND" in err_msg:
-                return "❌ 错误：未找到名为 'ACG' 的相簿。"
-            if "ALBUM_EMPTY" in err_msg:
-                return "❌ 错误：'ACG' 相簿中没有照片。"
-            return f"❌ 错误：Photos 操作失败：{err_msg}"
-
-        if result.returncode != 0:
-            stderr_text = result.stderr.decode("utf-8", errors="replace").strip()
-            combined = (stdout_text + " " + stderr_text).strip()
-            if (
-                "not running" in combined.lower()
-                or "application isn't running" in combined.lower()
-            ):
-                return "❌ 错误：无法访问 Photos 应用，请确认 Photos.app 已打开并授权。"
-            return f"❌ 错误：Photos 操作失败：{combined}"
-
-        exported = [
-            filename
-            for filename in _os.listdir(export_dir)
-            if _os.path.isfile(_os.path.join(export_dir, filename))
-        ]
-        if not exported:
-            return "❌ 错误：照片导出失败，未找到导出文件。"
-
-        succeeded = True
-        return _os.path.join(export_dir, exported[0])
-    finally:
-        if not succeeded:
-            _shutil.rmtree(export_dir, ignore_errors=True)
-
-
-def _cleanup_exported_acg_photo(host_file: str) -> None:
-    """Remove the unique host export directory created for one photo."""
-    import shutil as _shutil
-
-    export_dir = _os.path.dirname(host_file)
-    if _os.path.basename(export_dir).startswith("hatsume-acg-export-"):
-        _shutil.rmtree(export_dir, ignore_errors=True)
-
-
-@tool
-async def random_acg_photo() -> str:
-    """
-    从 Treep 的相册中随机获取一张动漫藏图。
-
-    照片会被导出并复制到沙盒容器中。返回沙盒内的绝对路径。
-    获取到路径后，你需要调用 send_image 工具，并在路径前加上 "file://" 前缀来发送图片。
-
-    ## 返回值示例：
-    - 成功：/tmp/apple_photo_export_260711_143025.jpg
-    - 失败：❌ 错误描述
-
-    ## 使用场景：
-    - 用户想要一张随机的图片时
-    - 用户提到想看"二次元"、"动漫"、"ACG" 图时
-    """
-    from datetime import datetime
-    runtime = get_current_group_runtime()
-    host_file = await _export_random_acg_photo()
-    if host_file.startswith("❌"):
-        return host_file
-
-    _, ext = _os.path.splitext(host_file)
-    if not ext:
-        ext = ".jpg"
-
-    try:
-        timestamp = datetime.now().strftime("%y%m%d_%H%M%S")
-        random_suffix = f"{random.randint(0, 999999):06d}"
-        sandbox_name = f"apple_photo_export_{timestamp}_{random_suffix}{ext}"
-        sandbox_path = f"/tmp/{sandbox_name}"
-
-        try:
-            await copy_host_file_to_sandbox(
-                host_file,
-                sandbox_path,
-                timeout=30,
-                group_id=runtime.group_id,
-            )
-        except Exception as exc:
-            return f"❌ 错误：无法复制文件到沙盒：{exc}"
-
-        print(f"📷 [random_acg_photo] Exported to sandbox {sandbox_path}")
-        return sandbox_path
-    finally:
-        _cleanup_exported_acg_photo(host_file)
 
 
 @tool
@@ -1764,7 +1619,6 @@ CHAT_TOOLS = [
     send_image,
     send_video,
     get_avatar,
-    random_acg_photo,
     create_daily_timer,
     create_weekly_timer,
     create_monthly_timer,
