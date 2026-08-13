@@ -59,12 +59,15 @@ RUN architecture="$(dpkg --print-architecture)" \
         ripgrep \
         rsync \
         traceroute \
+        tzdata \
         unzip \
         wget \
         whois \
         xz-utils \
         zip \
         zstd \
+    && ln -snf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
+    && printf '%s\n' 'Asia/Shanghai' > /etc/timezone \
     && rm -rf /var/lib/apt/lists/*
 
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
@@ -101,7 +104,8 @@ RUN install -d -m 700 /root/.config/hatsume \
     fi \
     && mail-cli auth login --user hatsume@claw.163.com
 
-ENV PATH="/root/.local/bin:${PATH}" \
+ENV TZ="Asia/Shanghai" \
+    PATH="/root/.local/bin:${PATH}" \
     BASH_ENV="/etc/hatsume/bash_env" \
     ANTHROPIC_BASE_URL="https://api.deepseek.com/anthropic" \
     ANTHROPIC_MODEL="deepseek-v4-flash" \
