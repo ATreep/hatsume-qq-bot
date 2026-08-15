@@ -70,6 +70,8 @@ RUN architecture="$(dpkg --print-architecture)" \
     && printf '%s\n' 'Asia/Shanghai' > /etc/timezone \
     && rm -rf /var/lib/apt/lists/*
 
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y nodejs \
     && rm -rf /var/lib/apt/lists/*
@@ -117,5 +119,8 @@ ENV TZ="Asia/Shanghai" \
     CLAUDE_CODE_EFFORT_LEVEL="high" \
     CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS="0" \
     GH_TOKEN="${GH_TOKEN}"
+
+RUN claude plugin marketplace add obra/superpowers-marketplace
+RUN claude plugin install superpowers@superpowers-marketplace
 
 WORKDIR /work
