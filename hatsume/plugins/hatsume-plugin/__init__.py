@@ -16,10 +16,13 @@ from nonebot.adapters import Bot
 from nonebot.params import CommandArg
 
 from .config import ADMIN_QQ_ID
+from .evolution import daily_learn_evolve  # noqa: F401 - registers midnight job
 from .handlers.dialogue import handle_group_increase, start_chat, user_chat_handle
 from .handlers.tools import (
     handle_agents,
     handle_autoresponse,
+    handle_dsbalance,
+    handle_learn_evolve,
     handle_list_skills,
     handle_membersearch,
     handle_model,
@@ -153,6 +156,13 @@ resetsandbox_cmd = on_command(
 )
 agents_cmd = on_command("agents", priority=10, block=True)
 autoresponse_cmd = on_command("autoresponse", rule=lambda event: str(event.get_user_id()) == ADMIN_QQ_ID, priority=10, block=True)
+learn_evolve_cmd = on_command(
+    "learn-evolve",
+    rule=lambda event: str(event.get_user_id()) == ADMIN_QQ_ID,
+    priority=10,
+    block=True,
+)
+dsbalance_cmd = on_command("dsbalance", priority=10, block=True)
 proxy_cmd = on_command("proxy", priority=10, block=True)
 todo_cmd = on_command("todo", priority=10, block=True)
 
@@ -245,6 +255,16 @@ async def _(event: GroupMessageEvent, args: Message = CommandArg()):
 @autoresponse_cmd.handle()
 async def _(bot: Bot, event: GroupMessageEvent, args: Message = CommandArg()):
     await handle_autoresponse(bot, event, autoresponse_cmd, args)
+
+
+@dsbalance_cmd.handle()
+async def _(event: GroupMessageEvent, args: Message = CommandArg()):
+    await handle_dsbalance(event, dsbalance_cmd, args)
+
+
+@learn_evolve_cmd.handle()
+async def _(event: GroupMessageEvent, args: Message = CommandArg()):
+    await handle_learn_evolve(event, learn_evolve_cmd, args)
 
 
 @proxy_cmd.handle()

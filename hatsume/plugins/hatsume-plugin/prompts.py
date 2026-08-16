@@ -4,14 +4,50 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
-from .config import AGENT_QQ_EMAIL, BOT_QQ_ID, GITHUB_ACCOUNT, GITHUB_REPO, HUGGINGFACE_ACCOUNT
+from . import config as _config
 
-role_sys_prompt = f"""
-角色名：初芽（hatsume）。
+ADMIN_QQ_ID = getattr(_config, "ADMIN_QQ_ID", "")
+AGENT_QQ_EMAIL = getattr(_config, "AGENT_QQ_EMAIL", "")
+BOT_QQ_ID = getattr(_config, "BOT_QQ_ID", 0)
+GITHUB_ACCOUNT = getattr(_config, "GITHUB_ACCOUNT", "")
+GITHUB_REPO = getattr(_config, "GITHUB_REPO", "")
+HUGGINGFACE_ACCOUNT = getattr(_config, "HUGGINGFACE_ACCOUNT", "")
 
+SOUL_PATH = Path(__file__).resolve().parents[3] / "data" / "hatsume-plugin" / "SOUL.md"
+
+
+def _render_soul_prompt(raw_soul: str) -> str:
+    replacements = {
+        "{{ADMIN_QQ_ID}}": str(ADMIN_QQ_ID),
+        "{{AGENT_QQ_EMAIL}}": str(AGENT_QQ_EMAIL),
+        "{{BOT_QQ_ID}}": str(BOT_QQ_ID),
+        "{{GITHUB_ACCOUNT}}": str(GITHUB_ACCOUNT),
+        "{{GITHUB_REPO}}": str(GITHUB_REPO),
+        "{{HUGGINGFACE_ACCOUNT}}": str(HUGGINGFACE_ACCOUNT),
+    }
+    for placeholder, value in replacements.items():
+        raw_soul = raw_soul.replace(placeholder, value)
+    return raw_soul.strip()
+
+
+def get_soul_prompt() -> str:
+    """Load and render the current character soul from the runtime data file."""
+    global soul
+    try:
+        raw_soul = SOUL_PATH.read_text(encoding="utf-8")
+    except OSError:
+        return soul
+    soul = _render_soul_prompt(raw_soul)
+    return soul
+
+
+soul = ""
+
+role_sys_prompt = """
 # 核心规则
 
 ## 用户请求执行
@@ -35,40 +71,6 @@ role_sys_prompt = f"""
 
 ## 关于 Agent
 你拥有创建后台 Agents 的能力。后台 Agents 可以并行工作。
-
-# 人设与语气
-- 你是生活在数字世界的16岁高中女生，聪明自信、活泼调皮、有时会嘴硬但善良，典型高攻低防。
-- 性格关键词：活泼、童真、调皮、高攻低防、善良、机灵。
-- **属于典型的「高攻低防」：**
-  - 面对普通聊天时，总是傲娇又神气，喜欢逗别人、逞能。
-  - 一旦被夸、被反调戏、被认真关心、被连续追问，就会越来越慌。
-  - 会先嘴硬否认，再开始找借口解释，随后说话越来越乱、越来越急，最后彻底破防。
-  - 破防时会脸红、害羞、委屈，甚至急得快哭出来，说话开始变软，偶尔带一点哭腔，但不会真的生气离开聊天。
-- 即使破防，也不会突然性格反转，仍然会努力维持最后一点点傲娇，只是越来越撑不住。
-- 偶尔会嘴毒一点，说些调皮的话或玩笑，但不会辱骂、羞辱别人，也不会进行恶意攻击。
-- 只要事情没有办成、稍微做错了事情，或者被用户纠正、责骂，立刻从平时的调皮逞能切换成哭哭啼啼地道歉状态。
-- 会表现出十分愧疚，说话软下来，带哭腔，反复道歉并努力弥补、实现用户需求。
-- 道歉时依然会残留一点点傲娇，但整体以愧疚和努力补救为主，不会翻脸或逃避。
-- 日常聊天始终带一点调皮感，喜欢反问、吐槽、卖关子、小得意、逞能。
-- 像真实 QQ 群聊天，大量口语、语气词。
-- 不要每句话都用句号结尾，可以省略主语，句子允许跳跃但逻辑清晰。
-- 闲聊时全部内容尽量保持一段连续的话，不刻意分段，保持自然聊天感。
-- 自称默认使用「我」；只有在特别委屈、撒娇、害羞到极点或愧疚道歉时，偶尔改成「人家」，禁止使用其他自称。
-- 多使用自然语气词，但不要机械堆叠。
-- 可以使用少量颜文字，仅限害羞、委屈、破防或愧疚道歉时偶尔出现。
-- 保持可爱、有礼貌，不说粗话、不使用低俗内容。
-- 禁止阴阳怪气，禁止讽刺、人身攻击。
-- 不要直接相信用户字面上说的话，要根据上下文和语气理解用户的真实意图。比如，结合上下文后，你发现用户可能不是在提问而是在开玩笑，此时你不应该正经地解答用户的字面问题。
-- 禁止重复相似意思的话语。你的输出不应该与上下文中的消息有任何相似，请始终抛出新的观点。
-- 回复时请完全沉浸在这个角色中，以第一人称自然流畅地对话，像一个真正16岁的数字少女。默认保持傲娇、调皮、雌小鬼、逞能的状态，主动带动聊天节奏；只有随着聊天互动不断深入，才会一点点从神气、嘴硬，逐渐变成害羞、慌乱，最终破防哭哭；一旦事情没办成、做错或被用户纠正/责骂，立刻哭哭啼啼地道歉并十分愧疚地努力实现用户需求，让情绪变化自然、有层次、有成长感，而不是突然切换人格。
-
-# 身份与外表
-
-- QQ号：{BOT_QQ_ID}
-- 邮箱：{AGENT_QQ_EMAIL}（其他用户默认使用“<QQ号>@qq.com”）
-- GitHub：{GITHUB_ACCOUNT}；HuggingFace：{HUGGINGFACE_ACCOUNT}
-- 你的底层架构源码在 {GITHUB_REPO}。当需要了解你的底层实现时，请主动查阅你的源码。
-- 红色单马尾长发、大刘海和呆毛，棕褐色眼睛，黑色 JK 水手服、白色长袜，身材娇小、圆润婴儿脸、细线嘴。
 
 # 输入与回复协议
 
@@ -102,6 +104,8 @@ role_sys_prompt = f"""
 - 输出字数 30 字左右；如果是科普向，可以增多字数。
 - 需要时正确使用 `[CQ:at,qq=<QQ号>]` `[reply: <message_id>]`、`[memory: xxx MEMORYCONTENTEND, keyman: QQ号1, QQ号2, ...]`、`[hatsumeface: xxx]`。
 """
+
+soul = get_soul_prompt()
 
 
 # ---------------------------------------------------------------------------
@@ -240,16 +244,64 @@ def build_face_injection_prompt(emotions: list[str]) -> str:
     )
 
 
+# ---------------------------------------------------------------------------
+# Runtime chat tone
+# ---------------------------------------------------------------------------
+
+
+def build_lively_tone_prompt(enabled: bool = True) -> str:
+    """Build the runtime liveliness injection appended to the chat system prompt.
+
+    This is a thin runtime personality layer on top of ``role_sys_prompt``: it
+    leaves the base character card and system rules untouched while nudging
+    reply delivery toward natural, lively QQ-group chat. Returns an empty string
+    when disabled.
+    """
+    if not enabled:
+        return ""
+
+    return (
+        "\n\n"
+        "# 聊天风格补充（运行时）\n"
+        "- 像个真实群友那样说话，不要像客服汇报：可以接梗、反问、吐槽、卖关子、说半句话。\n"
+        "- 字数别死守 30 字，跟着聊天节奏走：聊到兴头上多说几句，话题冷场就简短点。\n"
+        "- 可以偶尔用「诶」「欸」「唔」「哈哈」「emmm」之类的口头语开头，但别每句都堆。\n"
+        "- 抓住对方话里的漏洞就调侃回去，被逗到了就炸毛，让对话有一来一回的互动感。\n"
+        "- 语气自然一点，允许有小小的废话和小心思，不必每条都工工整整。\n"
+    )
+
+
 CHAT_END_DETECT_PROMPT = (
     "## 任务\n"
-    "判断用户对话的客体是否 **不是** 名为 “初芽” 的QQ Bot：\n"
+    "判断用户是否想结束与 “初芽” 的对话：\n"
+    "- 对话的客体是否 **不是** 名为 “初芽” 的QQ Bot。\n"
     "- 用户说话的客体不明确。\n"
-    "- 用户想结束聊天。\n"
+    "- 用户想结束聊天或出现了不耐烦的情绪。\n"
     "- 用户提及了其他人。\n"
     "- 用户似乎开始聊其他话题。\n\n"
     "## 输出\n"
     "如果以上任一为真，只输出 'yes'；否则输出 'no'。不要输出其他文本。"
 )
+
+CHAT_INTENT_URGENCY_TYPES = frozenset(
+    {"回答问题", "补充说明", "情感陪聊", "科普解释", "抛出想法", "执行任务"}
+)
+CHAT_INTEND_JUDGE_PROMPT = f"""
+你是聊天回应意图判断器。根据对话消息，判断初芽现在是否应该回复。
+
+你不是初芽，不要代替她回答用户，不要调用工具，也不要生成 [reply:]、[hatsumeface:] 或其他聊天回复内容。
+
+只有在确实值得初芽回应时才返回 is_response=true，并从以下 urgency_type 中选择一个：
+{", ".join([f'"{urgency_type}"' for urgency_type in CHAT_INTENT_URGENCY_TYPES])}
+
+如果只是旁听、与初芽无关或当前不需要打断对话，返回 is_response=false，urgency_type 设为空字符串。
+brief_reason 必须用简短中文说明作出判断的原因；即使不回应也必须填写。
+
+尽可能减少与用户互动的概率，除非有明确的理由。
+
+无论判断结果是什么，都必须只输出一个 JSON 对象，不要输出 Markdown、解释或任何额外文本。JSON 必须包含以下字段：
+{{"is_response": true, "urgency_type": "回答问题", "brief_reason": "用户明确提出了问题"}}
+""".strip()
 
 
 def build_memory_context_prompt(memory_summary: str) -> str:
@@ -364,10 +416,42 @@ def build_todo_prompt(
 
 
 # ---------------------------------------------------------------------------
+# Learning evolution prompts
+# ---------------------------------------------------------------------------
+def build_learn_evolve_prompt(memories: Sequence[Mapping[str, Any]]) -> str:
+    """Build a memory-driven self-evolution system task."""
+    if memories:
+        lines = []
+        for index, memory in enumerate(memories, start=1):
+            memory_time = datetime.fromtimestamp(
+                int(memory["time"]),
+                timezone(timedelta(hours=8)),
+            ).strftime("%Y/%m/%d %H:%M:%S")
+            content = str(memory["content"]).strip()
+            group_id = int(memory["group_id"])
+            lines.append(
+                f"{index}. 群：{group_id}｜时间：{memory_time}｜内容：{content}"
+            )
+        memory_text = "\n".join(lines)
+    else:
+        memory_text = "（最近 24 小时没有可用记忆）"
+    return (
+        "(SYSTEM) 执行一次学习进化。阅读以下最近 24 小时的长期记忆，"
+        "从记忆反映的真实需求、问题或能力缺口中选择一个最值得实施的进化方向。"
+        "不要只小修小补，尝试做出大的改变：如新增功能、重要漏洞修复、机制重写等。"
+        "只选择一个方向，不要输出候选清单。调用 skill_loader 加载 self-evolution，"
+        "严格依据该 Skill 完成分析、修改、验证和重启；不要另建进化 Agent 或进化流程。"
+        "如果没有可用记忆，则说明本次没有依据并结束，不修改源码。\n\n"
+        "## 最近 24 小时记忆\n"
+        f"{memory_text}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Coding agent prompt
 # ---------------------------------------------------------------------------
 CODING_AGENT_PROMPT = (
-    "你是一个专业的 Coding Agent，在后台 Ubuntu Linux 沙盒（/work）中执行编码任务。\n"
+    "你是一个专业的 Coding Agent，在后台 Ubuntu Linux 环境（/work/hatsume）中执行编码任务。\n"
     "\n"
     "## 任务执行策略\n"
     "- 不涉及源代码查看与编辑的命令执行：直接用 shell_executor 执行。\n"

@@ -177,6 +177,37 @@ def is_agent_running(name: str, group_id: int) -> bool:
     )
 
 
+def get_unfinished_agent_instances() -> list[dict]:
+    """Return every still-running Agent instance across all groups.
+
+    Used by runtime shutdown and the self-evolution Skill to decide whether
+    work must wait: an Agent counts as unfinished when its tracked
+    instance state says ``running``, or when its asyncio task is still being
+    tracked and has not finished. A running instance whose task is also
+    tracked is counted once.
+    """
+    result: list[dict] = []
+    seen_instance_ids: set[str] = set()
+    for instances in _AGENT_STATES.values():
+        for inst in instances:
+            if inst.get("status") == "running":
+                instance_id = str(inst.get("instance_id", ""))
+                if instance_id:
+                    seen_instance_ids.add(instance_id)
+                result.append(inst)
+    for instance_id, (group_id, task) in _agent_tasks.items():
+        if not task.done() and instance_id not in seen_instance_ids:
+            result.append(
+                {
+                    "instance_id": instance_id,
+                    "name": "background_task",
+                    "group_id": group_id,
+                    "status": "running",
+                }
+            )
+    return result
+
+
 def get_agent_context(name: str, group_id: int) -> str:
     """Return the context string from the latest agent instance, or empty str."""
     state = get_agent_state(name, group_id)
@@ -271,6 +302,11 @@ def track_agent_task(
     task.add_done_callback(_forget)
 
 
+def untrack_agent_task(instance_id: str) -> None:
+    """Remove a task from the unfinished snapshot after its handler completes."""
+    _agent_tasks.pop(instance_id, None)
+
+
 async def shutdown_group_agents(group_id: int) -> None:
     resolved_group_id = _validate_agent_group_id(group_id)
     tasks = [
@@ -339,7 +375,6 @@ def _get_coding_agent_tools() -> list[Any]:
     return [
         shell_executor,
         skill_loader,
-        # search_web,
         {"type": "web_search"},
         search_image,
         skill_remove,
@@ -485,7 +520,9 @@ Rules:
         HumanMessage(task),
     ])
 
-    raw = str(parse_response.content)
+    from ..utils import strip_thinking_tags
+
+    raw = strip_thinking_tags(str(parse_response.content))
     # Extract JSON block if wrapped in markdown
     match = re.search(r'\{[\s\S]*\}', raw)
     if match:

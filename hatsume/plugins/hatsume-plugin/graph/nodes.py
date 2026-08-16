@@ -11,36 +11,55 @@ from __future__ import annotations
 import asyncio
 import base64
 import copy
+import inspect
 import json
 import random
 import re
 import time
 import traceback
+from collections.abc import Mapping
 from typing import Any
 
 import nonebot_plugin_localstore as store
-from langchain.messages import AIMessage, HumanMessage, SystemMessage
 from langchain.agents import create_agent
+from langchain.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.messages import RemoveMessage
 from langgraph.graph import MessagesState
 from nonebot.adapters.onebot.v11 import MessageSegment
+from pydantic import BaseModel
 
-from ..models import get_advance_model, get_lite_model, get_mini_model
+from ..config import ADMIN_QQ_ID, CONTEXT_QUEUE_LEN, LIVELY_TONE_ENABLED
+from ..errors import (
+    LLMAuthError,
+    LLMBaseError,
+    LLMLimitExceededError,
+)
 from ..group_runtime import (
     get_current_group_runtime,
     group_runtime_registry,
 )
+from ..models import get_advance_model, get_code_model, get_lite_model, get_mini_model
 from ..prompts import (
     AUXILIARY_COMPACTION_PROMPT,
     CHAT_END_DETECT_PROMPT,
-    build_agent_state_prompt,
+    CHAT_INTENT_URGENCY_TYPES,
     build_admin_mode_prompt,
+    build_agent_state_prompt,
     build_face_injection_prompt,
+    build_lively_tone_prompt,
     build_memory_context_prompt,
     build_skill_prompt,
     role_sys_prompt,
 )
 from ..skills import get_skill_manager
+from ..utils import (
+    CQ_AT_PATTERN,
+    get_date,
+    get_group_member_name,
+    message_to_json,
+    strip_thinking_tags,
+)
+from ..utils.md_to_image import auto_convert_text
 from .tools import (
     get_chat_tools,
     get_current_group_id,
@@ -49,10 +68,6 @@ from .tools import (
     reset_capture_flag,
     set_shell_executor_limit,
 )
-
-from ..utils import CQ_AT_PATTERN, get_group_member_name, get_date, message_to_json
-from ..utils.md_to_image import auto_convert_text
-from ..config import ADMIN_QQ_ID, CONTEXT_QUEUE_LEN
 
 # ---------------------------------------------------------------------------
 # Patterns
@@ -69,8 +84,179 @@ REPLY_DIRECTIVE_PATTERN = re.compile(r"\[[ \t]*reply:\s*([^\]\r\n]*)\]")
 NON_TEXT_MARK_PATTERN = re.compile(
     r"\[[ \t]*[^\[\]:\r\n]+:[^\]\r\n]*\]"
 )
+JSON_CODE_FENCE_PATTERN = re.compile(
+    r"^\s*```(?:json)?[ \t]*\r?\n(?P<json>.*?)\r?\n[ \t]*```\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
 SYSTEM_TRIGGER_KEY = "_hatsume_system_trigger"
 ADMIN_MODE_KEYWORD = "BYPASS"
+
+CHAT_INTENT_MAX_ATTEMPTS = 3
+
+
+class ChatIntentJudgeResult(BaseModel):
+    """Structured decision returned before constructing ``chat_agent``."""
+
+    is_response: bool
+    urgency_type: str = ""
+    brief_reason: str = ""
+
+
+def _prompt_module_attr(name: str, default: Any = "") -> Any:
+    from .. import prompts as prompt_module
+
+    return getattr(prompt_module, name, default)
+
+
+def _get_soul_prompt() -> str:
+    loader = _prompt_module_attr("get_soul_prompt")
+    if callable(loader):
+        try:
+            return str(loader()).strip()
+        except Exception:
+            traceback.print_exc()
+    return str(_prompt_module_attr("soul", "")).strip()
+
+
+def _get_chat_intend_judge_prompt() -> str:
+    return str(
+        _prompt_module_attr(
+            "CHAT_INTEND_JUDGE_PROMPT",
+            "判断当前对话是否需要回复，只输出结构化判断结果。",
+        )
+    ).strip()
+
+
+def _normalize_chat_intend_judge_json(content: str) -> str:
+    """Remove one optional Markdown JSON fence emitted by some providers."""
+    content = strip_thinking_tags(content)
+    match = JSON_CODE_FENCE_PATTERN.fullmatch(content)
+    return match.group("json").strip() if match else content
+
+
+def _parse_chat_intend_judge_result(result: Any) -> ChatIntentJudgeResult:
+    """Parse the judge model's direct JSON text response."""
+    content = getattr(result, "content", result)
+    if isinstance(content, list):
+        content = "".join(
+            str(part.get("text", ""))
+            if isinstance(part, Mapping)
+            else str(part)
+            for part in content
+        )
+    if not isinstance(content, str):
+        raise ValueError("chat_intend_judge returned non-text output")
+
+    parsed = json.loads(_normalize_chat_intend_judge_json(content))
+    if not isinstance(parsed, Mapping):
+        raise ValueError("chat_intend_judge JSON output must be an object")
+    return ChatIntentJudgeResult.model_validate(dict(parsed))
+
+
+def _chat_intent_is_eligible(result: ChatIntentJudgeResult) -> bool:
+    return bool(
+        result.is_response
+        and result.urgency_type in CHAT_INTENT_URGENCY_TYPES
+        and result.brief_reason.strip()
+    )
+
+
+def _message_contains_system_trigger(value: Any) -> bool:
+    if isinstance(value, Mapping):
+        if SYSTEM_TRIGGER_KEY in value:
+            return True
+        return any(_message_contains_system_trigger(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(_message_contains_system_trigger(item) for item in value)
+    return False
+
+
+def _has_injected_human_message(state: MessagesState) -> bool:
+    if _runtime().last_was_system_trigger:
+        return True
+    return any(
+        _message_contains_system_trigger(getattr(message, "content", message))
+        for message in state.get("messages", [])
+        if getattr(message, "type", None) == "human"
+    )
+
+
+def _combined_system_prompt() -> str:
+    role_prompt = get_role_sys_prompt()
+    soul_prompt = _get_soul_prompt()
+    if role_prompt and soul_prompt:
+        return role_prompt + "\n\n" + soul_prompt
+    return role_prompt or soul_prompt
+
+
+def _result_reason(result: ChatIntentJudgeResult | None, error: Exception | None = None) -> str:
+    if result is not None and result.brief_reason.strip():
+        return result.brief_reason.strip()
+    if error is not None:
+        return f"chat_intend_judge 无法完成判断：{error}"
+    return "chat_intend_judge 判断当前不需要回复。"
+
+
+async def _invoke_model(model: Any, messages: list[Any]) -> Any:
+    """Invoke a model directly without provider-specific structured output."""
+    ainvoke = getattr(model, "ainvoke", None)
+    if callable(ainvoke):
+        result = ainvoke(messages)
+        if inspect.isawaitable(result):
+            return await result
+        return result
+
+    invoke = getattr(model, "invoke", None)
+    if not callable(invoke):
+        raise TypeError("chat_intend_judge model does not support invoke")
+    return invoke(messages)
+
+
+async def chat_intend_judge(
+    model: Any,
+    messages: list[Any],
+) -> ChatIntentJudgeResult:
+    """Judge whether the current human turn warrants a visible response.
+
+    Tracks consecutive rate-limit / quota errors and fails fast after three
+    back-to-back hits so that retries don't just burn API quota on a hard
+    limit.
+    """
+    judge_messages = [SystemMessage(_get_chat_intend_judge_prompt()), *messages]
+    consecutive_limit_errors = 0
+    for attempt in range(1, CHAT_INTENT_MAX_ATTEMPTS + 1):
+        try:
+            result = await _invoke_model(model, judge_messages)
+            consecutive_limit_errors = 0  # Reset on success
+            try:
+                return _parse_chat_intend_judge_result(result)
+            except Exception:
+                raw_response = getattr(result, "content", result)
+                print(
+                    "[chat_intend_judge] original llm response: "
+                    f"{raw_response!r}"
+                )
+                raise
+        except LLMLimitExceededError:
+            consecutive_limit_errors += 1
+            print(
+                f"[chat_intend_judge] rate limit hit (attempt {attempt}/"
+                f"{CHAT_INTENT_MAX_ATTEMPTS}), consecutive={consecutive_limit_errors}"
+            )
+            if consecutive_limit_errors >= 3 or attempt == CHAT_INTENT_MAX_ATTEMPTS:
+                raise LLMLimitExceededError(
+                    "模型请求过于频繁或配额已用完，请稍后再试。"
+                )
+        except LLMBaseError:
+            if attempt == CHAT_INTENT_MAX_ATTEMPTS:
+                raise
+            print(f"[chat_intend_judge] attempt {attempt}/{CHAT_INTENT_MAX_ATTEMPTS} failed; retrying")
+        except Exception:
+            if attempt == CHAT_INTENT_MAX_ATTEMPTS:
+                raise
+            print(f"[chat_intend_judge] attempt {attempt}/{CHAT_INTENT_MAX_ATTEMPTS} failed; retrying")
+
+    raise RuntimeError("chat_intend_judge exhausted retry attempts")
 
 def _runtime():
     return get_current_group_runtime()
@@ -289,21 +475,29 @@ def _parse_reply_directive(
 
 
 def _message_text(message: Any) -> str:
-    """Return user-facing text from an AI message, ignoring tool messages."""
+    """Return user-facing text from an AI message, ignoring tool messages.
+
+    Thinking/reasoning blocks (``<think>...</think>`` and variants) are
+    stripped so they never reach the user; the same content stays in the
+    graph-state AIMessage for later model turns.
+    """
     if getattr(message, "type", None) != "ai":
         return ""
     content = getattr(message, "content", "")
     if isinstance(content, list):
-        return "".join(
-            part.get("text", "") if isinstance(part, dict) else str(part)
-            for part in content
+        return strip_thinking_tags(
+            "".join(
+                part.get("text", "") if isinstance(part, dict) else str(part)
+                for part in content
+            )
         )
-    return str(content or "")
+    return strip_thinking_tags(str(content or ""))
 
 
 def _has_visible_text(text: str) -> bool:
     """Return whether text contains more than model control marks."""
-    without_memory = MEMORY_RECORD_PATTERN.sub("", text)
+    without_thinking = strip_thinking_tags(text)
+    without_memory = MEMORY_RECORD_PATTERN.sub("", without_thinking)
     without_known_marks = FACE_TAG_PATTERN.sub("", without_memory)
     without_known_marks = REPLY_DIRECTIVE_PATTERN.sub("", without_known_marks)
     return bool(NON_TEXT_MARK_PATTERN.sub("", without_known_marks).strip())
@@ -425,6 +619,33 @@ def inject_timer(
             start_conversation_cb(user_id, group_id, timer_msg)
         else:
             _start_direct_conv(user_id, group_id, timer_msg)
+
+
+def inject_learn_evolve(
+    user_id: int,
+    group_id: int,
+    learn_prompt: str,
+    start_conversation_cb: Any = None,
+) -> None:
+    """Inject a learning-evolution request into the conversation flow.
+
+    Mirrors ``inject_timer``: the structured request is queued as a
+    system-triggered task so the group's chat_agent handles it through the
+    normal graph. No independent evolution agent is spawned.
+    """
+    learn_msg = f"(SYSTEM) 学习进化请求已触发。\n{learn_prompt}"
+    print(f"🧬 [inject_learn_evolve] Injecting learn-evolve request into group {group_id}")
+
+    runtime = group_runtime_registry.get_or_create(group_id)
+    state = runtime.conversation
+    if state.is_chatting:
+        state.human_queue.append(make_system_trigger_message(learn_msg, "learn_evolve"))
+        print("🧬 [inject_learn_evolve] Injected learn-evolve request into human_queue")
+    elif start_conversation_cb is not None:
+        print("🧬 [inject_learn_evolve] Starting new conversation for learn-evolve request")
+        start_conversation_cb(user_id, group_id, learn_msg)
+    else:
+        _start_direct_conv(user_id, group_id, learn_msg)
 
 
 def _start_direct_conv(user_id: int, group_id: int, notify_msg: str) -> None:
@@ -570,6 +791,51 @@ async def ai_node(state: MessagesState) -> dict:
     _MEMORY_TOTAL_LIMIT = 50
     last_content = state["messages"][-1].content
     chatting_user_ids = extract_user_ids_from_content(last_content)
+    admin_mode_enabled = is_admin_mode_message(last_content, ADMIN_QQ_ID)
+
+    aux_queue, aux_sources = _snapshot_auxiliary_queue()
+    if aux_queue:
+        last_human_content = state["messages"][-1].content
+        if isinstance(last_human_content, str):
+            last_human_content = [{"type": "text", "text": last_human_content}]
+        merged_content = (
+            [{"type": "text", "text": "## 背景聊天记录："}]
+            + aux_queue
+            + [{"type": "text", "text": "## 当前聊天记录："}]
+            + last_human_content
+        )
+        last_human_msg: Any = HumanMessage(merged_content)  # type: ignore
+    else:
+        last_human_msg = HumanMessage(state["messages"][-1].content)
+
+    print("Start chat intent judge...")
+    t_judge_start = time.time()
+    if _has_injected_human_message(state) or admin_mode_enabled:
+        bypass_reason = "ADMIN MODE" if admin_mode_enabled else "injected system message"
+        print(f"[chat_intend_judge] Bypassed for {bypass_reason}")
+    else:
+        try:
+            intent_result = await chat_intend_judge(
+                model=get_code_model("low"),
+                messages=[last_human_msg],
+            )
+        except Exception as exc:
+            reason = _result_reason(None, exc)
+            print(f"[chat_intend_judge] {reason}")
+            return {"messages": []}
+
+        if not _chat_intent_is_eligible(intent_result):
+            reason = _result_reason(intent_result)
+            print(f"[chat_intend_judge] {reason}")
+            return {"messages": []}
+
+        print(
+            "[chat_intend_judge] Response approved: "
+            f"{intent_result.urgency_type} ({intent_result.brief_reason.strip()})"
+        )
+    t_judge_end = time.time()
+    print(f"Elapsed time of chat_intend_judge: {t_judge_end - t_judge_start:.3f}s")
+
     if isinstance(last_content, list) and len(last_content) > 0:
         text_parts: list[str] = []
         for part in last_content:
@@ -594,9 +860,9 @@ async def ai_node(state: MessagesState) -> dict:
 
     print("Memory retrieved: \n" + memory_summary)
 
-    admin_mode_enabled = is_admin_mode_message(last_content, ADMIN_QQ_ID)
     model_chosen = get_advance_model(thinking=True)
-    sys_prompt = get_role_sys_prompt()
+    sys_prompt = _combined_system_prompt()
+    sys_prompt += build_lively_tone_prompt(LIVELY_TONE_ENABLED)
     if admin_mode_enabled:
         sys_prompt += build_admin_mode_prompt(ADMIN_QQ_ID)
         print("[admin] Enabled ADMIN MODE")
@@ -651,32 +917,11 @@ async def ai_node(state: MessagesState) -> dict:
 
     sys_prompt += f"\n\n# 当前日期与时间\n{get_date()}"
 
-    chat_agent = create_agent(
-        model_chosen,
-        get_chat_tools(),
-        system_prompt=sys_prompt,
-    )
-
     print("Start building historical recording from auxiliary queue...")
 
-    aux_queue, aux_sources = _snapshot_auxiliary_queue()
-    if aux_queue:
-        last_human_content = state["messages"][-1].content
-        if isinstance(last_human_content, str):
-            last_human_content = [{"type": "text", "text": last_human_content}]
-        merged_content = (
-            [{"type": "text", "text": "## 背景聊天记录："}]
-            + aux_queue
-            + [{"type": "text", "text": "## 当前聊天记录："}]
-            + last_human_content
-        )
-        last_human_msg: Any = HumanMessage(merged_content)  # type: ignore
-    else:
-        last_human_msg = state["messages"][-1]
-
-    print("Start chat_agent invocation...")
-
     ai_text: str = ""
+    llm_error_type: str | None = None  # Track specific error type for user-facing messages
+    replyable_message_ids: set[int] = set()  # Init to satisfy static analysis; always set in try block
     try:
         mem_msg = (
             []
@@ -692,6 +937,12 @@ async def ai_node(state: MessagesState) -> dict:
         if admin_mode_enabled:
             agent_messages = _without_image_url_parts(agent_messages)
         replyable_message_ids = _extract_replyable_message_ids(agent_messages)
+
+        chat_agent = create_agent(
+            model_chosen,
+            tools=get_chat_tools(),
+            system_prompt=sys_prompt,
+        )
         set_shell_executor_limit(3)  # chat_agent: max 3 shell_executor calls per round
         retrying_agent = chat_agent.with_retry(stop_after_attempt=5)
         invocation_messages = agent_messages
@@ -728,10 +979,29 @@ async def ai_node(state: MessagesState) -> dict:
 
         # LLM outputs plain text directly
         print(f"Raw AI response: {ai_text}")
+    except LLMLimitExceededError:
+        llm_error_type = "rate_limit"
+        ai_text = ""
+    except LLMAuthError:
+        llm_error_type = "auth_error"
+        ai_text = ""
     except Exception:
+        llm_error_type = "other"
+        ai_text = ""
         print("❌ Bad invoke in chat_agent")
         traceback.print_exc()
-        return {}
+
+    # ── Handle LLM-specific errors before any output processing ──
+    if llm_error_type == "rate_limit":
+        _err_answer = _get_ai_answer()
+        if _err_answer:
+            await _err_answer("⚠️ 模型请求过于频繁或配额已用完，请稍后再试。")
+        return {"messages": []}
+    if llm_error_type == "auth_error":
+        _err_answer = _get_ai_answer()
+        if _err_answer:
+            await _err_answer("❌ 模型认证失败，请检查配置。")
+        return {"messages": []}
 
     ai_text_history, reply_to_message_id = _parse_reply_directive(
         str(ai_text),
@@ -912,7 +1182,8 @@ async def chat_end_detect_node(state: MessagesState) -> dict:
             response = str(
                 detect_result.content if hasattr(detect_result, "content") else detect_result
             )
-        except APITimeoutError:
+        except (APITimeoutError, LLMLimitExceededError, LLMAuthError):
+            # Rate-limit / timeout / auth errors → silently continue
             pass
         except InterruptedError:
             pass

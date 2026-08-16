@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import os as _os
 import subprocess
 import tempfile
 from datetime import datetime
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
+import requests
 from nonebot.adapters import Bot
 from nonebot.adapters.onebot.v11 import Message, MessageSegment, PokeNotifyEvent
 
@@ -548,7 +551,7 @@ async def handle_membersearch(bot, event, matcher, args: Message) -> None:
 
 
 async def handle_resetsandbox(event, matcher, args: Message) -> None:
-    """Reset only the admin-selected group's existing Docker sandbox."""
+    """Reset only the admin-selected group's local process runtime."""
     if str(event.get_user_id()) != str(ADMIN_QQ_ID):
         await matcher.finish("只有管理员可以重置 Sandbox。")
         return
@@ -604,26 +607,166 @@ async def handle_agents(event, matcher, args: Message) -> None:
     await matcher.finish("\n".join(lines))
 
 
-async def handle_autoresponse(bot, event, matcher, args: Message) -> None:
-    """Immediately trigger an auto-response execution (debug command).
-
-    Injects the auto-response prompt into the graph targeting the group
-    where the command was sent.
-    If args is non-empty, use it as the prompt instead of the default.
-    Does NOT modify the database — no task created, no reschedule.
-    """
-    from ..graph.nodes import inject_timer
-    from ..prompts import get_auto_response_prompt
-
-    custom_prompt = args.extract_plain_text().strip()
-    group_id = event.group_id
-    group_runtime_registry.bind_bot(event.group_id, bot)
-    prompt = custom_prompt if custom_prompt else get_auto_response_prompt()
-
-    inject_timer(
-        user_id=0,
-        group_id=group_id,
-        timer_prompt=prompt,
-        start_conversation_cb=None,
+def _fetch_deepseek_balance(api_key: str, base_url: str) -> dict:
+    """Fetch one DeepSeek balance snapshot without blocking the async caller."""
+    response = requests.get(
+        f"{base_url.rstrip('/')}/user/balance",
+        headers={
+            "Accept": "application/json",
+            "Authorization": f"Bearer {api_key}",
+            "User-Agent": "Hatsume/1.0",
+        },
+        timeout=10,
     )
-    await matcher.finish(f"💬 Auto Response Mode ON\n\n {prompt}")
+    response.raise_for_status()
+    return response.json()
+
+
+def _build_deepseek_balance_report(payload: object) -> str | None:
+    """Build the balance report text, or None when the payload is invalid."""
+    if not isinstance(payload, dict):
+        return None
+    is_available = payload.get("is_available")
+    balance_infos = payload.get("balance_infos") or payload.get("balances")
+    if not isinstance(balance_infos, list) or not balance_infos:
+        return None
+
+    lines = ["✅ DeepSeek 账户余额："]
+    for info in balance_infos:
+        if not isinstance(info, dict):
+            continue
+        currency = str(info.get("currency", "CNY"))
+        total = _format_balance_amount(info.get("total_balance"))
+        granted = _format_balance_amount(info.get("granted_balance"))
+        topped_up = _format_balance_amount(info.get("topped_up_balance"))
+        lines.append(
+            f"{currency} 总余额：{total}（充值 {topped_up}，赠送 {granted}）"
+        )
+    if len(lines) == 1:
+        return None
+
+    status_text = "✅ 可用" if is_available else "❌ 不可用"
+    lines.append(f"账户状态：{status_text}")
+    return "\n".join(lines)
+
+
+def _format_balance_amount(raw_value: object) -> str:
+    """Format a balance amount, converting integer 分 amounts into 元."""
+    text = str(raw_value).strip()
+    try:
+        value = Decimal(text)
+        if text.lstrip("-").isdigit():
+            # Integer amounts are in 人民币分; decimal strings are already in 元.
+            value = value / Decimal(100)
+        return f"¥{value.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)}"
+    except InvalidOperation:
+        return "未知"
+
+
+async def handle_dsbalance(event, matcher, args: Message) -> None:
+    """Show the DeepSeek account balance from the official balance API."""
+    from .. import config as runtime_config
+
+    api_key = getattr(runtime_config, "DS_API_KEY", "").strip()
+    if not api_key:
+        await matcher.finish("❌ 错误：未配置 DeepSeek API Key（DS_API_KEY）。")
+        return
+    base_url = getattr(runtime_config, "DS_BASE_URL", "https://api.deepseek.com")
+
+    print("Querying DeepSeek balance.")
+    try:
+        payload = await asyncio.to_thread(
+            _fetch_deepseek_balance, api_key, base_url
+        )
+    except requests.exceptions.HTTPError as e:
+        status_code = e.response.status_code if e.response is not None else 0
+        print(f"DeepSeek balance HTTP error: {status_code or 'unknown'}")
+        if status_code in (401, 403):
+            await matcher.finish("❌ 错误：DeepSeek API Key 无效或无权访问。")
+        elif status_code == 429:
+            await matcher.finish("❌ 错误：请求过于频繁，请稍后重试。")
+        elif status_code:
+            await matcher.finish(
+                f"❌ 错误：DeepSeek 余额接口返回 HTTP {status_code}。"
+            )
+        else:
+            await matcher.finish("❌ 错误：DeepSeek 余额接口返回了未知 HTTP 错误。")
+        return
+    except requests.exceptions.SSLError:
+        print("DeepSeek balance SSL error.")
+        await matcher.finish("❌ 错误：无法验证 DeepSeek API 的 SSL 证书。")
+        return
+    except requests.exceptions.Timeout:
+        print("DeepSeek balance timeout.")
+        await matcher.finish("❌ 错误：连接 DeepSeek API 超时，请稍后重试。")
+        return
+    except requests.exceptions.ConnectionError:
+        print("DeepSeek balance connection error.")
+        await matcher.finish("❌ 错误：暂时无法连接 DeepSeek API。")
+        return
+    except requests.exceptions.InvalidJSONError:
+        print("DeepSeek balance invalid JSON response.")
+        await matcher.finish("❌ 错误：DeepSeek API 返回了无效数据。")
+        return
+    except requests.exceptions.RequestException:
+        print("DeepSeek balance request error.")
+        await matcher.finish("❌ 错误：查询 DeepSeek 余额失败，请稍后重试。")
+        return
+    except Exception:
+        print("DeepSeek balance unexpected error.")
+        await matcher.finish("❌ 错误：查询 DeepSeek 余额失败，请稍后重试。")
+        return
+
+    report = _build_deepseek_balance_report(payload)
+    if report is None:
+        await matcher.finish("❌ 错误：DeepSeek API 返回了无效数据。")
+        return
+    await matcher.finish(report)
+
+
+async def handle_learn_evolve(event, matcher, args: Message) -> None:
+    """Trigger learning evolution, optionally filtering memories by group."""
+    from ..evolution import run_learn_evolve
+
+    memory_group_id = None
+    if args.extract_plain_text().strip():
+        memory_group_id = await _resolve_target_group(
+            event,
+            matcher,
+            args,
+            usage="/learn-evolve [群号]",
+        )
+    source = memory_group_id if memory_group_id is not None else "all groups"
+    print(f"Starting learn-evolve from memory source {source}.")
+    result = await run_learn_evolve(
+        memory_group_id=memory_group_id,
+        chat_group_id=int(event.group_id),
+    )
+    await matcher.finish(result)
+
+
+async def handle_autoresponse(bot, event, matcher, args: Message) -> None:
+    """List the next persisted auto-response trigger for every group."""
+    from datetime import timedelta, timezone
+
+    from ..timer import get_store
+
+    store = get_store()
+    group_ids = sorted(store.list_auto_response_group_ids())
+    if not group_ids:
+        await matcher.finish("当前没有自动回复定时任务。")
+        return
+
+    shanghai = timezone(timedelta(hours=8))
+    lines = ["自动回复下次触发时间（上海时间）："]
+    for group_id in group_ids:
+        point = store.get_auto_response_point(group_id)
+        if point is None:
+            trigger_text = "暂无待触发时间"
+        else:
+            trigger_text = datetime.fromtimestamp(
+                float(point["exact_at"]), tz=shanghai
+            ).strftime("%Y-%m-%d %H:%M:%S")
+        lines.append(f"群 {group_id}：{trigger_text}")
+
+    await matcher.finish("\n".join(lines))

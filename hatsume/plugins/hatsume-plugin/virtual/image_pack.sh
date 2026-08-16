@@ -36,16 +36,27 @@ sys.stdout.write(value)
 PY
 }
 
+load_optional_dotenv_value() {
+    local key="$1"
+    "${PYTHON_BIN}" - "${ENV_FILE}" "${key}" <<'PY'
+import sys
+from dotenv import dotenv_values
+
+env_file, key = sys.argv[1:]
+value = dotenv_values(env_file).get(key)
+if isinstance(value, str):
+    sys.stdout.write(value)
+PY
+}
+
 CLAWMAIL_API_KEY="$(load_dotenv_value CLAWMAIL_API_KEY)"
 DS_API_KEY="$(load_dotenv_value DS_API_KEY)"
-GH_TOKEN="$(load_dotenv_value GH_TOKEN)"
+GH_TOKEN="$(load_optional_dotenv_value GH_TOKEN)"
 export CLAWMAIL_API_KEY DS_API_KEY GH_TOKEN
-
 DOCKER_BUILDKIT=1 docker build \
     --no-cache \
-    --build-arg CLAWMAIL_API_KEY="${CLAWMAIL_API_KEY}" \
-    --build-arg DS_API_KEY="${DS_API_KEY}" \
-    --build-arg GH_TOKEN="${GH_TOKEN}" \
+    --secret "id=clawmail_api_key,env=CLAWMAIL_API_KEY" \
+    --secret "id=ds_api_key,env=DS_API_KEY" \
     -t "${IMAGE_NAME}" \
     "${SCRIPT_DIR}/image"
 

@@ -14,6 +14,32 @@ from .security import mask_secret_keys as mask_secret_keys
 CQ_AT_PATTERN = re.compile(r"\[[ \t]*CQ:at,qq=(\d+)\]")
 
 
+# Thinking/reasoning block markers emitted by reasoning-capable models
+# (DeepSeek <think>, Gemini thought blocks, [thinking]/[reasoning] variants).
+# Attributes such as <think system="..."> are tolerated.
+THINKING_TAG_PATTERN = re.compile(
+    r"(?:<|\[)\s*(?:think|thinking|reasoning|thought)"
+    r"(?:\s+[^>\]]*)?(?:>|\])"
+    r"[\s\S]*?"
+    r"(?:<|\[)\s*/\s*(?:think|thinking|reasoning|thought)"
+    r"(?:\s+[^>\]]*)?(?:>|\])",
+    re.IGNORECASE,
+)
+
+
+def strip_thinking_tags(text: str) -> str:
+    """Remove model thinking/reasoning blocks that must not reach the user.
+
+    Strips paired markers such as ``<think>...</think>``,
+    ``[thinking]...</thinking>`` or ``[reasoning]...</reasoning>`` from AI
+    output. The visible answer text (and any tool-call framing) is kept
+    unchanged.
+    """
+    if not text:
+        return text
+    return THINKING_TAG_PATTERN.sub("", text)
+
+
 async def get_group_member_name(bot: Bot, group_id: int | None, user_id: int) -> str:
     """Fetch group member nickname. Falls back to QQ ID on failure."""
     if not group_id:

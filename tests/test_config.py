@@ -41,3 +41,12 @@ def test_advanced_model_defaults_to_deepseek_v4_flash(monkeypatch):
     config = _load_config(monkeypatch)
 
     assert config.ADVANCE_MODEL_NAME == config.DEEPSEEK_V4_FLASH
+
+
+def test_code_model_name_is_deepseek_v4_flash(monkeypatch):
+    """The code model name (models.get_code_model) must come from
+    config.DEEPSEEK_V4_FLASH — the single source used by coding_agent
+    and background_shell parsing."""
+    config = _load_config(monkeypatch)
+
+    assert config.DEEPSEEK_V4_FLASH == "deepseek-v4-flash-free"

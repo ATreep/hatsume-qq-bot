@@ -29,6 +29,7 @@ def _load_prompts() -> types.ModuleType:
     _setup_package_hierarchy()
 
     config_mod = types.ModuleType("hatsume.plugins.hatsume-plugin.config")
+    config_mod.ADMIN_QQ_ID = 999
     config_mod.BOT_QQ_ID = 1234567890
     config_mod.AGENT_QQ_EMAIL = "test@qq.com"
     config_mod.GITHUB_ACCOUNT = "test"
@@ -72,11 +73,26 @@ class TestRolePromptDoesNotContainFormatInstruction:
             "role_sys_prompt contains output format header"
         )
 
-    def test_role_prompt_still_has_character_content(self):
-        """Sanity check: role prompt still has character definition."""
-        role = self.prompts.role_sys_prompt
-        assert "初芽" in role
-        assert "16岁" in role
+    def test_soul_prompt_contains_character_content(self):
+        """Character definition lives in the file-backed soul prompt."""
+        soul = self.prompts.soul
+        assert "初芽" in soul
+        assert "16 岁" in soul
+
+    def test_character_soul_is_loaded_from_data_file_and_removed_from_role(self):
+        soul_file = ROOT / "data/hatsume-plugin/SOUL.md"
+        raw_soul = soul_file.read_text(encoding="utf-8")
+        soul = self.prompts.soul
+
+        assert soul.strip()
+        assert "{{ADMIN_QQ_ID}}" in raw_soul
+        assert "{{BOT_QQ_ID}}" in raw_soul
+        assert "角色名" in soul
+        assert "人设与语气" in soul
+        assert "身份与外表" in soul
+        assert "角色名" not in self.prompts.role_sys_prompt
+        assert "人设与语气" not in self.prompts.role_sys_prompt
+        assert "身份与外表" not in self.prompts.role_sys_prompt
 
 
 def test_role_prompt_documents_native_reply_directive():
@@ -121,6 +137,36 @@ def test_admin_mode_prompt_contains_admin_id_and_sensitive_permissions():
     assert "Shell 访问" in prompt
     assert "沙盒内的提升权限" in prompt
     assert "# ADMIN MODE" not in prompt
+
+
+class TestLivelyTonePrompt:
+    """Verify the runtime chat-tone injection builder in prompts.py."""
+
+    @classmethod
+    def setup_class(cls):
+        cls.prompts = _load_prompts()
+
+    def test_builder_exists_and_is_callable(self):
+        assert callable(self.prompts.build_lively_tone_prompt)
+
+    def test_disabled_returns_empty_string(self):
+        assert self.prompts.build_lively_tone_prompt(enabled=False) == ""
+
+    def test_enabled_returns_lively_chat_style_section(self):
+        prompt = self.prompts.build_lively_tone_prompt(enabled=True)
+        assert isinstance(prompt, str)
+        assert prompt.startswith("\n\n# ")
+        assert "聊天风格补充" in prompt
+        assert "群友" in prompt
+        assert "字数" in prompt
+
+    def test_default_is_enabled(self):
+        assert self.prompts.build_lively_tone_prompt().strip() != ""
+
+    def test_soul_prompt_still_intact(self):
+        soul = self.prompts.soul
+        assert "人设与语气" in soul
+        assert "16 岁" in soul
 
 
 class TestLLMJsonParsing:

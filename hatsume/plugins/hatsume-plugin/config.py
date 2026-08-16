@@ -40,6 +40,7 @@ RUOLI_API_KEY = os.environ.get("ROULI_API_KEY", "")
 PIXELS_API_KEY: str = os.environ.get("PIXELS_API_KEY", "")
 WAWAPI_API_KEY: str = os.environ.get("WAWAPI_API_KEY", "")
 WAWAPI_IMAGE_API_KEY: str = os.environ.get("WAWAPI_IMAGE_API_KEY", "")
+ALI_API_KEY: str = os.environ.get("ALI_API_KEY", "")
 # ---------------------------------------------------------------------------
 # Base URLs (No `v1` suffix)
 # ---------------------------------------------------------------------------
@@ -56,6 +57,7 @@ AR_BASE_URL = "https://agentrouter.org"
 RUOLI_BASE_URL = "https://ruoli.dev"
 PEXELS_BASE_URL = "https://api.pexels.com"
 WAWAPI_BASE_URL = "https://wawapii.com"
+ALI_BASE_URL = "https://ws-1h26pj40tzf8hqys.cn-beijing.maas.aliyuncs.com/compatible-mode"
 
 
 # ---------------------------------------------------------------------------
@@ -63,6 +65,8 @@ WAWAPI_BASE_URL = "https://wawapii.com"
 # ---------------------------------------------------------------------------
 DOUBAO_2_LITE: str = "doubao-seed-2-0-lite"
 DOUBAO_2_MINI: str = "doubao-seed-2-0-mini"
+DEEPSEEK_V4_FLASH_FREE = "deepseek-v4-flash-free"
+MIMO_2_5_FREE = "mimo-v2.5-free"
 DEEPSEEK_V4_FLASH = "deepseek-v4-flash"
 SEEDREAM_5_0_LITE: str = "doubao-seedream-5.0-lite"
 SEEDREAM_4_0 = "doubao-seedream-4-0-250828"
@@ -73,11 +77,14 @@ GPT_5_6_LUNA = "gpt-5.6-luna"
 GPT_5_6_TERRA = "gpt-5.6-terra"
 GPT_5_5 = "gpt-5.5"
 GEMINI_3_5_FLASH = "gemini-3.5-flash"
+GEMINI_3_7_FLASH = "gemini-3.7-flash"
 GROK_4_5 = "grok-4.5"
 GROK_IMAGINE_IMAGE = "grok-imagine-image:stable"
+LAGUNA_S_2_1_FREE = "laguna-s-2.1-free"
+QWEN_3_7_FLASH = "qwen3.7-flash"
 
-ADVANCE_MODEL_NAME: str = GPT_5_6_LUNA
-LITE_MODEL_NAME =  GPT_5_6_LUNA
+ADVANCE_MODEL_NAME: str = GEMINI_3_7_FLASH
+LITE_MODEL_NAME =  GEMINI_3_7_FLASH
 
 
 # ---------------------------------------------------------------------------
@@ -88,7 +95,7 @@ EMBEDDING_MODEL: str = "BAAI/bge-m3"
 # ---------------------------------------------------------------------------
 # Provider selection
 # ---------------------------------------------------------------------------
-PROVIDER: Literal["volc", "volc_plan", "kege", "zhth", "ar", "ruoli", "ds", "waw"] = "zhth"
+PROVIDER: Literal["volc", "volc_plan", "kege", "zhth", "ar", "ruoli", "ds", "waw", "ali"] = "ruoli"
 
 def get_base_url(
     provider: Literal["volc", "volc_plan", "sf", "kege", "zhth", "ar", "ruoli", "ds", "waw"] = PROVIDER,
@@ -112,10 +119,11 @@ def get_base_url(
             return DS_BASE_URL
         case "waw":
             return WAWAPI_BASE_URL
- 
+        case "ali":
+            return ALI_BASE_URL
 
 def get_api_key(
-    provider: Literal["volc", "volc_plan", "sf", "kege", "zhth", "ar", "ruoli", "ds", "waw"] = PROVIDER,
+    provider: Literal["volc", "volc_plan", "sf", "kege", "zhth", "ar", "ruoli", "ds", "waw", "ali"] = PROVIDER,
 ) -> Callable[[], str]:
     match provider:
         case "volc_plan":
@@ -136,11 +144,13 @@ def get_api_key(
             return lambda: DS_API_KEY
         case "waw":
             return lambda: WAWAPI_API_KEY
+        case "ali":
+            return lambda: ALI_API_KEY
 
 # ---------------------------------------------------------------------------
 # Behavioral constants
 # ---------------------------------------------------------------------------
-USER_INPUT_CONFIRM_DURING_TIME: int = 10
+USER_INPUT_CONFIRM_DURING_TIME: int = 7
 CONTEXT_QUEUE_LEN: int = 60
 CONTEXT_QUEUE_OVERLAP_LEN: int = 7
 VIDEO_RATE_LIMIT_SECONDS: int = 60
@@ -154,6 +164,11 @@ MAX_REAL_AT_SEGMENTS: int = 3
 FORWARD_API_TIMEOUT_SECONDS: int = 10
 LONG_MSG_THRESHOLD: int = 500
 POKE_GROUP_WHITELIST: frozenset[int] = frozenset({738458661})
+
+# ---------------------------------------------------------------------------
+# Chat tone (runtime personality layer)
+# ---------------------------------------------------------------------------
+LIVELY_TONE_ENABLED: bool = True
 
 # ---------------------------------------------------------------------------
 # Todo list
@@ -194,6 +209,13 @@ SHELL_TIMEOUT: int = 300
 TIMER_TOLERANCE_MINUTES: int = 5
 TIMER_MAX_FREQUENCY_POINTS: int = 5
 TIMER_MAX_EXACT_POINTS: int = 10
+
+# ---------------------------------------------------------------------------
+# Learning evolution
+# ---------------------------------------------------------------------------
+# 单次读取记忆上限（条）与最近记忆窗口（小时）。
+LEARN_EVOLVE_MEMORY_LIMIT: int = 100
+LEARN_EVOLVE_WINDOW_HOURS: int = 24
 
 # ---------------------------------------------------------------------------
 # Skill module

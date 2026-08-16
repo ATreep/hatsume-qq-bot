@@ -10,7 +10,7 @@ import sys
 import types
 from datetime import datetime
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
 from langchain_core.tools import tool as _real_langchain_tool
@@ -27,6 +27,8 @@ def _load_tools_module():
             name.startswith("hatsume")
             or name == "requests"
             or name.startswith("requests.")
+            or name == "google"
+            or name.startswith("google.")
             or name in (
                 "nonebot",
                 "nonebot.adapters",
@@ -155,6 +157,11 @@ def _load_tools_module():
         return lambda f: f
 
     langchain_core_tools.tool = _mock_tool
+    # The real langchain_keenable package imports these names from
+    # langchain_core.tools at import time; keep the stub importable so
+    # tools.py loads, then tests swap the tool classes themselves.
+    langchain_core_tools.ToolException = type("ToolException", (Exception,), {})
+    langchain_core_tools.BaseTool = type("BaseTool", (), {})
     sys.modules["langchain_core.tools"] = langchain_core_tools
 
     langchain_community = types.ModuleType("langchain_community")
@@ -166,6 +173,27 @@ def _load_tools_module():
         "DuckDuckGoSearchRun", (), {}
     )
     sys.modules["langchain_community.tools"] = langchain_community_tools
+
+    google_mod = types.ModuleType("google")
+    google_mod.__path__ = []
+    google_genai = types.ModuleType("google.genai")
+    google_genai.__path__ = []
+    google_genai_types = types.ModuleType("google.genai.types")
+
+    class _GoogleSearch:
+        pass
+
+    class _GoogleTool:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    google_genai_types.GoogleSearch = _GoogleSearch
+    google_genai_types.Tool = _GoogleTool
+    google_genai.types = google_genai_types
+    google_mod.genai = google_genai
+    sys.modules["google"] = google_mod
+    sys.modules["google.genai"] = google_genai
+    sys.modules["google.genai.types"] = google_genai_types
 
     # Stub sibling modules
     config_mod = types.ModuleType("hatsume.plugins.hatsume-plugin.config")
@@ -181,6 +209,7 @@ def _load_tools_module():
     config_mod.CONTEXT_QUEUE_LEN = 20
     config_mod.PIXELS_API_KEY = "test-pexels-key"
     config_mod.PEXELS_BASE_URL = "https://api.pexels.com"
+    config_mod.GENERATE_IMAGE_RATE_LIMIT_SECONDS = 30
     sys.modules["hatsume.plugins.hatsume-plugin.config"] = config_mod
 
     runtimes = {}
@@ -1374,30 +1403,56 @@ class MessageStub:
 
 
 @pytest.mark.asyncio
-async def test_autoresponse_treats_all_arguments_as_current_group_custom_prompt():
+async def test_autoresponse_lists_each_groups_next_trigger_in_shanghai_time():
     _load_tools_module()
     commands = _load_commands_module()
-    nodes = types.ModuleType("hatsume.plugins.hatsume-plugin.graph.nodes")
-    nodes.inject_timer = MagicMock()
-    sys.modules[nodes.__name__] = nodes
-    prompts = types.ModuleType("hatsume.plugins.hatsume-plugin.prompts")
-    prompts.get_auto_response_prompt = MagicMock(return_value="default prompt")
-    sys.modules[prompts.__name__] = prompts
+    first_trigger = datetime.fromisoformat("2026-08-16T10:30:00+08:00").timestamp()
+    store = types.SimpleNamespace(
+        list_auto_response_group_ids=MagicMock(return_value=(123, 456)),
+        get_auto_response_point=MagicMock(
+            side_effect=lambda group_id: (
+                {"exact_at": first_trigger} if group_id == 123 else None
+            )
+        ),
+    )
+    timer = types.ModuleType("hatsume.plugins.hatsume-plugin.timer")
+    timer.__path__ = [str(ROOT / "hatsume/plugins/hatsume-plugin/timer")]
+    timer.get_store = lambda: store
+    sys.modules[timer.__name__] = timer
     matcher = _FakeMatcher()
-    bot = object()
     event = types.SimpleNamespace(group_id=456)
 
     with pytest.raises(_Finished):
         await commands.handle_autoresponse(
-            bot, event, matcher, MessageStub("prod")
+            object(), event, matcher, MessageStub()
         )
 
-    nodes.inject_timer.assert_called_once_with(
-        user_id=0,
-        group_id=456,
-        timer_prompt="prod",
-        start_conversation_cb=None,
+    assert matcher.finished_with == (
+        "自动回复下次触发时间（上海时间）：\n"
+        "群 123：2026-08-16 10:30:00\n"
+        "群 456：暂无待触发时间"
     )
+    store.get_auto_response_point.assert_has_calls([call(123), call(456)])
+
+
+@pytest.mark.asyncio
+async def test_autoresponse_reports_when_no_group_has_a_timer():
+    _load_tools_module()
+    commands = _load_commands_module()
+    store = types.SimpleNamespace(
+        list_auto_response_group_ids=MagicMock(return_value=()),
+    )
+    timer = types.ModuleType("hatsume.plugins.hatsume-plugin.timer")
+    timer.get_store = lambda: store
+    sys.modules[timer.__name__] = timer
+    matcher = _FakeMatcher()
+
+    with pytest.raises(_Finished):
+        await commands.handle_autoresponse(
+            object(), types.SimpleNamespace(group_id=456), matcher, MessageStub()
+        )
+
+    assert matcher.finished_with == "当前没有自动回复定时任务。"
 
 
 class TestTimerCommand:
@@ -2228,12 +2283,12 @@ def _load_role_module():
 
 
 class TestRolePrompt:
-    """Tests for the role system prompt in prompts/role.py."""
+    """Tests for the role and file-backed soul prompts."""
 
     def test_prompt_contains_bot_qq_id(self):
-        """The role prompt should include the bot's QQ ID."""
+        """The soul prompt should include the bot's QQ ID."""
         role_mod = _load_role_module()
-        assert "1234567890" in role_mod.role_sys_prompt
+        assert "1234567890" in role_mod.soul
 
     def test_prompt_loads_without_errors(self):
         """role.py should import and execute without errors."""
@@ -2748,6 +2803,140 @@ def test_character_proxy_tools_are_mutually_exclusive():
     assert "end_conversation" in on_names
     assert "terminate_character_proxy" in on_names
     assert "create_character_proxy" not in on_names
+
+
+def test_chat_tools_register_web_search_as_a_langchain_tool():
+    """The chat graph must receive a callable search tool, not an SDK schema."""
+    tools = _load_tools_module()
+
+    assert tools.web_search in tools.CHAT_TOOLS
+    assert not hasattr(tools, "google_search_tool")
+
+
+def test_web_search_formats_keenable_results(monkeypatch):
+    """Keenable JSON results become readable numbered text, not raw JSON."""
+    tools = _load_tools_module()
+    keenable = types.SimpleNamespace(
+        run=lambda query: [
+            {
+                "title": "示例标题",
+                "url": "https://example.com/page",
+                "description": "",
+                "snippet": "示例摘要",
+            }
+        ]
+    )
+    duck = types.SimpleNamespace(run=lambda query: "DUCKDUCKGO OUTPUT")
+    monkeypatch.setattr(tools, "KeenableSearch", lambda: keenable)
+    monkeypatch.setattr(tools, "DuckDuckGoSearchRun", lambda: duck)
+
+    result = tools.web_search("示例查询")
+
+    assert isinstance(result, str)
+    assert "1. 示例标题" in result
+    assert "https://example.com/page" in result
+    assert "示例摘要" in result
+    assert not result.startswith("[")
+    assert not result.startswith("{")
+
+
+def test_web_search_falls_back_to_duckduckgo_when_keenable_raises(monkeypatch):
+    tools = _load_tools_module()
+
+    def _raise(query):
+        raise RuntimeError("keenable down")
+
+    monkeypatch.setattr(
+        tools, "KeenableSearch", lambda: types.SimpleNamespace(run=_raise)
+    )
+    monkeypatch.setattr(
+        tools,
+        "DuckDuckGoSearchRun",
+        lambda: types.SimpleNamespace(run=lambda query: "DUCKDUCKGO OUTPUT"),
+    )
+
+    result = tools.web_search("示例查询")
+
+    assert result == "DUCKDUCKGO OUTPUT"
+
+
+def test_web_search_falls_back_to_duckduckgo_when_keenable_returns_empty(monkeypatch):
+    tools = _load_tools_module()
+    monkeypatch.setattr(
+        tools,
+        "KeenableSearch",
+        lambda: types.SimpleNamespace(run=lambda query: []),
+    )
+    monkeypatch.setattr(
+        tools,
+        "DuckDuckGoSearchRun",
+        lambda: types.SimpleNamespace(run=lambda query: "DUCKDUCKGO OUTPUT"),
+    )
+
+    result = tools.web_search("示例查询")
+
+    assert result == "DUCKDUCKGO OUTPUT"
+
+
+def test_web_search_returns_notice_when_both_providers_fail(monkeypatch):
+    """Both providers failing returns the clear notice instead of a bare message."""
+    tools = _load_tools_module()
+
+    def _raise(query):
+        raise RuntimeError("duck down")
+
+    monkeypatch.setattr(
+        tools,
+        "KeenableSearch",
+        lambda: types.SimpleNamespace(run=lambda query: []),
+    )
+    monkeypatch.setattr(
+        tools,
+        "DuckDuckGoSearchRun",
+        lambda: types.SimpleNamespace(run=_raise),
+    )
+
+    result = tools.web_search("示例查询")
+
+    assert result == "web_search 没有找到相关结果"
+
+
+def test_format_search_results_returns_empty_string_for_no_usable_results():
+    tools = _load_tools_module()
+
+    assert tools._format_search_results([]) == ""
+    assert tools._format_search_results([{"title": "", "url": ""}]) == ""
+
+
+def test_format_search_results_skips_entries_without_title_and_url():
+    tools = _load_tools_module()
+
+    output = tools._format_search_results(
+        [
+            {"title": "", "url": "", "description": "no anchor"},
+            {"title": "仅有标题", "url": "", "description": "", "snippet": ""},
+        ]
+    )
+
+    assert output == "1. 仅有标题"
+
+
+def test_format_search_results_prefers_snippet_over_description():
+    tools = _load_tools_module()
+
+    output = tools._format_search_results(
+        [
+            {
+                "title": "示例",
+                "url": "https://example.com",
+                "description": "description text",
+                "snippet": "snippet text",
+            }
+        ]
+    )
+
+    assert "snippet text" in output
+    assert "description text" not in output
 
 
 @pytest.mark.parametrize(

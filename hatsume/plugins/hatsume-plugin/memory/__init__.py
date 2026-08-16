@@ -1,6 +1,7 @@
 """Memory package: storage, retrieval, and tokenization."""
 from .engine import init_db, insert_memory, delete_expired_memories  # noqa: F401
-from .engine import query_by_user_ids, query_all_except  # noqa: F401
+from .engine import query_by_user_ids, query_all_except, query_recent_memories  # noqa: F401
+from .engine import get_db  # noqa: F401
 from .engine import get_recent_user_memories, add_mem, init_tokenized_corpus, init_memory_system  # noqa: F401
 from .engine import (  # noqa: F401
     configure_activated_group_callback,

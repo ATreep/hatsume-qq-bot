@@ -213,6 +213,56 @@ def test_extract_links_urls_in_code_blocks():
     assert result == ["https://example.com/api"]
 
 
+def test_extract_links_strips_wrapping_paren():
+    """A sentence-wrapping right paren with no matching open paren is stripped."""
+    result = _extract_links("(https://example.com)")
+    assert result == ["https://example.com"]
+
+
+def test_extract_links_strips_paren_and_sentence_punctuation():
+    """Trailing ')' plus a period or comma are both treated as wrapping."""
+    assert _extract_links("https://example.com/path).") == [
+        "https://example.com/path"
+    ]
+    assert _extract_links("(https://example.com),") == ["https://example.com"]
+
+
+def test_extract_links_keeps_balanced_parens():
+    """A trailing ')' that closes a '(' inside the URL is part of the URL."""
+    result = _extract_links(
+        "https://en.wikipedia.org/wiki/Disambiguation_(disambiguation)"
+    )
+    assert result == [
+        "https://en.wikipedia.org/wiki/Disambiguation_(disambiguation)"
+    ]
+
+
+def test_extract_links_keeps_internal_balanced_parens():
+    """Balanced parens in the middle of a URL are preserved."""
+    result = _extract_links("https://example.com/foo(bar)")
+    assert result == ["https://example.com/foo(bar)"]
+
+
+def test_extract_links_balanced_paren_followed_by_punctuation():
+    """Punctuation after a balanced ')' is stripped; the ')' is kept."""
+    result = _extract_links(
+        "https://en.wikipedia.org/wiki/Disambiguation_(disambiguation),"
+    )
+    assert result == [
+        "https://en.wikipedia.org/wiki/Disambiguation_(disambiguation)"
+    ]
+
+
+def test_extract_links_markdown_link_with_balanced_paren_url():
+    """Markdown [text](url) keeps a balanced trailing ')' and strips nothing extra."""
+    result = _extract_links(
+        "[text](https://en.wikipedia.org/wiki/Disambiguation_(disambiguation))"
+    )
+    assert result == [
+        "https://en.wikipedia.org/wiki/Disambiguation_(disambiguation)"
+    ]
+
+
 # ---- _format_links tests -----------------------------------------------------
 
 def test_format_links_single():
@@ -237,6 +287,37 @@ def test_format_links_multiple():
 def test_format_links_empty():
     result = _format_links([])
     assert result == ""
+
+
+# ---- _markdown_to_html code-block wrap tests ---------------------------------
+
+@pytest.mark.asyncio
+async def test_markdown_to_html_code_block_wrap_css():
+    """Generated HTML styles code blocks so long lines wrap, not clip."""
+    html = await md_to_image_mod._markdown_to_html(
+        "```python\nprint('hello world')\n```"
+    )
+    # Inline CSS must override the theme's white-space: pre / word-wrap: normal.
+    assert "white-space: pre-wrap" in html
+    assert "overflow-wrap: break-word" in html
+    assert "word-break: break-word" in html
+    # The code block is still emitted as a <pre> element by codehilite.
+    assert "<pre" in html
+
+
+@pytest.mark.asyncio
+async def test_markdown_to_html_code_block_wrap_scoped_and_preserves_content():
+    """Wrap rules target pre/code and the code lines survive conversion intact."""
+    html = await md_to_image_mod._markdown_to_html(
+        "```python\nvery_long_line = \"x\" * 1000\n    indented = True\n```"
+    )
+    # Wrap CSS is scoped to code-block selectors.
+    assert ".markdown-body pre" in html
+    assert ".markdown-body pre code" in html
+    # codehilite output keeps the long and indented lines inside a <pre> block.
+    assert '<div class="codehilite">' in html
+    assert "very_long_line" in html
+    assert "indented" in html
 
 
 # ---- auto_convert_text integration tests -------------------------------------
@@ -284,6 +365,17 @@ async def test_auto_convert_text_short_with_md_features_and_links():
     assert result[0].type == "image"
     assert result[1].type == "text"
     assert "https://docs.python.org" in result[1].data.get("text", "")
+
+
+@pytest.mark.asyncio
+async def test_auto_convert_text_short_markdown_link():
+    """A short Markdown link renders as an image and preserves its URL."""
+    msg = "[linkname](https://example.com)"
+    result = await auto_convert_text(msg)
+    assert len(result) == 2
+    assert result[0].type == "image"
+    assert result[1].type == "text"
+    assert result[1].data.get("text") == "LINKS\n\n1. https://example.com"
 
 
 @pytest.mark.asyncio

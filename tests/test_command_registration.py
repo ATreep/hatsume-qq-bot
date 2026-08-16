@@ -29,4 +29,4 @@ def test_removed_and_group_selectable_commands():
 
     assert "clear" not in commands
     assert "video" not in commands
-    assert {"agents", "skills", "likerank", "resetsandbox"} <= commands
+    assert {"agents", "skills", "likerank", "resetsandbox", "learn-evolve"} <= commands

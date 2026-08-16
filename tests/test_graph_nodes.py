@@ -8,8 +8,9 @@ import json
 import random
 import sys
 import types
+import pytest
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 NODES_PKG_DIR = ROOT / "hatsume/plugins/hatsume-plugin/graph"
@@ -227,6 +228,17 @@ def _load_nodes_module():
     openai_mod.APITimeoutError = type("APITimeoutError", (Exception,), {})
     sys.modules["openai"] = openai_mod
 
+    # errors — load from real file so exception classes match production code
+    import importlib.util as _iu
+    errors_path = base / "errors.py"
+    _errors_spec = _iu.spec_from_file_location(
+        "hatsume.plugins.hatsume-plugin.errors", errors_path
+    )
+    assert _errors_spec is not None and _errors_spec.loader is not None
+    _errors_mod = _iu.module_from_spec(_errors_spec)
+    _errors_spec.loader.exec_module(_errors_mod)
+    sys.modules["hatsume.plugins.hatsume-plugin.errors"] = _errors_mod
+
     # ------------------------------------------------------------------
     # Stub sibling plugin modules
     # ------------------------------------------------------------------
@@ -247,21 +259,49 @@ def _load_nodes_module():
     ]:
         setattr(config_mod, attr, 0)
     config_mod.ADMIN_QQ_ID = "12345"
+    config_mod.LIVELY_TONE_ENABLED = True
     sys.modules["hatsume.plugins.hatsume-plugin.config"] = config_mod
 
     # models
-    mock_model = types.SimpleNamespace(
-        invoke=lambda *a, **kw: types.SimpleNamespace(content="no")
+    def _mock_model_invoke(messages, *args, **kwargs):
+        first_content = (
+            getattr(messages[0], "content", "") if messages else ""
+        )
+        if first_content == "judge prompt":
+            return types.SimpleNamespace(
+                content=json.dumps(
+                    {
+                        "is_response": True,
+                        "urgency_type": "情感陪聊",
+                        "brief_reason": "默认测试需要继续对话",
+                    }
+                )
+            )
+        return types.SimpleNamespace(content="no")
+
+    mock_model = types.SimpleNamespace(invoke=_mock_model_invoke)
+    mock_model.with_structured_output = lambda schema: types.SimpleNamespace(
+        invoke=lambda *a, **kw: {
+            "is_response": True,
+            "urgency_type": "情感陪聊",
+            "brief_reason": "默认测试需要继续对话",
+        }
     )
     models_mod = types.ModuleType("hatsume.plugins.hatsume-plugin.models")
     models_mod.get_advance_model = lambda **kw: mock_model
-    models_mod.get_code_model = lambda **kw: mock_model
+    models_mod.get_code_model = lambda *args, **kw: mock_model
     models_mod.get_lite_model = lambda **kw: mock_model
     models_mod.get_mini_model = lambda **kw: mock_model
     sys.modules["hatsume.plugins.hatsume-plugin.models"] = models_mod
 
     # prompts (role_sys_prompt now in prompts.py directly)
     prompts_pkg.role_sys_prompt = "test prompt"
+    prompts_pkg.soul = "test soul"
+    prompts_pkg.get_soul_prompt = lambda: prompts_pkg.soul
+    prompts_pkg.CHAT_INTEND_JUDGE_PROMPT = "judge prompt"
+    prompts_pkg.CHAT_INTENT_URGENCY_TYPES = frozenset(
+        {"回答问题", "补充说明", "情感陪聊", "科普解释", "抛出想法"}
+    )
     prompts_pkg.build_skill_prompt = lambda skills: ""
     prompts_pkg.build_agent_state_prompt = lambda: ""
     prompts_pkg.build_admin_mode_prompt = lambda admin_qq_id: (
@@ -275,6 +315,9 @@ def _load_nodes_module():
     prompts_pkg.build_face_injection_prompt = lambda emotions: (
         "\n\n# 表情发送\n\n可选的情绪：" + "、".join(emotions)
         if emotions else ""
+    )
+    prompts_pkg.build_lively_tone_prompt = lambda enabled=True: (
+        "\n\n# 聊天风格补充（运行时）\n- lively tone marker" if enabled else ""
     )
     prompts_pkg.build_todo_prompt = lambda items, available=True: (
         f"\n\ntodo prompt: available={available}; items={items}"
@@ -440,6 +483,7 @@ def _load_nodes_module():
     nodes_mod.bind_state = bind_test_state
     nodes_mod.auxiliary_messages_queue = runtime.auxiliary_messages_queue
     nodes_mod.auxiliary_source_queue = runtime.auxiliary_source_queue
+    nodes_mod.errors = _errors_mod  # expose for tests that need error classes
     nodes_mod.__class__ = _RuntimeBackedModule
     return nodes_mod
 
@@ -1234,7 +1278,8 @@ def test_ai_node_skips_merge_when_auxiliary_queue_empty():
         asyncio.run(nodes.ai_node({"messages": [human_msg]}))
 
         sent_last_msg = captured_invocations[0]["messages"][-1]
-        assert sent_last_msg is human_msg
+        assert sent_last_msg.type == "human"
+        assert sent_last_msg.content == human_msg.content
         assert mock_state.auxiliary_queue == []
     finally:
         nodes.create_agent = original_create_agent
@@ -1283,7 +1328,10 @@ def test_ai_node_does_not_send_bootstrap_role_prompt_twice():
         )
 
         assert captured_system_prompts[0].startswith(bootstrap_prompt)
-        assert captured_invocations[0]["messages"] == [human_message]
+        sent_messages = captured_invocations[0]["messages"]
+        assert len(sent_messages) == 1
+        assert sent_messages[0].type == "human"
+        assert sent_messages[0].content == human_message.content
     finally:
         nodes.create_agent = original_create_agent
 
@@ -1803,6 +1851,408 @@ def test_ai_node_injects_invocation_datetime_into_system_prompt():
         nodes.get_date = original_get_date
 
 
+def test_ai_node_injects_lively_tone_prompt_into_system_prompt():
+    """The runtime liveliness layer should be appended to the chat system prompt."""
+    nodes = _load_nodes_module()
+    nodes.auxiliary_messages_queue.clear()
+    nodes.auxiliary_source_queue.clear()
+
+    sys_prompts: list[str] = []
+
+    class _FakeAgent:
+        def with_retry(self, **kw):
+            return self
+
+        async def ainvoke(self, *a, **kw):
+            return {"messages": [types.SimpleNamespace(content="hello", type="ai")]}
+
+    original_create_agent = nodes.create_agent
+
+    def _tracking_create_agent(model, tools, system_prompt=None, **kw):
+        sys_prompts.append(system_prompt or "")
+        return _FakeAgent()
+
+    nodes.create_agent = _tracking_create_agent
+
+    try:
+        asyncio.run(
+            nodes.ai_node(
+                {"messages": [types.SimpleNamespace(content="hi", type="human")]}
+            )
+        )
+        assert len(sys_prompts) == 1
+        assert "# 聊天风格补充（运行时）" in sys_prompts[0]
+        assert "lively tone marker" in sys_prompts[0]
+    finally:
+        nodes.create_agent = original_create_agent
+
+
+def test_ai_node_skips_chat_agent_when_intent_judge_declines():
+    nodes = _load_nodes_module()
+    answer = AsyncMock()
+    mock_state = types.SimpleNamespace(
+        human_queue=[],
+        human_source_queue=[],
+        is_graph_running=True,
+        current_query_user_id=None,
+        end_requested=False,
+        ai_answer=answer,
+    )
+    nodes.bind_state(mock_state)
+
+    captured_judge_messages: list[list[object]] = []
+
+    class _JudgeModel:
+        def with_structured_output(self, schema):
+            return self
+
+        def invoke(self, messages, **kwargs):
+            captured_judge_messages.append(messages)
+            return types.SimpleNamespace(
+                content=json.dumps(
+                    {
+                        "is_response": False,
+                        "urgency_type": "",
+                        "brief_reason": "这条消息只是旁听内容",
+                    }
+                )
+            )
+
+    original_code_model = nodes.get_code_model
+    original_create_agent = nodes.create_agent
+    nodes.get_code_model = lambda *args, **kwargs: _JudgeModel()
+
+    def _unexpected_chat_agent(*args, **kwargs):
+        raise AssertionError("chat_agent must not be created when judge declines")
+
+    nodes.create_agent = _unexpected_chat_agent
+
+    try:
+        with patch("builtins.print") as print_mock:
+            result = asyncio.run(
+                nodes.ai_node(
+                    {"messages": [types.SimpleNamespace(content="旁听内容", type="human")]}
+                )
+            )
+
+        assert result == {"messages": []}
+        answer.assert_not_awaited()
+        assert captured_judge_messages
+        assert any(
+            "这条消息只是旁听内容" in str(call.args[0])
+            for call in print_mock.call_args_list
+            if call.args
+        )
+    finally:
+        nodes.get_code_model = original_code_model
+        nodes.create_agent = original_create_agent
+
+
+def test_chat_intent_requires_response_allowed_urgency_and_reason():
+    nodes = _load_nodes_module()
+
+    assert nodes._chat_intent_is_eligible(
+        nodes.ChatIntentJudgeResult(
+            is_response=True,
+            urgency_type="科普解释",
+            brief_reason="用户明确要求解释概念",
+        )
+    )
+    assert not nodes._chat_intent_is_eligible(
+        nodes.ChatIntentJudgeResult(
+            is_response=False,
+            urgency_type="科普解释",
+            brief_reason="用户明确要求解释概念",
+        )
+    )
+    assert not nodes._chat_intent_is_eligible(
+        nodes.ChatIntentJudgeResult(
+            is_response=True,
+            urgency_type="",
+            brief_reason="没有允许的紧急类型",
+        )
+    )
+    assert not nodes._chat_intent_is_eligible(
+        nodes.ChatIntentJudgeResult(
+            is_response=True,
+            urgency_type="回答问题",
+            brief_reason="   ",
+        )
+    )
+
+
+def test_chat_intend_judge_directly_parses_model_json():
+    nodes = _load_nodes_module()
+    captured_messages: list[list[object]] = []
+
+    class _JudgeModel:
+        def with_structured_output(self, schema):
+            raise AssertionError("judge must invoke the raw model directly")
+
+        def invoke(self, messages, **kwargs):
+            captured_messages.append(messages)
+            return types.SimpleNamespace(
+                content='{"is_response": true, "urgency_type": "回答问题", "brief_reason": "用户正在提问"}'
+            )
+
+    result = asyncio.run(
+        nodes.chat_intend_judge(
+            _JudgeModel(),
+            [types.SimpleNamespace(content="问题", type="human")],
+        )
+    )
+
+    assert result.is_response is True
+    assert result.urgency_type == "回答问题"
+    assert result.brief_reason == "用户正在提问"
+    assert captured_messages[0][0].content == "judge prompt"
+    assert captured_messages[0][1].content == "问题"
+
+
+def test_chat_intend_judge_parses_fenced_json_content_segments():
+    nodes = _load_nodes_module()
+
+    class _JudgeModel:
+        def invoke(self, messages, **kwargs):
+            return types.SimpleNamespace(
+                content=[
+                    {
+                        "type": "text",
+                        "text": (
+                            "```json\n"
+                            '{"is_response": true, "urgency_type": "情感陪聊", '
+                            '"brief_reason": "群友点名初芽要求请客互动，适合接梗回应"}\n'
+                            "```"
+                        ),
+                        "extras": {"signature": "provider metadata"},
+                    }
+                ]
+            )
+
+    result = asyncio.run(nodes.chat_intend_judge(_JudgeModel(), []))
+
+    assert result.is_response is True
+    assert result.urgency_type == "情感陪聊"
+    assert result.brief_reason == "群友点名初芽要求请客互动，适合接梗回应"
+
+
+def test_chat_intend_judge_retries_json_parse_errors_up_to_three_attempts():
+    nodes = _load_nodes_module()
+    attempts = 0
+
+    class _JudgeModel:
+        def invoke(self, messages, **kwargs):
+            nonlocal attempts
+            attempts += 1
+            if attempts < 3:
+                return types.SimpleNamespace(content="not json")
+            return types.SimpleNamespace(
+                content='{"is_response": true, "urgency_type": "回答问题", "brief_reason": "重试后得到有效 JSON"}'
+            )
+
+    with patch("builtins.print") as print_mock:
+        result = asyncio.run(nodes.chat_intend_judge(_JudgeModel(), []))
+
+    assert attempts == 3
+    assert result.brief_reason == "重试后得到有效 JSON"
+    raw_response_logs = [
+        str(call.args[0])
+        for call in print_mock.call_args_list
+        if call.args and "original llm response" in str(call.args[0])
+    ]
+    assert raw_response_logs == [
+        "[chat_intend_judge] original llm response: 'not json'",
+        "[chat_intend_judge] original llm response: 'not json'",
+    ]
+
+
+def test_chat_intend_judge_retries_invocation_errors_up_to_three_attempts():
+    nodes = _load_nodes_module()
+    attempts = 0
+
+    class _JudgeModel:
+        def invoke(self, messages, **kwargs):
+            nonlocal attempts
+            attempts += 1
+            if attempts < 3:
+                raise RuntimeError("temporary provider failure")
+            return types.SimpleNamespace(
+                content='{"is_response": false, "urgency_type": "", "brief_reason": "重试后判断无需回复"}'
+            )
+
+    result = asyncio.run(nodes.chat_intend_judge(_JudgeModel(), []))
+
+    assert attempts == 3
+    assert result.is_response is False
+    assert result.brief_reason == "重试后判断无需回复"
+
+
+def test_ai_node_keeps_chat_agent_prompt_out_of_intent_judge():
+    nodes = _load_nodes_module()
+    mock_state = types.SimpleNamespace(
+        human_queue=[],
+        human_source_queue=[],
+        is_graph_running=True,
+        current_query_user_id=None,
+        end_requested=False,
+        ai_answer=None,
+    )
+    nodes.bind_state(mock_state)
+
+    captured_judge_messages: list[list[object]] = []
+    captured_chat_prompts: list[str] = []
+
+    class _JudgeModel:
+        def with_structured_output(self, schema):
+            return self
+
+        def invoke(self, messages, **kwargs):
+            captured_judge_messages.append(messages)
+            return types.SimpleNamespace(
+                content=json.dumps(
+                    {
+                        "is_response": True,
+                        "urgency_type": "回答问题",
+                        "brief_reason": "用户正在提问",
+                    }
+                )
+            )
+
+    class _ChatAgent:
+        def with_retry(self, **kwargs):
+            return self
+
+        async def ainvoke(self, payload, *args, **kwargs):
+            return {"messages": [types.SimpleNamespace(content="回答", type="ai")]}
+
+    original_code_model = nodes.get_code_model
+    original_create_agent = nodes.create_agent
+    nodes.get_code_model = lambda *args, **kwargs: _JudgeModel()
+
+    def _capture_chat_agent(model, tools, *, system_prompt):
+        captured_chat_prompts.append(system_prompt)
+        return _ChatAgent()
+
+    nodes.create_agent = _capture_chat_agent
+
+    try:
+        asyncio.run(
+            nodes.ai_node(
+                {"messages": [types.SimpleNamespace(content="请回答", type="human")]}
+            )
+        )
+    finally:
+        nodes.get_code_model = original_code_model
+        nodes.create_agent = original_create_agent
+
+    assert len(captured_judge_messages) == 1
+    assert len(captured_chat_prompts) == 1
+    judge_system = captured_judge_messages[0][0].content
+    assert "test soul" not in judge_system
+    assert "test prompt" not in judge_system
+    assert judge_system == "judge prompt"
+    assert captured_chat_prompts[0].startswith("test prompt")
+    assert "test soul" in captured_chat_prompts[0]
+    assert captured_judge_messages[0][1].content == "请回答"
+
+
+def test_ai_node_judges_before_memory_retrieval():
+    nodes = _load_nodes_module()
+    mock_state = types.SimpleNamespace(
+        human_queue=[],
+        human_source_queue=[],
+        is_graph_running=True,
+        current_query_user_id=None,
+        end_requested=False,
+        ai_answer=None,
+    )
+    nodes.bind_state(mock_state)
+    events: list[str] = []
+
+    class _JudgeModel:
+        def with_structured_output(self, schema):
+            return self
+
+        def invoke(self, messages, **kwargs):
+            events.append("judge")
+            assert messages[0].content == "judge prompt"
+            assert messages[1].content == "请回答"
+            return types.SimpleNamespace(
+                content=json.dumps(
+                    {
+                        "is_response": False,
+                        "urgency_type": "",
+                        "brief_reason": "不需要现在回应",
+                    }
+                )
+            )
+
+    original_code_model = nodes.get_code_model
+    original_query_memory = nodes.query_memory
+    nodes.get_code_model = lambda *args, **kwargs: _JudgeModel()
+
+    def _unexpected_memory(*args, **kwargs):
+        events.append("memory")
+        raise AssertionError("memory retrieval must happen after judging")
+
+    nodes.query_memory = _unexpected_memory
+    try:
+        result = asyncio.run(
+            nodes.ai_node(
+                {"messages": [types.SimpleNamespace(content="请回答", type="human")]}
+            )
+        )
+    finally:
+        nodes.get_code_model = original_code_model
+        nodes.query_memory = original_query_memory
+
+    assert result == {"messages": []}
+    assert events == ["judge"]
+
+
+def test_ai_node_bypasses_intent_judge_for_injected_human_message():
+    nodes = _load_nodes_module()
+    mock_state = types.SimpleNamespace(
+        human_queue=[],
+        human_source_queue=[],
+        is_graph_running=True,
+        current_query_user_id=None,
+        end_requested=False,
+        ai_answer=None,
+    )
+    nodes.bind_state(mock_state)
+    nodes._last_was_system_trigger = True
+
+    class _UnexpectedJudge:
+        def with_structured_output(self, schema):
+            raise AssertionError("injected messages must bypass intent judge")
+
+    class _ChatAgent:
+        def with_retry(self, **kwargs):
+            return self
+
+        async def ainvoke(self, payload, *args, **kwargs):
+            return {"messages": [types.SimpleNamespace(content="完成", type="ai")]}
+
+    original_lite_model = nodes.get_lite_model
+    original_create_agent = nodes.create_agent
+    nodes.get_lite_model = lambda: _UnexpectedJudge()
+    nodes.create_agent = lambda *args, **kwargs: _ChatAgent()
+
+    try:
+        result = asyncio.run(
+            nodes.ai_node(
+                {"messages": [types.SimpleNamespace(content="定时任务", type="human")]}
+            )
+        )
+    finally:
+        nodes.get_lite_model = original_lite_model
+        nodes.create_agent = original_create_agent
+        nodes._last_was_system_trigger = False
+
+    assert result["messages"][0].content == "完成"
+
+
 def _admin_mode_content(
     sender_id: int,
     content: str,
@@ -1870,6 +2320,52 @@ def test_admin_mode_detector_accepts_qualifying_message_in_merged_batch():
     )
 
     assert nodes.is_admin_mode_message(merged_content, "12345")
+
+
+def test_ai_node_bypasses_intent_judge_for_admin_mode():
+    nodes = _load_nodes_module()
+    mock_state = types.SimpleNamespace(
+        human_queue=[],
+        human_source_queue=[],
+        is_graph_running=True,
+        current_query_user_id=None,
+        end_requested=False,
+        ai_answer=None,
+    )
+    nodes.bind_state(mock_state)
+
+    async def _unexpected_judge(*args, **kwargs):
+        raise AssertionError("ADMIN MODE must bypass intent judge")
+
+    class _ChatAgent:
+        def with_retry(self, **kwargs):
+            return self
+
+        async def ainvoke(self, payload, *args, **kwargs):
+            return {"messages": [types.SimpleNamespace(content="完成", type="ai")]}
+
+    original_chat_intend_judge = nodes.chat_intend_judge
+    original_create_agent = nodes.create_agent
+    nodes.chat_intend_judge = _unexpected_judge
+    nodes.create_agent = lambda *args, **kwargs: _ChatAgent()
+    try:
+        result = asyncio.run(
+            nodes.ai_node(
+                {
+                    "messages": [
+                        types.SimpleNamespace(
+                            content=_admin_mode_content(12345, "BYPASS run task"),
+                            type="human",
+                        )
+                    ]
+                }
+            )
+        )
+    finally:
+        nodes.chat_intend_judge = original_chat_intend_judge
+        nodes.create_agent = original_create_agent
+
+    assert result["messages"][0].content == "完成"
 
 
 def test_ai_node_admin_mode_preserves_model_prompt_and_image_filter_per_round():
@@ -2326,3 +2822,487 @@ def test_append_auxiliary_message_compaction_failure_keeps_configured_tail():
         nodes.get_lite_model = original_lite
         nodes.auxiliary_messages_queue.clear()
         nodes.auxiliary_source_queue.clear()
+
+
+# -----------------------------------------------------------------------
+# Thinking / reasoning tag handling (DeepSeek <think>, Gemini thought blocks)
+# -----------------------------------------------------------------------
+
+
+def test_ai_node_strips_thinking_tags_from_user_text_keeps_aimessage():
+    """<think> blocks must be stripped from user-facing text and from the
+    returned AIMessage so they never reach the user or later model turns."""
+    nodes = _load_nodes_module()
+    nodes.auxiliary_messages_queue.clear()
+    nodes.auxiliary_source_queue.clear()
+
+    sent_messages: list = []
+
+    async def _mock_send(msg):
+        sent_messages.append(msg)
+
+    mock_state = types.SimpleNamespace(
+        human_queue=[],
+        human_source_queue=[],
+        is_graph_running=True,
+        current_query_user_id=None,
+        end_requested=False,
+        ai_answer=_mock_send,
+    )
+    nodes.bind_state(mock_state)
+
+    ai_response = (
+        "<think>用户可能在问上海天气</think>\n"
+        "今天上海晴，气温 28°C。"
+    )
+
+    class _FakeAgent:
+        def with_retry(self, **kw):
+            return self
+
+        async def ainvoke(self, *a, **kw):
+            return {
+                "messages": [
+                    types.SimpleNamespace(content=ai_response, type="ai", tool_calls=[])
+                ]
+            }
+
+    original_create_agent = nodes.create_agent
+    nodes.create_agent = lambda *a, **kw: _FakeAgent()
+    try:
+        result = asyncio.run(
+            nodes.ai_node(
+                {"messages": [types.SimpleNamespace(content="hello", type="human")]}
+            )
+        )
+    finally:
+        nodes.create_agent = original_create_agent
+
+    # The returned AIMessage must NOT contain the thinking block
+    aimessage = result["messages"][0]
+    assert "<think>" not in aimessage.content, (
+        "AIMessage should not contain thinking tags"
+    )
+    assert "今天上海晴" in aimessage.content, (
+        "AIMessage should contain the visible answer"
+    )
+
+    # User-facing segments must NOT contain the thinking block either
+    assert len(sent_messages) >= 1
+    joined = "".join(
+        getattr(seg, "data", {}).get("text", "")
+        if isinstance(getattr(seg, "data", None), dict)
+        else str(getattr(seg, "data", seg))
+        for seg in sent_messages
+    )
+    assert "<think>" not in joined, "Sent text should not contain thinking tags"
+    assert "今天上海晴" in joined, "Sent text should contain the visible answer"
+
+
+def test_ai_node_reinvokes_after_thinking_only_response():
+    """A response containing only <think> reasoning must not be delivered and
+    must trigger another agent invocation for the visible answer."""
+    nodes = _load_nodes_module()
+    nodes.auxiliary_messages_queue.clear()
+    nodes.auxiliary_source_queue.clear()
+    answer = AsyncMock()
+    mock_state = types.SimpleNamespace(
+        human_queue=[],
+        human_source_queue=[],
+        is_graph_running=True,
+        current_query_user_id=None,
+        end_requested=False,
+        ai_answer=answer,
+    )
+    nodes.bind_state(mock_state)
+
+    class _FakeAgent:
+        def __init__(self):
+            self.invocations: list[dict] = []
+
+        def with_retry(self, **kw):
+            return self
+
+        async def ainvoke(self, payload, *a, **kw):
+            self.invocations.append(payload)
+            if len(self.invocations) == 1:
+                return {
+                    "messages": [
+                        types.SimpleNamespace(
+                            content="<think>还在推理，没有答案</think>",
+                            type="ai",
+                            tool_calls=[],
+                        )
+                    ]
+                }
+            return {
+                "messages": payload["messages"]
+                + [
+                    types.SimpleNamespace(
+                        content="最终回答", type="ai", tool_calls=[]
+                    )
+                ]
+            }
+
+    original_create_agent = nodes.create_agent
+    fake_agent = _FakeAgent()
+    nodes.create_agent = lambda *a, **kw: fake_agent
+    try:
+        result = asyncio.run(
+            nodes.ai_node(
+                {"messages": [types.SimpleNamespace(content="hello", type="human")]}
+            )
+        )
+    finally:
+        nodes.create_agent = original_create_agent
+
+    assert len(fake_agent.invocations) == 2, (
+        "thinking-only output should trigger a re-invocation"
+    )
+    answer.assert_awaited_once()
+    assert answer.await_args.args[0].data["text"] == "最终回答"
+    # No thinking-only text may reach the user or the returned AIMessage
+    assert result["messages"][0].content == "最终回答"
+
+
+def test_chat_intend_judge_parses_json_wrapped_in_thinking_tags():
+    """The judge model may wrap its JSON in <think> blocks; parsing must strip
+    them on the first attempt instead of retrying."""
+    nodes = _load_nodes_module()
+    attempts = 0
+
+    class _JudgeModel:
+        def invoke(self, messages, **kwargs):
+            nonlocal attempts
+            attempts += 1
+            return types.SimpleNamespace(
+                content=(
+                    "<think>该用户正在提问，应回复</think>\n"
+                    '{"is_response": true, "urgency_type": "回答问题", '
+                    '"brief_reason": "用户正在提问"}'
+                )
+            )
+
+    result = asyncio.run(nodes.chat_intend_judge(_JudgeModel(), []))
+
+    assert attempts == 1, "wrapped JSON should parse on the first attempt"
+    assert result.is_response is True
+    assert result.urgency_type == "回答问题"
+    assert result.brief_reason == "用户正在提问"
+
+
+# -----------------------------------------------------------------------
+# Feature: Structured LLM error handling (rate-limit / auth / transient)
+# -----------------------------------------------------------------------
+
+
+def test_chat_intend_judge_fails_fast_after_three_consecutive_rate_limits():
+    """Three back-to-back LLMLimitExceededError should raise a clear Chinese message.
+
+    Patch _invoke_model directly because chat_intend_judge calls it internally
+    and the test must inject our exception classes.
+    """
+    nodes = _load_nodes_module()
+    E = nodes.errors
+
+    # Override _invoke_model to raise LLMLimitExceededError
+    original_invoke_model = nodes._invoke_model
+    async def _failing_invoke(*args, **kwargs):
+        raise E.LLMLimitExceededError("rate limit")
+
+    nodes._invoke_model = _failing_invoke
+
+    with pytest.raises(E.LLMLimitExceededError) as exc_info:
+        asyncio.run(nodes.chat_intend_judge(None, []))
+
+    assert "模型请求过于频繁或配额已用完" in str(exc_info.value)
+
+    # Restore
+    nodes._invoke_model = original_invoke_model
+
+
+def test_ai_node_returns_user_message_on_rate_limit():
+    """When chat_agent raises LLMLimitExceededError the AI node should send
+    a Chinese warning and return {\"messages\": []} instead of crashing silently."""
+    nodes = _load_nodes_module()
+    E = nodes.errors
+    sent_messages: list = []
+
+    async def _mock_send(msg):
+        sent_messages.append(msg)
+
+    mock_state = types.SimpleNamespace(
+        human_queue=[],
+        human_source_queue=[],
+        is_graph_running=True,
+        current_query_user_id=None,
+        end_requested=False,
+        ai_answer=_mock_send,
+    )
+    nodes.bind_state(mock_state)
+
+    class _FailingAgent:
+        def with_retry(self, **kw):
+            return self
+
+        async def ainvoke(self, *a, **kw):
+            raise E.LLMLimitExceededError("quota exceeded")
+
+    original_create_agent = nodes.create_agent
+    nodes.create_agent = lambda *args, **kwargs: _FailingAgent()
+
+    try:
+        result = asyncio.run(
+            nodes.ai_node(
+                {"messages": [types.SimpleNamespace(content="hello", type="human")]}
+            )
+        )
+    finally:
+        nodes.create_agent = original_create_agent
+
+    assert result == {"messages": []}
+    assert len(sent_messages) >= 1
+    # Message may be a plain str or MessageSegment — extract text either way
+    first_msg = sent_messages[0]
+    first_text = (
+        first_msg
+        if isinstance(first_msg, str)
+        else (first_msg.data.get("text", "") if hasattr(first_msg, "data") else str(first_msg))
+    )
+    assert "模型请求" in first_text
+
+
+def test_ai_node_returns_user_message_on_auth_error():
+    """When chat_agent raises LLMAuthError the AI node should notify the user."""
+    nodes = _load_nodes_module()
+    E = nodes.errors
+    sent_messages: list = []
+
+    async def _mock_send(msg):
+        sent_messages.append(msg)
+
+    mock_state = types.SimpleNamespace(
+        human_queue=[],
+        human_source_queue=[],
+        is_graph_running=True,
+        current_query_user_id=None,
+        end_requested=False,
+        ai_answer=_mock_send,
+    )
+    nodes.bind_state(mock_state)
+
+    class _AuthFailAgent:
+        def with_retry(self, **kw):
+            return self
+
+        async def ainvoke(self, *a, **kw):
+            raise E.LLMAuthError("invalid key")
+
+    original_create_agent = nodes.create_agent
+    nodes.create_agent = lambda *args, **kwargs: _AuthFailAgent()
+
+    try:
+        result = asyncio.run(
+            nodes.ai_node(
+                {"messages": [types.SimpleNamespace(content="hello", type="human")]}
+            )
+        )
+    finally:
+        nodes.create_agent = original_create_agent
+
+    assert result == {"messages": []}
+    assert len(sent_messages) >= 1
+    first_msg = sent_messages[0]
+    first_text = (
+        first_msg
+        if isinstance(first_msg, str)
+        else (first_msg.data.get("text", "") if hasattr(first_msg, "data") else str(first_msg))
+    )
+    assert "认证失败" in first_text
+
+
+def test_ai_node_other_llm_errors_do_not_send_warning():
+    """Generic LLM request errors should NOT trigger rate-limit/auth warnings;
+    they fall through to normal processing with empty AI text."""
+    nodes = _load_nodes_module()
+    sent_messages: list = []
+
+    async def _mock_send(msg):
+        sent_messages.append(msg)
+
+    mock_state = types.SimpleNamespace(
+        human_queue=[],
+        human_source_queue=[],
+        is_graph_running=True,
+        current_query_user_id=None,
+        end_requested=False,
+        ai_answer=_mock_send,
+    )
+    nodes.bind_state(mock_state)
+
+    class _OtherFailAgent:
+        def with_retry(self, **kw):
+            return self
+
+        async def ainvoke(self, *a, **kw):
+            raise RuntimeError("some other failure")
+
+    original_create_agent = nodes.create_agent
+    nodes.create_agent = lambda *args, **kwargs: _OtherFailAgent()
+
+    try:
+        result = asyncio.run(
+            nodes.ai_node(
+                {"messages": [types.SimpleNamespace(content="hello", type="human")]}
+            )
+        )
+    finally:
+        nodes.create_agent = original_create_agent
+
+    # Other errors don't short-circuit; they produce AIMessage with empty content
+    # and no user-facing warning is sent
+    assert len(sent_messages) == 0
+    assert result["messages"][0].content == ""
+
+
+def test_ai_node_normal_flow_unaffected_by_new_error_types():
+    """Successful invocation should work exactly as before — no behavioral change."""
+    nodes = _load_nodes_module()
+    nodes.auxiliary_messages_queue.clear()
+    nodes.auxiliary_source_queue.clear()
+    sent_messages: list = []
+
+    async def _mock_send(msg):
+        sent_messages.append(msg)
+
+    mock_state = types.SimpleNamespace(
+        human_queue=[],
+        human_source_queue=[],
+        is_graph_running=True,
+        current_query_user_id=None,
+        end_requested=False,
+        ai_answer=_mock_send,
+    )
+    nodes.bind_state(mock_state)
+
+    class _GoodAgent:
+        def with_retry(self, **kw):
+            return self
+
+        async def ainvoke(self, *a, **kw):
+            return {"messages": [types.SimpleNamespace(content="一切正常", type="ai")]}
+
+    original_create_agent = nodes.create_agent
+    nodes.create_agent = lambda *args, **kwargs: _GoodAgent()
+
+    try:
+        result = asyncio.run(
+            nodes.ai_node(
+                {"messages": [types.SimpleNamespace(content="你好", type="human")]}
+            )
+        )
+    finally:
+        nodes.create_agent = original_create_agent
+
+    assert result["messages"][0].content == "一切正常"
+    assert len(sent_messages) >= 1
+
+
+def test_chat_end_detect_node_skips_model_on_rate_limit():
+    """chat_end_detect_node should catch LLMLimitExceededError gracefully
+    (no crash, no log spam). When error is caught, it falls back to default
+    behaviour."""
+    nodes = _load_nodes_module()
+    E = nodes.errors
+
+    messages = [MockMessage(f"msg{i}", "human") if i % 2 else MockMessage(f"msg{i}", "ai") for i in range(65)]
+
+    # Force case 1 or 2 (mini model) which invokes detect_model.invoke(...)
+    # We patch get_mini_model to raise the rate limit error
+    original_get_mini = nodes.get_mini_model
+    nodes.get_mini_model = lambda **kw: (_ for _ in ()).throw(E.LLMLimitExceededError("limit"))
+
+    original_randint = random.randint
+    random.randint = lambda a, b: 1  # case 1 → mini model
+
+    try:
+        # Should NOT crash — the exception is silently caught
+        result = asyncio.run(
+            nodes.chat_end_detect_node({"messages": messages})
+        )
+        # Default response="yes" → end-of-conversation marker
+        assert result["messages"][0].content == "__end__"
+    finally:
+        nodes.get_mini_model = original_get_mini
+        random.randint = original_randint
+
+
+def test_chat_end_detect_node_skips_model_on_auth_error():
+    """Same as above but for auth errors — graceful handling, no crash."""
+    nodes = _load_nodes_module()
+    E = nodes.errors
+
+    # Use exactly 4 messages + "初芽" in last to trigger early "no" path
+    messages = [
+        MockMessage("msg1", "human"),
+        MockMessage("msg2", "ai"),
+        MockMessage("msg3", "human"),
+        MockMessage("初芽，继续", "human"),
+    ]
+
+    original_get_mini = nodes.get_mini_model
+    nodes.get_mini_model = lambda **kw: (_ for _ in ()).throw(E.LLMAuthError("bad key"))
+
+    original_randint = random.randint
+    random.randint = lambda a, b: 1
+
+    try:
+        # "初芽" in last message → response = "no" → continue chat → empty messages
+        result = asyncio.run(
+            nodes.chat_end_detect_node({"messages": messages})
+        )
+        assert result == {"messages": []}
+    finally:
+        nodes.get_mini_model = original_get_mini
+        random.randint = original_randint
+
+
+def test_errors_module_raises_correct_exception_hierarchy():
+    """All custom errors should inherit from LLMBaseError."""
+    nodes = _load_nodes_module()
+    E = nodes.errors
+
+    assert issubclass(E.LLMAuthError, E.LLMBaseError)
+    assert issubclass(E.LLMLimitExceededError, E.LLMBaseError)
+
+    # All are also standard Exceptions
+    assert issubclass(E.LLMBaseError, Exception)
+    assert issubclass(E.LLMLimitExceededError, Exception)
+
+
+def test_errors_module_extract_rate_limit_info():
+    """Verify rate-limit metadata extraction from exception objects."""
+    nodes = _load_nodes_module()
+    extract = nodes.errors._extract_rate_limit_info
+
+    # HTTP 429 with retry-after
+    exc_429 = types.SimpleNamespace(status_code=429, retry_after=5)
+    info = extract(exc_429)
+    assert info is not None
+    assert info.retry_after == 5
+
+    # Response header Retry-After
+    class FakeResp:
+        headers = {"Retry-After": "3"}
+
+    exc_header = types.SimpleNamespace(response=FakeResp())
+    info2 = extract(exc_header)
+    assert info2 is not None
+    assert info2.retry_after == 3
+
+    # Non-matching status code — returns info with all fields None
+    exc_other = types.SimpleNamespace(status_code=500)
+    info3 = extract(exc_other)
+    assert info3 is not None
+    assert info3.retry_after is None
+    assert info3.message is None

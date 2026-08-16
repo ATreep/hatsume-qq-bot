@@ -110,6 +110,28 @@ body{background-color:#1a1418}
 """
 
 
+# ---- code block word wrap ------------------------------------------------------
+#
+# Theme CSS (sakura-markdown.css / github-markdown-light.css) sets
+# ``white-space: pre`` and ``word-wrap: normal`` on code blocks, so long lines
+# overflow the fixed image width and get clipped horizontally. Override those
+# rules to allow wrapping: ``pre-wrap`` keeps newlines and indentation, while
+# the ``*-break`` properties split unbreakable tokens at the container edge.
+# Applies to both the ``.codehilite`` and GitHub ``.highlight`` structures.
+
+_CODE_WRAP_CSS = """
+.markdown-body pre,
+.markdown-body pre code,
+.markdown-body .highlight pre,
+.markdown-body .highlight pre code {
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
+"""
+
+
 # ---- markdown feature detection -----------------------------------------------
 
 # Patterns that indicate rich Markdown formatting — when any of these are found
@@ -120,6 +142,7 @@ _MD_FEATURE_PATTERN = re.compile(
     r"|\$\$"  # display LaTeX $$…$$
     r"|\$[^$]+\$"  # inline LaTeX $…$
     r"|\*\*[^*]+\*\*"  # bold **text**
+    r"|\[[^\]\n]+\]\(https?://[^)\n]+\)"  # inline link [label](url)
     r"|^[^\n]*\|[^\n]*\n"  # table header row
     r"[ \t]*\|?[ \t]*:?-{3,}:?[ \t]*"  # first separator cell
     r"(?:\|[ \t]*:?-{3,}:?[ \t]*)+\|?[ \t]*$",  # remaining cells
@@ -140,6 +163,30 @@ _LINK_PATTERN = re.compile(
     r"https?://[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]+"
 )
 
+# Sentence punctuation that may wrap a URL in prose and is stripped from its
+# tail.  A closing paren ``)`` is handled separately in ``_trim_url_tail``
+# because it is also a legal URL character when balanced.
+_URL_TAIL_PUNCTUATION = set(".,;:!?")
+
+
+def _trim_url_tail(url: str) -> str:
+    """Strip Markdown/prose wrapping from a URL tail, keeping balanced parens.
+
+    A trailing ``)`` belongs to the URL only when it closes a ``(`` opened
+    inside the URL — e.g. ``https://en.wikipedia.org/wiki/Disambiguation_
+    (disambiguation)``.  An unmatched ``)`` plus adjacent sentence punctuation
+    (``.,;:!?``) is treated as wrapping and removed.
+    """
+    while url:
+        if url[-1] == ")":
+            # Balanced means every ``)`` has an opening ``(`` inside the URL.
+            if url.count("(") >= url.count(")"):
+                break
+        elif url[-1] not in _URL_TAIL_PUNCTUATION:
+            break
+        url = url[:-1]
+    return url
+
 
 def _extract_links(text: str) -> list[str]:
     """Extract all URLs from *text*.
@@ -147,6 +194,8 @@ def _extract_links(text: str) -> list[str]:
     Matches both raw URLs (``https?://...``) and Markdown link targets
     (``[label](url)``). URL characters are limited to the RFC 3986 ASCII set,
     excluding adjacent angle brackets, Unicode prose, and fullwidth punctuation.
+    A trailing ``)`` is kept only when it closes a ``(`` inside the URL;
+    otherwise it and adjacent sentence punctuation are stripped as wrapping.
     Returns a deduplicated, order-preserving list, or an empty list if none exist.
 
     First replaces each ``[label](url)`` with the bare URL, then extracts
@@ -158,8 +207,10 @@ def _extract_links(text: str) -> list[str]:
         r"\2",
         text,
     )
-    # Extract all URLs in order of appearance, deduplicate
-    return list(dict.fromkeys(_LINK_PATTERN.findall(unified)))
+    # Extract all URLs in order of appearance, trim prose wrapping, deduplicate
+    return list(
+        dict.fromkeys(_trim_url_tail(u) for u in _LINK_PATTERN.findall(unified))
+    )
 
 
 def _format_links(links: list[str]) -> str:
@@ -311,6 +362,7 @@ async def _markdown_to_html(md_text: str) -> str:
         "<style>"
         ".markdown-body{box-sizing:border-box;min-width:200px;"
         "max-width:980px;margin:48px;padding:45px}"
+        + _CODE_WRAP_CSS
         + (_DARK_MODE_CSS if _is_dark_mode() else "") +
         "</style>"
         "</head>"
@@ -333,8 +385,8 @@ async def auto_convert_text(text: str) -> list[MessageSegment]:
 
     - Length exceeds ``LONG_MSG_THRESHOLD``.
     - Contains rich Markdown: fenced code blocks (`` ``` ``), ATX headers
-      (``# …``), LaTeX math (``$…$`` / ``$$…$$``), bold (``**…**``), or a
-      Markdown table.
+      (``# …``), LaTeX math (``$…$`` / ``$$…$$``), bold (``**…**``),
+      inline links (``[label](https://example.com)``), or a Markdown table.
 
     When rendering as an image, any URLs found in the original text are
     extracted and appended as a separate text segment so they remain

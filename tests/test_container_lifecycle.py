@@ -105,21 +105,17 @@ async def test_refcounts_and_stop_tasks_are_group_isolated():
 
 
 @pytest.mark.asyncio
-async def test_delayed_stop_targets_only_its_group(monkeypatch):
+async def test_delayed_stop_deactivates_only_its_group(monkeypatch):
     first = infra._get_container_state(101, create=True)
     second = infra._get_container_state(202, create=True)
     first.active = True
     second.active = True
-    stopped: list[int] = []
-
     async def no_wait(_seconds):
         return None
 
     monkeypatch.setattr(infra.asyncio, "sleep", no_wait)
-    monkeypatch.setattr(infra, "stop_container", stopped.append)
     await infra._delayed_stop_container(first)
 
-    assert stopped == [101]
     assert first.active is False
     assert second.active is True
 
@@ -167,9 +163,8 @@ class _BlockingProcess:
 
 
 @pytest.mark.asyncio
-async def test_same_group_startup_coalesces_and_other_group_starts_independently(monkeypatch):
-    processes = [_AsyncProcess(), _AsyncProcess()]
-    create = AsyncMock(side_effect=processes)
+async def test_local_runtime_startup_does_not_spawn_subprocesses(monkeypatch):
+    create = AsyncMock()
     monkeypatch.setattr(infra.asyncio, "create_subprocess_exec", create)
 
     await asyncio.gather(
@@ -178,14 +173,13 @@ async def test_same_group_startup_coalesces_and_other_group_starts_independently
         infra.ensure_container_running(202),
     )
 
-    assert create.await_count == 2
-    names = {call.args[2] for call in create.await_args_list}
-    assert names == {"hatsume-space-101", "hatsume-space-202"}
-    assert all(process.inputs == [b"echo ready\n"] for process in processes)
+    create.assert_not_awaited()
+    assert infra._container_states[101].active is True
+    assert infra._container_states[202].active is True
 
 
 @pytest.mark.asyncio
-async def test_run_cmd_uses_group_container_and_invocation_local_stdin(monkeypatch):
+async def test_run_cmd_uses_local_workspace_and_invocation_local_stdin(monkeypatch):
     state = infra._get_container_state(101, create=True)
     state.active = True
     process = _AsyncProcess(stdout=b"hello\n")
@@ -195,9 +189,10 @@ async def test_run_cmd_uses_group_container_and_invocation_local_stdin(monkeypat
     result = await infra.run_cmd("echo hello", group_id=101)
 
     assert result == "hello\n"
-    assert create.await_args.args[2] == "hatsume-space-101"
+    assert create.await_args.args == ("bash",)
+    assert create.await_args.kwargs["cwd"] == Path("/work")
+    assert create.await_args.kwargs["env"]["HOME"] == "/root"
     assert process.inputs == [b"source ~/.bashrc\necho hello\n"]
-    assert not (Path(infra.DOCKER_ENV_PATH) / "script.sh").exists()
     assert state.refcount == 0
     assert state.stop_task is not None
 
@@ -307,7 +302,7 @@ async def test_run_cmd_timeout_keeps_output_collected_during_termination(monkeyp
 
 
 @pytest.mark.asyncio
-async def test_user_image_copy_targets_current_group(monkeypatch):
+async def test_user_image_copy_targets_local_sandbox_path(monkeypatch):
     process = _AsyncProcess()
     create = AsyncMock(return_value=process)
     monkeypatch.setattr(infra, "_ensure_user_image_sandbox_dir", AsyncMock())
@@ -321,10 +316,9 @@ async def test_user_image_copy_targets_current_group(monkeypatch):
         group_id=101,
     )
 
-    assert result == "/tmp/hatsume-user-images/9-1.png"
-    assert create.await_args.args[3] == (
-        "hatsume-space-101:/tmp/hatsume-user-images/9-1.png"
-    )
+    assert result == "/tmp/hatsume-user-images/101/9-1.png"
+    assert create.await_args.args[0:2] == ("cp", "--")
+    assert create.await_args.args[3] == "/tmp/hatsume-user-images/101/9-1.png"
     assert not Path(create.await_args.args[2]).exists()
 
 
@@ -335,7 +329,7 @@ async def test_message_image_cache_detects_format_and_uses_message_position(
     output = BytesIO()
     Image.new("RGB", (2, 3), color="red").save(output, format="JPEG")
     image_bytes = output.getvalue()
-    save = AsyncMock(return_value="/tmp/hatsume-user-images/44-2.jpg")
+    save = AsyncMock(return_value="/tmp/hatsume-user-images/101/44-2.jpg")
     monkeypatch.setattr(infra, "save_sandbox_user_image", save)
     cache_image = getattr(infra, "cache_sandbox_message_image", None)
     assert cache_image is not None
@@ -347,7 +341,7 @@ async def test_message_image_cache_detects_format_and_uses_message_position(
         group_id=101,
     )
 
-    assert result == "/tmp/hatsume-user-images/44-2.jpg"
+    assert result == "/tmp/hatsume-user-images/101/44-2.jpg"
     save.assert_awaited_once_with(
         image_bytes,
         44,
@@ -366,34 +360,28 @@ async def test_reset_missing_group_does_not_create_state(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_reset_removes_only_selected_group(monkeypatch):
+async def test_reset_removes_only_selected_local_runtime(monkeypatch):
     first = infra._get_container_state(101, create=True)
     second = infra._get_container_state(202, create=True)
     first.active = True
     second.active = True
-    deleted: list[int] = []
-    monkeypatch.setattr(infra, "delete_container", deleted.append)
-
     assert await infra.cleanup_persistent_container(101) is True
 
-    assert deleted == [101]
     assert 101 not in infra._container_states
     assert infra._container_states[202] is second
     assert second.active is True
 
 
 @pytest.mark.asyncio
-async def test_reset_waits_for_foreground_owner_before_deleting(monkeypatch):
+async def test_reset_waits_for_foreground_owner_before_removing_state(monkeypatch):
     state = infra._get_container_state(101, create=True)
     state.active = True
     process = _BlockingProcess()
-    deleted: list[int] = []
     monkeypatch.setattr(
         infra.asyncio,
         "create_subprocess_exec",
         AsyncMock(return_value=process),
     )
-    monkeypatch.setattr(infra, "delete_container", deleted.append)
 
     command_task = asyncio.create_task(infra.run_cmd("long command", group_id=101))
     await process.started.wait()
@@ -401,12 +389,12 @@ async def test_reset_waits_for_foreground_owner_before_deleting(monkeypatch):
 
     await process.termination_started.wait()
     assert process.killed
-    assert deleted == []
+    assert 101 in infra._container_states
     assert not reset_task.done()
 
     process.allow_termination.set()
     assert await reset_task is True
-    assert deleted == [101]
+    assert 101 not in infra._container_states
     assert command_task.cancelled()
     assert state.foreground_processes == set()
     assert state.foreground_tasks == {}

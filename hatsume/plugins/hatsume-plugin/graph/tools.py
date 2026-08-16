@@ -11,10 +11,13 @@ import urllib.request
 import urllib.error
 from typing import TYPE_CHECKING, Annotated, Any, Callable, Literal, TypedDict
 
+from google.genai import types
+
 import requests
 from langchain_core.tools import tool as _langchain_tool
-from langchain_community.tools import DuckDuckGoSearchRun
 from nonebot.adapters.onebot.v11 import MessageSegment
+from langchain_community.tools import DuckDuckGoSearchRun
+from langchain_keenable import KeenableSearch, KeenableFetch
 from pydantic import Field
 
 from ..infra import (
@@ -248,11 +251,49 @@ def find_memory(query: str) -> str:
     return query_memory(query)
 
 
+def _format_search_results(results: list[dict[str, Any]]) -> str:
+    """Format Keenable search JSON results into readable text for the model.
+
+    Each result becomes a numbered entry with its URL and a summary line
+    (snippet preferred, falling back to description). Entries without a title
+    or URL are skipped; the summary line is omitted when empty.
+    """
+    formatted: list[str] = []
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or "").strip()
+        url = str(item.get("url") or "").strip()
+        if not title and not url:
+            continue
+        summary = str(item.get("snippet") or item.get("description") or "").strip()
+        entry = f"{len(formatted) + 1}. {title}".rstrip()
+        if url:
+            entry += f"\n   {url}"
+        if summary:
+            entry += f"\n   {summary}"
+        formatted.append(entry)
+    return "\n\n".join(formatted)
+
+
+def _fallback_duckduckgo(query: str) -> str:
+    """Run DuckDuckGo when the primary Keenable provider is unusable."""
+    try:
+        results = str(DuckDuckGoSearchRun().run(query)).strip()
+        if results:
+            return results
+        print("Search provider failed: DuckDuckGo")
+    except Exception:
+        print("Search provider failed: DuckDuckGo")
+    print("Search failed.")
+    return "web_search 没有找到相关结果"
+
+
 @tool
-def search_web(query: str) -> str:
+def web_search(query: str) -> str:
     """
     当用户明确指出需要网络搜索或用户提及未知事物时，使用此工具查找搜索引擎。
-    search_web 仅能提供简要的网络搜索答案。
+    web_search 仅能提供简要的网络搜索答案。
     输入搜索关键字。
 
     注意：
@@ -261,10 +302,13 @@ def search_web(query: str) -> str:
     """
     print("Search the web: ", query)
     try:
-        return DuckDuckGoSearchRun().run(query)
+        results = _format_search_results(KeenableSearch().run(query))
+        if results:
+            return results
+        print("Search provider failed: Keenable")
     except Exception:
-        print("Search failed.")
-        return "search_web 没有找到相关结果"
+        print("Search provider failed: Keenable")
+    return _fallback_duckduckgo(query)
 
 
 def _fetch_pexels_search(
@@ -430,7 +474,7 @@ async def view_image(image_url: str) -> str:
     ## 参数：
     - image_url: 图片地址，支持：
         1) HTTP/HTTPS 网络图片 URL
-        2) 沙盒内图片的 file:// 绝对路径，如 "file:///work/image.png"
+        2) 容器内图片的 file:// 绝对路径，如 "file:///work/hatsume/image.png"
     """
     url = image_url.strip()
     if not url:
@@ -506,7 +550,7 @@ async def send_image(image_url: str) -> str:
     - image_url: 图片的 URL 地址，支持
         1) HTTP/HTTPS URL 
         2) base64 data URI 格式（如 "base64://..."）
-        3) 沙盒文件绝对路径（如 "file:///work/path/to/image.jpg"）
+        3) 容器文件绝对路径（如 "file:///work/hatsume/path/to/image.jpg"）
 
     ## 注意：
     - 每次调用只能发送一张图片
@@ -574,8 +618,8 @@ async def send_video(video_url: str) -> str:
     ## 参数：
     - video_url: 视频地址，支持
         1) HTTP/HTTPS URL
-        2) 沙盒文件绝对路径（如 "/work/path/to/video.mp4"）
-        3) 沙盒 file:// 绝对路径（如 "file:///work/path/to/video.mp4"）
+        2) 容器文件绝对路径（如 "/work/hatsume/path/to/video.mp4"）
+        3) 容器 file:// 绝对路径（如 "file:///work/hatsume/path/to/video.mp4"）
 
     ## 注意：
     - 每轮 ai_node 最多调用一次
@@ -718,12 +762,12 @@ async def generate_video(prompt: str, image_url: str = "") -> str:
 @tool
 async def shell_executor(shell: str, timeout: int) -> str:
     """
-    在 Ubuntu Linux 无桌面沙箱环境中执行 bash shell（当前工作目录 pwd 为 /work），并返回输出结果。
+    在 Ubuntu Linux 无桌面容器中执行 bash shell（当前工作目录 pwd 为 /work，~ 为 /root），并返回输出结果。
     timeout 参数为命令执行时长，单位为秒，超过该时长会被强制终止。一般设为 180 秒。
 
     ## 约束：
     - 此工具无法执行交互式命令，如安装包时必须使用 `apt install -y` 或 `apt install --assume-yes`。
-    - /work 为公共工作目录，如果需要编写项目，请在 /work 中创建一个子目录继续。
+    - /work/hatsume 是当前 Hatsume 源码仓库；修改前先 cd /work/hatsume 并读取适用的 AGENTS.md。
     - 只有你自己可以访问沙盒，用户无法访问沙盒。
     - 禁止将沙盒中的路径告诉用户。你必须通过描述、调用工具或上传到 GitHub 仓库的方式向用户展示沙盒中的文件。
     """
@@ -1427,6 +1471,7 @@ async def agent_dispatch(
         has_running_agent_task,
         set_agent_state,
         track_agent_task,
+        untrack_agent_task,
     )
     import time as _time
 
@@ -1465,6 +1510,7 @@ async def agent_dispatch(
                     instance_id=instance_id,
                     status="cancelled",
                 )
+                untrack_agent_task(instance_id)
                 raise
             except Exception:
                 print(f"❌ Agent {agent_name} failed")
@@ -1477,6 +1523,7 @@ async def agent_dispatch(
                 status="done",
                 result=result,
             )
+            untrack_agent_task(instance_id)
 
             from .nodes import inject_agent_notification
             if _agent_notification_callback is not None:
@@ -1606,10 +1653,9 @@ def end_conversation() -> str:
     callback()
     return "当前对话已结束；不要继续回复，等待有人主动提及你。"
 
-
 # Single registration point consumed by graph.nodes. Add new chat-facing tools here.
 CHAT_TOOLS = [
-    # search_web,
+    web_search,
     search_image,
     shell_executor,
     find_memory,
@@ -1637,9 +1683,8 @@ CHAT_TOOLS = [
     create_character_proxy,
     terminate_character_proxy,
     end_conversation,
-    {"type": "web_search"}
+    # {"type": "web_search"}
 ]
-
 
 def get_chat_tools() -> list[Any]:
     """Expose exactly one character-proxy lifecycle tool for current state."""
