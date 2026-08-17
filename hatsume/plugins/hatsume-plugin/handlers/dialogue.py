@@ -82,16 +82,19 @@ async def _store_user_image(
     image_order: int,
     *,
     group_id: int,
-) -> str:
+) -> tuple[str, bytes]:
     response = requests.get(url, timeout=10)
     response.raise_for_status()
     image_bytes = response.content
 
-    return await _store_image_bytes(
+    return (
+        await _store_image_bytes(
+            image_bytes,
+            message_id,
+            image_order,
+            group_id=group_id,
+        ),
         image_bytes,
-        message_id,
-        image_order,
-        group_id=group_id,
     )
 
 
@@ -219,7 +222,8 @@ async def _resolve_user_image_markdown(
     *,
     find_existing: bool,
     group_id: int,
-) -> str:
+    include_image_url: bool = False,
+) -> tuple[str, str | None]:
     temporary_markdown = f" ![图片（临时链接）]({url}) "
 
     if find_existing:
@@ -230,13 +234,13 @@ async def _resolve_user_image_markdown(
                 group_id=group_id,
             )
             if existing_path is not None:
-                return f" ![图片]({existing_path}) "
+                return f" ![图片]({existing_path}) ", None
         except Exception as exc:
             print("❌ Cannot find saved reply image: ", exc)
             traceback.print_exc()
 
     try:
-        sandbox_path = await _store_user_image(
+        sandbox_path, image_bytes = await _store_user_image(
             url,
             message_id,
             image_order,
@@ -245,8 +249,19 @@ async def _resolve_user_image_markdown(
     except Exception as exc:
         print("❌ Cannot save image to sandbox: ", exc)
         traceback.print_exc()
-        return temporary_markdown
-    return f" ![图片]({sandbox_path}) "
+        return temporary_markdown, None
+
+    image_url: str | None = None
+    if include_image_url:
+        with Image.open(BytesIO(image_bytes)) as image:
+            extension = _normalized_image_extension(image.format)
+            mime_type = Image.MIME.get(image.format or "")
+        if not mime_type:
+            mime_type = "image/jpeg" if extension == "jpg" else f"image/{extension}"
+        encoded = base64.b64encode(image_bytes).decode("ascii")
+        image_url = f"data:{mime_type};base64,{encoded}"
+
+    return f" ![图片]({sandbox_path}) ", image_url
 
 
 def _format_forward_for_reply(messages: list[dict[str, Any]], max_items: int = 10) -> str:
@@ -338,13 +353,14 @@ async def get_human_message(bot: Bot, event: MessageEvent) -> tuple[list[dict], 
                     re_message += msg_seg.data.get("text", "")
                 case "image":
                     reply_image_order += 1
-                    re_message += await _resolve_user_image_markdown(
+                    image_markdown, _ = await _resolve_user_image_markdown(
                         msg_seg.data.get("url", ""),
                         event.reply.message_id,
                         reply_image_order,
                         find_existing=True,
                         group_id=group_id,
                     )
+                    re_message += image_markdown
                 case "face":
                     re_message += render_qqface(msg_seg.data)
                 case "forward":
@@ -375,6 +391,7 @@ async def get_human_message(bot: Bot, event: MessageEvent) -> tuple[list[dict], 
             re_message = re_message[:REPLY_MAX_LENGTH] + "...... （回复消息过长，无法全部显示）"
 
     image_order = 0
+    image_url_parts: list[dict[str, Any]] = []
     for msg_seg in msg:
         match msg_seg.type:
             case "text":
@@ -393,13 +410,19 @@ async def get_human_message(bot: Bot, event: MessageEvent) -> tuple[list[dict], 
                         add_source_person(at_qq, str(at_qq))
             case "image":
                 image_order += 1
-                plain_message += await _resolve_user_image_markdown(
+                image_markdown, image_url = await _resolve_user_image_markdown(
                     msg_seg.data.get("url", ""),
                     event.message_id,
                     image_order,
                     find_existing=False,
                     group_id=group_id,
+                    include_image_url=True,
                 )
+                plain_message += image_markdown
+                if image_url is not None:
+                    image_url_parts.append(
+                        {"type": "image_url", "image_url": {"url": image_url}}
+                    )
             case "face":
                 plain_message += render_qqface(msg_seg.data)
             case "forward":
@@ -459,6 +482,8 @@ async def get_human_message(bot: Bot, event: MessageEvent) -> tuple[list[dict], 
 
     rendered_text = json.dumps(msg_json, ensure_ascii=False)
     content: list[dict[str, Any]] = [{"type": "text", "text": rendered_text}]
+    if forward_messages is None:
+        content.extend(image_url_parts)
 
     source_entry = {
         "source_id": f"m{getattr(event, 'message_id', int(time.time() * 1000))}",

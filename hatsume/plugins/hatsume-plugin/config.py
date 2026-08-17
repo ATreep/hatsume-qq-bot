@@ -42,6 +42,11 @@ WAWAPI_API_KEY: str = os.environ.get("WAWAPI_API_KEY", "")
 WAWAPI_IMAGE_API_KEY: str = os.environ.get("WAWAPI_IMAGE_API_KEY", "")
 ALI_API_KEY: str = os.environ.get("ALI_API_KEY", "")
 # ---------------------------------------------------------------------------
+# External service URLs
+# ---------------------------------------------------------------------------
+STOCK_API_BASE: str = os.environ.get("STOCK_API_BASE", "http://43.143.209.38:5000")
+
+# ---------------------------------------------------------------------------
 # Base URLs (No `v1` suffix)
 # ---------------------------------------------------------------------------
 

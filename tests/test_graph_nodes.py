@@ -2009,6 +2009,40 @@ def test_chat_intend_judge_directly_parses_model_json():
     assert captured_messages[0][1].content == "问题"
 
 
+def test_chat_intend_judge_excludes_image_url_content_parts():
+    nodes = _load_nodes_module()
+    captured_messages: list[list[object]] = []
+    original_content = [
+        {"type": "text", "text": "请看这张沙盒图片并判断是否需要回复"},
+        {
+            "type": "image_url",
+            "image_url": {"url": "data:image/png;base64,oversized-image"},
+        },
+        {"type": "img_url", "img_url": "data:image/jpeg;base64,legacy-image"},
+    ]
+
+    class _JudgeModel:
+        def invoke(self, messages, **kwargs):
+            captured_messages.append(messages)
+            return types.SimpleNamespace(
+                content=(
+                    '{"is_response": true, "urgency_type": "回答问题", '
+                    '"brief_reason": "用户要求查看图片"}'
+                )
+            )
+
+    result = asyncio.run(
+        nodes.chat_intend_judge(
+            _JudgeModel(),
+            [types.SimpleNamespace(content=original_content, type="human")],
+        )
+    )
+
+    assert result.is_response is True
+    assert captured_messages[0][1].content == [original_content[0]]
+    assert len(original_content) == 3
+
+
 def test_chat_intend_judge_parses_fenced_json_content_segments():
     nodes = _load_nodes_module()
 

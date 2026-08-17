@@ -36,7 +36,7 @@ flowchart LR
 | 群聊旁听上下文 | 不属于当前 chat_peers 的群消息 | 持续保留为辅助上下文，超限时压缩 | handlers/dialogue.py、graph/nodes.py |
 | 回复消息解析 | QQ 回复消息 | 保存被回复者、文本、图片和合并转发摘要 | handlers/dialogue.py |
 | 合并转发解析 | QQ 合并转发消息 | 兼容 OneBot 标准与常见厂商变体，递归解析嵌套节点并保留发送者 | handlers/forward.py |
-| 图片理解输入 | 普通消息或回复中的图片 | 下载并校验后按消息 ID 与图片顺序保存到沙盒，JSON 内记录绝对路径；合并转发仍保留临时 URL | handlers/dialogue.py、infra.py |
+| 图片理解输入 | 普通消息或回复中的图片 | 下载并校验后按消息 ID 与图片顺序保存到沙盒，JSON 内记录绝对路径；当前普通消息同时附加多模态图片块，合并转发仍保留临时 URL | handlers/dialogue.py、infra.py |
 | 长文本与 Markdown 图片化 | AI 回复超过阈值或含富 Markdown | 渲染标题、代码、表格和公式，并额外保留可点击链接 | utils/md_to_image.py |
 | 长期记忆写入 | 模型输出一个或多个 `[memory: ... MEMORYCONTENTEND, keyman: ...]` 记忆卡 | 逐卡提取正文与可选关联 QQ，按当前群写入 SQLite 与 Milvus | graph/nodes.py、memory/engine.py |
 | 长期记忆检索 | 每轮自动检索或 find_memory | 只检索当前群；SQLite LIKE 优先，临时 BM25 与 Milvus/BGE-M3 补足 | graph/tools.py、memory/engine.py、memory/vector_store.py、memory/tokenizer.py |
@@ -45,6 +45,8 @@ flowchart LR
 | 学习进化 | 每日上海时间 00:00；管理员 `/learn-evolve [群号]` | 手动无参数读取全部群近 24 小时记忆，指定群号时只读取该群，并注入命令所在群 chat_agent；自动任务按已激活且有 Bot 路由的群分别读取和注入。chat_agent 从记忆中选择一个方向并加载 `self-evolution` Skill 实施，不创建独立进化 Agent | evolution.py、memory/engine.py、prompts.py、graph/nodes.py、handlers/tools.py、`__init__.py` |
 | 联网搜索 | web_search | Keenable 搜索（免 key 公共端点），失败或空结果时回退 DuckDuckGo，两者都失败返回提示 | graph/tools.py |
 | QQ 头像 | get_avatar | 返回指定 QQ 号的头像 URL | graph/tools.py、`utils/__init__.py` |
+| 股票报价查询 | query_stock_quote | 调用外部美股模拟盘 Tracker API 查询单股实时报价（价格、涨跌幅、成交量等） | graph/tools.py、config.py |
+| 股票代码搜索 | stock_search | 模糊搜索全部股票列表，按名称、代码或板块过滤，返回最多 10 条结果 | graph/tools.py、config.py |
 | 图片查看 | view_image | 使用 ZHTH 的 `GPT_5_6_LUNA` 专用客户端描述 HTTP/HTTPS 或沙盒 file:// 图片 | graph/tools.py、models.py、infra.py |
 | 随机 ACG 图片 | 白名单群戳一戳 | 从 macOS Photos 的 ACG 相册导出并直接发送；非白名单群静默返回 | handlers/tools.py |
 | 图片发送 | send_image | 支持 HTTP、base64 和沙盒 file:// 文件，每轮最多三张 | graph/tools.py |
@@ -137,7 +139,7 @@ sequenceDiagram
 
 ### 3.2 消息标准化
 
-handlers/dialogue.py 的 get_human_message() 把 OneBot 事件转换为单个统一 JSON 文本块：
+handlers/dialogue.py 的 get_human_message() 把 OneBot 事件转换为统一 JSON 文本块，并为当前普通消息中的图片附加多模态内容块：
 
 1. 查询群名片或昵称，加入消息来源人员。
 2. 解析回复中的发送者、文本、图片、QQ 系统表情和合并转发摘要。
@@ -158,7 +160,7 @@ handlers/dialogue.py 的 get_human_message() 把 OneBot 事件转换为单个统
 5. `message_id` 只出现在真实收到的顶层普通消息或顶层合并转发中。合并转发内部节点、`reply_to`、AI 历史和系统合成消息不包含该字段；顶层合并转发仍可作为一个整体被回复。
 6. 普通消息、回复和合并转发中的 OneBot `face` 段按 QQ 系统表情 ID 转成 `[qqface: 描述]`；未知 ID 不写入模型文本。
 7. 合并转发生成 type=forward 和递归 messages 数组。
-8. 当前普通消息中的图片会同步下载，按实际格式校验 9 MiB 与 3600 万像素限制，再用事件的显式 `group_id` 保存到该群沙盒 `/tmp/hatsume-user-images/<message_id>-<从1开始的图片序号>.<实际扩展名>`；JSON 在原图片段位置写入 `![图片](<绝对路径>)`，不再附加 `image_url` 或 `img_url` 多模态块。
+8. 当前普通消息中的图片会同步下载，按实际格式校验 9 MiB 与 3600 万像素限制，再用事件的显式 `group_id` 保存到该群沙盒 `/tmp/hatsume-user-images/<message_id>-<从1开始的图片序号>.<实际扩展名>`；JSON 在原图片段位置写入 `![图片](<绝对路径>)`，并按图片段顺序附加使用同一份已校验字节生成的 `image_url` data URI 多模态块。顶层合并转发不附加这些块。
 9. Bot 成功发送图片后读取 OneBot 返回的消息 ID；Markdown 图片化、表情、图片工具等聊天输出从 base64 或 HTTP(S) 源取得字节，戳一戳图片复用本次宿主导出字节，并按同一实际格式、大小、像素与群隔离规则缓存到 `<发送消息ID>-<图片序号>.<实际扩展名>`。缓存失败不重发已经成功送达 QQ 的消息。
 10. 回复中的图片用同一显式 `group_id` 在目标群容器中按被回复消息的 `message_id` 与图片序号查找已有文件，未命中时从回复段的临时 URL 重新下载；任一保存流程失败时保留原临时 URL。合并转发中的图片不进入该流程，继续直接使用临时 URL。
 11. 普通文本最多保留 2000 字，被回复内容最多保留 200 字。
@@ -237,7 +239,7 @@ stateDiagram-v2
 - 图历史超过 60 条 LangGraph 消息时，删除最早的一对 Human/AI 消息。
 - ai_node 自动检索记忆，注入 Skill 列表、运行中 Agent 状态、当前群定时任务概览、当前群待办、可选表情提示和调用时的本地日期时间，再用 CHAT_TOOLS 创建 LangChain Agent。进入节点时先删除所有已满 48 小时的待办；Todo 数据库不可用时只注入不可用状态，不中断普通回复。主调用异常最多重试五次；若结果只有工具调用、工具结果、空白或 `[xxx: xxx]` 类控制标记且未请求结束对话，则携带本次 Agent 消息状态额外调用一次。递归上限为 60。
 - ai_node 每轮读取辅助队列的非破坏性快照，临时放在当前 Human 内容之前；同一辅助上下文会持续进入后续轮次，直到新写入触发压缩。发送前移除 reply、memory 与 face 标签；图历史会移除 reply 控制标记，但保留现有 face 与 memory 标签历史语义。
-- ai_node 只解析当前 HumanMessage 中顶层 `type=message` 的 JSON。发送者 QQ ID 等于非空 `ADMIN_QQ_ID` 且该消息的直接正文包含大小写敏感的 `BYPASS` 时，本轮像系统注入消息一样直接跳过 `chat_intend_judge`，本地 `sys_prompt` 追加 ADMIN MODE，chat_agent 保持当前高级模型，并在不修改 LangGraph 历史的前提下从全部模型输入消息复制过滤历史 `image_url` 与 `img_url` 内容段；回复引用、合并转发、辅助上下文和历史消息均不能触发，下一轮恢复未过滤输入与基础角色 Prompt。普通消息与回复图片在所有模式下均以沙盒 Markdown 路径输入。
+- ai_node 只解析当前 HumanMessage 中顶层 `type=message` 的 JSON。发送者 QQ ID 等于非空 `ADMIN_QQ_ID` 且该消息的直接正文包含大小写敏感的 `BYPASS` 时，本轮像系统注入消息一样直接跳过 `chat_intend_judge`，本地 `sys_prompt` 追加 ADMIN MODE，chat_agent 保持当前高级模型，并在不修改 LangGraph 历史的前提下从全部模型输入消息复制过滤历史 `image_url` 与 `img_url` 内容段；回复引用、合并转发、辅助上下文和历史消息均不能触发，下一轮恢复未过滤输入与基础角色 Prompt。当前普通消息图片同时以沙盒 Markdown 路径和 `image_url` data URI 输入，回复图片仍使用沙盒 Markdown 路径。
 - chat_agent 调用 end_conversation 后，ConversationState 立即关闭聊天并清空 chat_peers；ai_node 抑制该轮文本和表情发送，human_node 随即路由到 finish。下一次主动提及通过 activate_chat() 解除结束标记。
 - finish_conversation_node 清理图运行标记和 Human 队列，重置 Skill 单轮去重，把 Human/AI/Tool 历史规范化后放回辅助队列，最后发送 [CONVERSATION END]。
 
@@ -473,6 +475,8 @@ flowchart LR
 | skill_download | 从 raw URL 下载 Skill |
 | skill_create | 从完整 Markdown 创建 Skill |
 | membersearch | 模糊搜索当前群成员 |
+| query_stock_quote | 查询美股单只股票实时报价（名称、价格、涨跌幅、成交量等） |
+| stock_search | 搜索股票代码列表，按名/码/板块模糊匹配，最多返回 10 条 |
 | agent_dispatch | 派发后台 Agent |
 | respond_to_shell_prompt | 回复后台进程 stdin 请求 |
 | end_conversation | 用户要求不再回复时立即结束当前对话，直到再次被主动提及 |
@@ -573,7 +577,7 @@ sequenceDiagram
 
 - 输入图片使用 requests 同步下载，限制为 9 MiB 和 3600 万像素。
 - 普通消息、Bot 成功发送的图片与回复图片使用 Pillow 检测实际格式，并把显式 `group_id` 传到 infra.py 的查找、目录创建和本地 copy 边界；文件进入 `/tmp/hatsume-user-images/<group-id>`。路径由群号、QQ 消息 ID 与消息内图片序号确定，避免共享容器内跨群碰撞。
-- 回复图片优先复用沙盒中的确定性路径，缺失时从 OneBot 临时 URL 恢复；合并转发图片保持临时 URL。主聊天模型只接收包含 Markdown 路径的 JSON 文本块，需要理解图片时通过 `view_image(file://...)` 读取。
+- 当前普通消息图片使用同一份已校验字节同时生成沙盒 Markdown 路径和 `image_url` data URI，因此模型可以直接理解图片，也可以通过 `view_image(file://...)` 读取沙盒文件。回复图片优先复用沙盒中的确定性路径，缺失时从 OneBot 临时 URL 恢复；合并转发图片保持临时 URL 且不附加顶层多模态块。
 - search_image 使用固定的 Pexels Search API，通过 PIXELS_API_KEY 鉴权；网络请求在线程中执行，最多返回十条带来源信息的候选结果，再由聊天 Agent 复用 send_image 发送。
 - view_image 将 HTTP/HTTPS 图片 URL 直接交给轻量模型；沙盒 file:// 绝对路径通过 infra.py 的统一读取边界传入当前 runtime 的显式群号，在当前容器读取 base64 后由 Pillow 校验实际图片格式并生成 data URI，再返回模型生成的文字描述。该流程不依赖 `file` 命令或文件扩展名。
 - generate_image 在 Seedream 和兼容图像接口之间选择；有参考图时使用支持参考图的路径，沙盒 `file://` 参考图复用同一个按群读取和字节校验边界，再以 base64 data URI 交给 Ark SDK。
@@ -667,7 +671,7 @@ graph/tools.py、graph/agents.py、graph/nodes.py 与 handlers/dialogue.py 之�
 | `hatsume/plugins/hatsume-plugin/graph/__init__.py` | graph 包说明。 |
 | hatsume/plugins/hatsume-plugin/graph/builder.py | 构建公共 compiled graph；条件边从当前 runtime 读取群内节点标记。 |
 | hatsume/plugins/hatsume-plugin/graph/nodes.py | 实现 Human、Detect、AI、Finish；从当前 runtime 读取辅助队列、表情、回调、代理和 Skill 状态；处理群内记忆、通知与结束；提供 Timer（`inject_timer`）、Agent 通知（`inject_agent_notification`）与学习进化（`inject_learn_evolve`）的系统触发注入。 |
-| hatsume/plugins/hatsume-plugin/graph/tools.py | 定义并唯一注册 CHAT_TOOLS；从当前 runtime 读取回调、群号与媒体计数；执行群内记忆、Skill、Todo、Agent、stdin 和沙盒操作。 |
+| hatsume/plugins/hatsume-plugin/graph/tools.py | 定义并唯一注册 CHAT_TOOLS；从当前 runtime 读取回调、群号与媒体计数；执行群内记忆、Skill、Todo、Agent、stdin、沙盒操作和股票行情查询。 |
 | hatsume/plugins/hatsume-plugin/graph/agents.py | 维护公共 AGENT_REGISTRY；实例、task、stdin 与后台进程记录必需群号并按群查询/取消。 |
 | `hatsume/plugins/hatsume-plugin/memory/__init__.py` | 统一导出记忆数据库、activated-group、规范化、检索和分词 API。 |
 | hatsume/plugins/hatsume-plugin/memory/engine.py | 管理带 group_id 的 current-schema memories SQLite、lock-protected activated-group 集合、群内 LIKE/BM25/显式写入、Milvus 群内融合和每日清理。 |
@@ -780,7 +784,7 @@ graph/tools.py、graph/agents.py、graph/nodes.py 与 handlers/dialogue.py 之�
 | tests/test_timer_store.py | localstore 路径、严格 v2 schema、任务/point CRUD、幂等进度、跨线程事务串行化、exact replacement、级联删除和完成清理。 |
 | tests/test_timer_executor.py | 原生 trigger、最终 occurrence 降级、注册/取消、实际 scheduled_at 漏触发核对、执行后进度、启动恢复和 03:00 清理。 |
 | tests/test_timer_startup.py | TimerStore 单例初始化失败重试及 eligibility sync/routed recovery/activated-group auto_response/cleanup 启动顺序。 |
-| tests/test_tools.py | 群内媒体限流、Skill/重置参数与授权、Agent dispatch 上下文和群内去重、图片视频、Todo/Timer、模型、代理和 stdin。 |
+| tests/test_tools.py | 群内媒体限流、Skill/重置参数与授权、Agent dispatch 上下文和群内去重、图片视频、Todo/Timer、模型、代理、stdin 和股票行情查询工具。 |
 
 常用验证：
 

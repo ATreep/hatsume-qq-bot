@@ -1236,7 +1236,22 @@ def test_get_human_message_stores_current_images_in_segment_order():
         "before ![图片](/tmp/hatsume-user-images/321-1.png) "
         "after ![图片](/tmp/hatsume-user-images/321-2.jpg) "
     )
-    assert content == [{"type": "text", "text": '{"type": "message"}'}]
+    assert content[0] == {"type": "text", "text": '{"type": "message"}'}
+    assert [part["type"] for part in content] == [
+        "text",
+        "image_url",
+        "image_url",
+    ]
+    for part, image_format, mime_type in zip(
+        content[1:],
+        ("PNG", "JPEG"),
+        ("image/png", "image/jpeg"),
+        strict=True,
+    ):
+        image_url = part["image_url"]["url"]
+        header, encoded = image_url.split(",", maxsplit=1)
+        assert header == f"data:{mime_type};base64"
+        assert base64.b64decode(encoded) == _make_image_bytes(image_format)
     assert dialogue.save_sandbox_user_image.await_args_list[0].args[1:] == (
         321,
         1,

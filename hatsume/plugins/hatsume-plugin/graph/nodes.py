@@ -222,7 +222,10 @@ async def chat_intend_judge(
     back-to-back hits so that retries don't just burn API quota on a hard
     limit.
     """
-    judge_messages = [SystemMessage(_get_chat_intend_judge_prompt()), *messages]
+    judge_messages = [
+        SystemMessage(_get_chat_intend_judge_prompt()),
+        *_without_image_url_parts(messages),
+    ]
     consecutive_limit_errors = 0
     for attempt in range(1, CHAT_INTENT_MAX_ATTEMPTS + 1):
         try:

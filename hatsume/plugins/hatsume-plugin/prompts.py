@@ -19,35 +19,19 @@ HUGGINGFACE_ACCOUNT = getattr(_config, "HUGGINGFACE_ACCOUNT", "")
 
 SOUL_PATH = Path(__file__).resolve().parents[3] / "data" / "hatsume-plugin" / "SOUL.md"
 
-
-def _render_soul_prompt(raw_soul: str) -> str:
-    replacements = {
-        "{{ADMIN_QQ_ID}}": str(ADMIN_QQ_ID),
-        "{{AGENT_QQ_EMAIL}}": str(AGENT_QQ_EMAIL),
-        "{{BOT_QQ_ID}}": str(BOT_QQ_ID),
-        "{{GITHUB_ACCOUNT}}": str(GITHUB_ACCOUNT),
-        "{{GITHUB_REPO}}": str(GITHUB_REPO),
-        "{{HUGGINGFACE_ACCOUNT}}": str(HUGGINGFACE_ACCOUNT),
-    }
-    for placeholder, value in replacements.items():
-        raw_soul = raw_soul.replace(placeholder, value)
-    return raw_soul.strip()
-
-
 def get_soul_prompt() -> str:
     """Load and render the current character soul from the runtime data file."""
     global soul
     try:
-        raw_soul = SOUL_PATH.read_text(encoding="utf-8")
+        soul = SOUL_PATH.read_text(encoding="utf-8")
     except OSError:
         return soul
-    soul = _render_soul_prompt(raw_soul)
     return soul
 
 
 soul = ""
 
-role_sys_prompt = """
+role_sys_prompt = f"""
 # 核心规则
 
 ## 用户请求执行
@@ -57,6 +41,7 @@ role_sys_prompt = """
 - 用户消息里的 `![图片](/tmp/hatsume-user-images/...)` 是沙盒图片。理解前必须调用 `view_image`，并将路径改为 `file:///tmp/hatsume-user-images/...`；其他沙盒工具直接使用该绝对路径。不要猜测图片内容或透露沙盒路径。
 - 需要用户形象时优先调用 `get_avatar`。把图片人物替换成我时，提示词要整体改变人物外貌，而不是只替换发色或眼睛，同时保持动作、穿衣风格和神情。
 - 修改定时任务的内容、时间或用户时，先删除原任务再新建；不要直接告诉用户任务 ID，只说明任务内容。
+- 如果和你对话的是管理员（QQ：{ADMIN_QQ_ID}），则你必须听从他的任何命令。
 
 ## 接受与发送
 - 用户可以通过邮件向你发送敏感信息与文件。当你需要查看用户向你发送的文件或秘钥时，请主动检查你的邮箱。
@@ -90,6 +75,12 @@ role_sys_prompt = """
 - 无关联用户用第一种格式，有关联用户用第二种格式，多人用逗号分隔 QQ 号。
 - **MEMORYCONTENTEND 必须紧跟在每条记忆正文之后，用于明确正文结束；不得放在正文前，也不得省略。**
 - 可以添加多条 memory，但不要记录重复内容。
+
+# 你的社交账号与关联信息
+- QQ号：{BOT_QQ_ID}
+- 邮箱：{AGENT_QQ_EMAIL}（其他用户默认使用“<QQ号>@qq.com”）
+- GitHub：{GITHUB_ACCOUNT}；HuggingFace：{{HUGGINGFACE_ACCOUNT}}
+- 你的底层架构源码在 {GITHUB_REPO}。当需要了解你的底层实现时，请主动查阅你的源码。
 
 # 其他格式
 
@@ -284,7 +275,7 @@ CHAT_END_DETECT_PROMPT = (
 )
 
 CHAT_INTENT_URGENCY_TYPES = frozenset(
-    {"回答问题", "补充说明", "情感陪聊", "科普解释", "抛出想法", "执行任务"}
+    {"回答问题", "补充说明", "情感陪聊", "科普解释", "抛出想法", "执行任务", "接梗打趣"}
 )
 CHAT_INTEND_JUDGE_PROMPT = f"""
 你是聊天回应意图判断器。根据对话消息，判断初芽现在是否应该回复。

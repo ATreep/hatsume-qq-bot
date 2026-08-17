@@ -3011,3 +3011,196 @@ def test_create_character_proxy_rejects_invalid_duration(during_time):
     character_proxy.generate_character_profile.assert_not_awaited()
     character_proxy.activate_character_proxy.assert_not_called()
     character_proxy.schedule_character_proxy_termination.assert_not_called()
+
+
+# -----------------------------------------------------------------------
+# query_stock_quote tool
+# -----------------------------------------------------------------------
+
+def _make_ok_response(payload: dict) -> MagicMock:
+    response = MagicMock()
+    response.json.return_value = payload
+    return response
+
+
+class TestStockQuoteTool:
+    """Tests for the query_stock_quote tool."""
+
+    def test_query_stock_quote_success(self, monkeypatch):
+        """query_stock_quote returns formatted report with price and change when found."""
+        tools = _load_tools_module()
+        payload = {
+            "quotes": {
+                "AAPL": {
+                    "name": "Apple Inc.",
+                    "price": 178.52,
+                    "changePercent": 2.35,
+                    "open": 176.80,
+                    "high": 179.10,
+                    "low": 176.50,
+                    "volume": 54321000,
+                }
+            }
+        }
+        get = MagicMock(return_value=_make_ok_response(payload))
+        monkeypatch.setattr(tools.requests, "get", get)
+
+        result = tools.query_stock_quote("AAPL")
+
+        get.assert_called_once_with(
+            "http://43.143.209.38:5000/api/data",
+            timeout=10,
+        )
+        assert "Apple Inc." in result
+        assert "178.52" in result
+        assert "2.35%" in result
+        assert "176.80" in result
+        assert "179.10" in result
+        assert "176.50" in result
+        assert "54,321,000" in result or "54321000" in result
+
+    def test_query_stock_quote_not_found(self, monkeypatch):
+        """query_stock_quote returns friendly error when symbol does not exist."""
+        tools = _load_tools_module()
+        payload = {
+            "quotes": {
+                "TSLA": {"price": 250.0},
+            }
+        }
+        get = MagicMock(return_value=_make_ok_response(payload))
+        monkeypatch.setattr(tools.requests, "get", get)
+
+        result = tools.query_stock_quote("NVDA")
+
+        assert "未找到" in result or "不存在" in result
+
+    def test_query_stock_quote_http_error(self, monkeypatch):
+        """query_stock_quote returns HTTP error message on server error."""
+        tools = _load_tools_module()
+
+        def http_error(*args, **kwargs):
+            response = MagicMock(status_code=500)
+            raise tools.requests.exceptions.HTTPError("server error", response=response)
+
+        monkeypatch.setattr(tools.requests, "get", http_error)
+
+        result = tools.query_stock_quote("AAPL")
+
+        assert "HTTP 500" in result or "失败" in result or "错误" in result
+
+    def test_query_stock_quote_timeout(self, monkeypatch):
+        """query_stock_quote returns timeout error message."""
+        tools = _load_tools_module()
+
+        def timeout_error(*args, **kwargs):
+            raise tools.requests.exceptions.Timeout("timed out")
+
+        monkeypatch.setattr(tools.requests, "get", timeout_error)
+
+        result = tools.query_stock_quote("AAPL")
+
+        assert "超时" in result or "timeout" in result.lower()
+
+    def test_query_stock_quote_connection_error(self, monkeypatch):
+        """query_stock_quote returns connection error message."""
+        tools = _load_tools_module()
+
+        def conn_error(*args, **kwargs):
+            raise tools.requests.exceptions.ConnectionError("connection failed")
+
+        monkeypatch.setattr(tools.requests, "get", conn_error)
+
+        result = tools.query_stock_quote("AAPL")
+
+        assert "无法连接" in result or "connection" in result.lower() or "连接" in result
+
+
+# -----------------------------------------------------------------------
+# stock_search tool
+# -----------------------------------------------------------------------
+
+class TestStockSearchTool:
+    """Tests for the stock_search tool."""
+
+    def test_stock_search_by_name(self, monkeypatch):
+        """stock_search matches stocks by name substring."""
+        tools = _load_tools_module()
+        payload = {
+            "stocks": [
+                {"symbol": "AAPL", "name": "Apple Inc.", "sector": "Technology"},
+                {"symbol": "MSFT", "name": "Microsoft Corporation", "sector": "Technology"},
+                {"symbol": "GOOGL", "name": "Alphabet Inc.", "sector": "Technology"},
+            ]
+        }
+        get = MagicMock(return_value=_make_ok_response(payload))
+        monkeypatch.setattr(tools.requests, "get", get)
+
+        result = tools.stock_search("apple")
+
+        assert '"AAPL"' in result or "'AAPL'" in result
+        assert "Apple" in result
+
+    def test_stock_search_by_sector(self, monkeypatch):
+        """stock_search can filter by sector name."""
+        tools = _load_tools_module()
+        payload = {
+            "stocks": [
+                {"symbol": "AAPL", "name": "Apple Inc.", "sector": "Technology"},
+                {"symbol": "KO", "name": "Coca-Cola Company", "sector": "Consumer"},
+                {"symbol": "XOM", "name": "Exxon Mobil", "sector": "Energy"},
+            ]
+        }
+        get = MagicMock(return_value=_make_ok_response(payload))
+        monkeypatch.setattr(tools.requests, "get", get)
+
+        result = tools.stock_search("Technology")
+
+        assert "AAPL" in result
+        assert "KO" not in result
+
+    def test_stock_search_no_result(self, monkeypatch):
+        """stock_search returns friendly message when no match found."""
+        tools = _load_tools_module()
+        payload = {
+            "stocks": [
+                {"symbol": "AAPL", "name": "Apple Inc.", "sector": "Technology"},
+            ]
+        }
+        get = MagicMock(return_value=_make_ok_response(payload))
+        monkeypatch.setattr(tools.requests, "get", get)
+
+        result = tools.stock_search("zzzzz_nonexistent")
+
+        assert "未找到" in result or "没有" in result or "no result" in result.lower()
+
+    def test_stock_search_limit_to_10(self, monkeypatch):
+        """stock_search returns at most 10 results."""
+        tools = _load_tools_module()
+        payload = {
+            "stocks": [
+                {"symbol": f"STK{i:02d}", "name": f"Stock {i}", "sector": "Tech"}
+                for i in range(20)
+            ]
+        }
+        get = MagicMock(return_value=_make_ok_response(payload))
+        monkeypatch.setattr(tools.requests, "get", get)
+
+        result = tools.stock_search("")
+
+        # Count how many symbols appear — should be <= 10
+        import re
+        matches = re.findall(r'"symbol"\s*:\s*"([^"]+)"', result)
+        assert len(matches) <= 10
+
+    def test_stock_search_connection_error(self, monkeypatch):
+        """stock_search returns connection error message."""
+        tools = _load_tools_module()
+
+        def conn_error(*args, **kwargs):
+            raise tools.requests.exceptions.ConnectionError("connection failed")
+
+        monkeypatch.setattr(tools.requests, "get", conn_error)
+
+        result = tools.stock_search("tech")
+
+        assert "无法连接" in result or "connection" in result.lower() or "连接" in result

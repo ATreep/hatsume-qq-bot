@@ -1426,6 +1426,142 @@ async def membersearch(query: str) -> str:
     return json.dumps(results, ensure_ascii=False)
 
 
+@tool(description="查询美股单只股票的实时报价。输入股票代码，返回名称、当前价格、涨跌幅、开盘价、最高/最低价和成交量。")
+def query_stock_quote(symbol: str) -> str:
+    """Query real-time quote for a single US stock by its ticker symbol."""
+    from .. import config
+
+    base_url = getattr(config, "STOCK_API_BASE", "http://43.143.209.38:5000")
+    url = f"{base_url.rstrip('/')}/api/data"
+    symbol_upper = str(symbol).strip().upper()
+    print(f"Query stock quote: {symbol_upper}")
+
+    try:
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+    except requests.exceptions.HTTPError as e:
+        status_code = e.response.status_code if e.response is not None else 0
+        print(f"Stock quote HTTP error: {status_code or 'unknown'}")
+        if status_code in (401, 403):
+            return "股票数据接口鉴权失败。"
+        if status_code == 429:
+            return "股票数据接口请求过于频繁，请稍后重试。"
+        if status_code:
+            return f"股票数据接口返回 HTTP {status_code}。"
+        return "股票数据接口返回了未知 HTTP 错误。"
+    except requests.exceptions.SSLError as e:
+        print(f"Stock quote SSL error: {e}")
+        return "股票数据接口无法验证 SSL 证书。"
+    except requests.exceptions.Timeout as e:
+        print(f"Stock quote timeout: {e}")
+        return "股票数据接口请求超时。"
+    except requests.exceptions.ConnectionError as e:
+        print(f"Stock quote connection error: {e}")
+        return "暂时无法连接股票数据接口。"
+    except requests.exceptions.InvalidJSONError as e:
+        print(f"Stock quote response error: {e}")
+        return "股票数据接口返回了无效数据。"
+    except requests.exceptions.RequestException as e:
+        print(f"Stock quote request error: {e}")
+        return "股票数据接口请求异常。"
+
+    quotes = data.get("quotes") if isinstance(data, dict) else None
+    if not isinstance(quotes, dict):
+        return "股票数据接口返回了无效数据。"
+
+    quote = quotes.get(symbol_upper)
+    if quote is None:
+        return f"未找到股票代码 {symbol_upper} 的报价信息。"
+
+    name = str(quote.get("name", symbol_upper))
+    price = quote.get("price")
+    change_percent = quote.get("changePercent")
+    open_price = quote.get("open")
+    high = quote.get("high")
+    low = quote.get("low")
+    volume = quote.get("volume")
+
+    def _fmt(val):
+        """Format a numeric value to 2 decimal places, or leave string/int untouched."""
+        if isinstance(val, bool):
+            return ""
+        if isinstance(val, float):
+            return f"{val:.2f}"
+        if val is not None:
+            return str(val)
+        return "暂无"
+
+    parts = [f"### {name}（{symbol_upper}）"]
+    parts.append(f"- **当前价格**：{_fmt(price)}")
+    parts.append(f"- **涨跌幅**：{_fmt(change_percent)}%")
+    parts.append(f"- **开盘价**：{_fmt(open_price)}")
+    parts.append(f"- **最高价**：{_fmt(high)}")
+    parts.append(f"- **最低价**：{_fmt(low)}")
+    vol_str = f"{volume:,}" if isinstance(volume, int) else str(volume) if volume is not None else "暂无"
+    parts.append(f"- **成交量**：{vol_str}")
+    return "\n".join(parts)
+
+
+@tool(description="搜索股票代码列表。根据关键词（股票名片段或行业板块名称）模糊匹配，返回最多 10 条匹配结果，每条包含 symbol、name 和 sector。")
+def stock_search(query: str) -> str:
+    """Search the stock universe by name substring or sector, returning up to 10 matches as JSON."""
+    import json
+
+    from .. import config
+
+    base_url = getattr(config, "STOCK_API_BASE", "http://43.143.209.38:5000")
+    url = f"{base_url.rstrip('/')}/api/stocks"
+    query_lower = str(query).strip().lower()
+    print(f"Search stocks: {query_lower!r}")
+
+    try:
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+    except requests.exceptions.SSLError as e:
+        print(f"Stock search SSL error: {e}")
+        return "股票数据接口无法验证 SSL 证书。"
+    except requests.exceptions.Timeout as e:
+        print(f"Stock search timeout: {e}")
+        return "股票数据接口请求超时。"
+    except requests.exceptions.ConnectionError as e:
+        print(f"Stock search connection error: {e}")
+        return "暂时无法连接股票数据接口。"
+    except requests.exceptions.InvalidJSONError as e:
+        print(f"Stock search response error: {e}")
+        return "股票数据接口返回了无效数据。"
+    except requests.exceptions.RequestException as e:
+        print(f"Stock search request error: {e}")
+        return "股票数据接口请求异常。"
+
+    stocks = data.get("stocks") if isinstance(data, dict) else None
+    if not isinstance(stocks, list):
+        return "股票数据接口返回了无效数据。"
+
+    query = query_lower.strip()
+    results = []
+    for stock in stocks:
+        if not isinstance(stock, dict):
+            continue
+        name = str(stock.get("name", "")).lower()
+        symbol = str(stock.get("symbol", "")).lower()
+        sector = str(stock.get("sector", "")).lower()
+        if query in name or query in symbol or query in sector:
+            results.append({
+                "symbol": stock.get("symbol"),
+                "name": stock.get("name"),
+                "sector": stock.get("sector"),
+            })
+        if len(results) >= 10:
+            break
+
+    if not results:
+        return f"未找到与 {query!r} 匹配的股票。"
+
+    return json.dumps(results, ensure_ascii=False)
+
+
 # ---------------------------------------------------------------------------
 # Agent dispatch tool
 # ---------------------------------------------------------------------------
@@ -1678,6 +1814,8 @@ CHAT_TOOLS = [
     skill_download,
     skill_create,
     membersearch,
+    query_stock_quote,
+    stock_search,
     agent_dispatch,
     respond_to_shell_prompt,
     create_character_proxy,
