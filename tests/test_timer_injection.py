@@ -150,6 +150,7 @@ def _load_ai_module():
             "build_todo_prompt": lambda items, available=True: "todo prompt",
             "AUXILIARY_COMPACTION_PROMPT": "",
             "CHAT_END_DETECT_PROMPT": "detect_end",
+            "CHAT_INTENT_URGENCY_TYPES": frozenset({"回答问题"}),
         },
         "hatsume.plugins.hatsume-plugin.skills": {
             "get_skill_manager": lambda: types.SimpleNamespace(list_skills=lambda: []),
@@ -160,6 +161,7 @@ def _load_ai_module():
             "get_group_member_name": lambda *a, **kw: "",
             "get_date": lambda: "2026-01-01",
             "message_to_json": lambda *a, **kw: {},
+            "strip_thinking_tags": lambda text: text,
         },
         "hatsume.plugins.hatsume-plugin.utils.md_to_image": {
             "auto_convert_text": lambda *a, **kw: None,
@@ -295,47 +297,6 @@ class TestTimerInjectionRoundTrip:
         assert "__timer__" not in msg["text"]
         assert "定时提醒：喝水" in msg["text"]
         assert mock_state.chat_peers == set()
-
-
-class TestInjectLearnEvolve:
-    """Learn-evolve requests ride the Timer-style system-trigger mechanism."""
-
-    def test_injects_into_human_queue_with_learn_evolve_trigger_when_chatting(self):
-        ai_mod = _load_ai_module()
-        mock_state = MockState()
-        mock_state.is_chatting = True
-        _set_group_state(ai_mod, 101, mock_state)
-        ai_mod.inject_learn_evolve(
-            user_id=0, group_id=101, learn_prompt="分析最近记忆并产出升级方向",
-        )
-        assert len(mock_state.human_queue) == 1
-        msg = mock_state.human_queue[0]
-        assert msg["type"] == "text"
-        assert msg[ai_mod.SYSTEM_TRIGGER_KEY] == "learn_evolve"
-        assert "分析最近记忆并产出升级方向" in msg["text"]
-        assert mock_state.chat_peers == set()
-
-    def test_calls_start_conversation_cb_when_not_chatting(self):
-        ai_mod = _load_ai_module()
-        mock_state = MockState()
-        mock_state.is_chatting = False
-        _set_group_state(ai_mod, 103, mock_state)
-        cb_called = {"called": False, "user_id": 0, "msg": ""}
-
-        def cb(uid, gid, msg):
-            cb_called["called"] = True
-            cb_called["user_id"] = uid
-            cb_called["msg"] = msg
-
-        ai_mod.inject_learn_evolve(
-            user_id=0,
-            group_id=103,
-            learn_prompt="分析最近记忆",
-            start_conversation_cb=cb,
-        )
-        assert cb_called["called"]
-        assert cb_called["user_id"] == 0
-        assert "分析最近记忆" in cb_called["msg"]
 
 
 class TestInjectAgentNotification:

@@ -53,6 +53,7 @@ from ..utils import (
     message_to_json,
     resolve_cq_at_mentions,
 )
+from ..qq_emoji import render_qqface
 from ..utils.md_to_image import auto_convert_text
 
 from .forward import (
@@ -60,8 +61,6 @@ from .forward import (
     has_forward_segment,
     resolve_forward_content,
 )
-from .qqface import render_qqface
-
 # ---- Section 2: Message Pipeline & Assembly ----
 
 

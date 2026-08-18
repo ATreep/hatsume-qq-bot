@@ -16,7 +16,7 @@
   - 有未完成 Agent → `create_restart_todo()` 创建 Todo（content=`RESTART_TODO_CONTENT`，finish_condition=`RESTART_TODO_COMPLETION_EVENT`）→ `_wait_for_agents_then_restart()` 轮询等待 → 全部完成后 `mark_item` 标记完成 → 重启。
 - 去重：todo store（`todo/store.py`）唯一索引 `(group_id, initiator_qq_id, content, finish_condition)` + `create_item` duplicate 检测；`request_bot_restart` 另有 `_restart_in_flight` 并发去重。
 - Agent 活跃判定：`evolution.py::has_unfinished_agents` → `graph/agents.py::get_unfinished_agent_instances`（status=running 实例 + 未完成任务，跨全部群）。
-- 契约文本已就位：根/插件 `AGENTS.md`（Self-Hosted Runtime #6）、`prompts.py::build_learn_evolve_prompt`、运行时 skill `data/hatsume-plugin/skills/self-evolution.md`、`tests/test_self_evolution_runtime.py` 均描述"未完成 Agent → 创建 Todo（完成条件『所有 Agent 执行完毕后自动重启』）→ 等待 → 重启；无则直接重启"。
+- 契约文本已就位：根/插件 `AGENTS.md`（Self-Hosted Runtime #6）、运行时 skill `data/hatsume-plugin/skills/self-evolution.md`、`tests/test_self_evolution_runtime.py` 均描述"未完成 Agent → 创建 Todo（完成条件『所有 Agent 执行完毕后自动重启』）→ 等待 → 重启；无则直接重启"。
 - 测试：`tests/test_self_evolution_auto_restart.py`（未跟踪）+ `tests/test_container_lifecycle.py` 共 41 个测试全部通过。
 - **差距**：`RESTART_TODO_CONTENT = "自我进化改动待生效：等待所有 Agent 执行完毕后自动重启"` —— 不含「重启等候」命名，未显式表达"仅当当前没有任何活跃 Agent 时执行重启"（需求 1/3 的字面契约）。该常量无任何测试断言其值，可安全调整。
 

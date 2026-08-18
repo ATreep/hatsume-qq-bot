@@ -179,7 +179,7 @@ LIVELY_TONE_ENABLED: bool = True
 # Todo list
 # ---------------------------------------------------------------------------
 TODO_MAX_ITEMS: int = 15
-TODO_EXPIRY_SECONDS: int = 48 * 60 * 60
+TODO_EXPIRY_SECONDS: int = 72 * 60 * 60
 
 # ---------------------------------------------------------------------------
 # Auto response timer
@@ -214,13 +214,6 @@ SHELL_TIMEOUT: int = 300
 TIMER_TOLERANCE_MINUTES: int = 5
 TIMER_MAX_FREQUENCY_POINTS: int = 5
 TIMER_MAX_EXACT_POINTS: int = 10
-
-# ---------------------------------------------------------------------------
-# Learning evolution
-# ---------------------------------------------------------------------------
-# 单次读取记忆上限（条）与最近记忆窗口（小时）。
-LEARN_EVOLVE_MEMORY_LIMIT: int = 100
-LEARN_EVOLVE_WINDOW_HOURS: int = 24
 
 # ---------------------------------------------------------------------------
 # Skill module

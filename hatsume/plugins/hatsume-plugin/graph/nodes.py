@@ -53,13 +53,11 @@ from ..prompts import (
 )
 from ..skills import get_skill_manager
 from ..utils import (
-    CQ_AT_PATTERN,
     get_date,
     get_group_member_name,
     message_to_json,
     strip_thinking_tags,
 )
-from ..utils.md_to_image import auto_convert_text
 from .tools import (
     get_chat_tools,
     get_current_group_id,
@@ -624,33 +622,6 @@ def inject_timer(
             _start_direct_conv(user_id, group_id, timer_msg)
 
 
-def inject_learn_evolve(
-    user_id: int,
-    group_id: int,
-    learn_prompt: str,
-    start_conversation_cb: Any = None,
-) -> None:
-    """Inject a learning-evolution request into the conversation flow.
-
-    Mirrors ``inject_timer``: the structured request is queued as a
-    system-triggered task so the group's chat_agent handles it through the
-    normal graph. No independent evolution agent is spawned.
-    """
-    learn_msg = f"(SYSTEM) 学习进化请求已触发。\n{learn_prompt}"
-    print(f"🧬 [inject_learn_evolve] Injecting learn-evolve request into group {group_id}")
-
-    runtime = group_runtime_registry.get_or_create(group_id)
-    state = runtime.conversation
-    if state.is_chatting:
-        state.human_queue.append(make_system_trigger_message(learn_msg, "learn_evolve"))
-        print("🧬 [inject_learn_evolve] Injected learn-evolve request into human_queue")
-    elif start_conversation_cb is not None:
-        print("🧬 [inject_learn_evolve] Starting new conversation for learn-evolve request")
-        start_conversation_cb(user_id, group_id, learn_msg)
-    else:
-        _start_direct_conv(user_id, group_id, learn_msg)
-
-
 def _start_direct_conv(user_id: int, group_id: int, notify_msg: str) -> None:
     """Start a new graph conversation targeting a specific group directly.
 
@@ -920,8 +891,6 @@ async def ai_node(state: MessagesState) -> dict:
 
     sys_prompt += f"\n\n# 当前日期与时间\n{get_date()}"
 
-    print("Start building historical recording from auxiliary queue...")
-
     ai_text: str = ""
     llm_error_type: str | None = None  # Track specific error type for user-facing messages
     replyable_message_ids: set[int] = set()  # Init to satisfy static analysis; always set in try block
@@ -946,6 +915,11 @@ async def ai_node(state: MessagesState) -> dict:
             tools=get_chat_tools(),
             system_prompt=sys_prompt,
         )
+
+        print("Start chat_agent invocation.")
+
+        t_invocation_start = time.time()
+
         set_shell_executor_limit(3)  # chat_agent: max 3 shell_executor calls per round
         retrying_agent = chat_agent.with_retry(stop_after_attempt=5)
         invocation_messages = agent_messages
@@ -979,6 +953,10 @@ async def ai_node(state: MessagesState) -> dict:
                 invocation_messages = response_messages
 
         ai_text = "\n".join(response_texts)
+
+        t_invocation_end = time.time()
+
+        print(f"Elapsed time of chat_agent invocation: {t_invocation_end - t_invocation_start}s")
 
         # LLM outputs plain text directly
         print(f"Raw AI response: {ai_text}")
@@ -1029,19 +1007,17 @@ async def ai_node(state: MessagesState) -> dict:
     end_requested = conversation_state.end_requested
     if end_requested:
         print("[end_conversation] Suppressed the final AI reply.")
-    elif ai_text_clean:
-        _ai_answer = _get_ai_answer()
-        if _ai_answer:
-            if reply_to_message_id is not None:
-                await _ai_answer(
-                    ai_text_clean,
-                    reply_to_message_id=reply_to_message_id,
-                )
-            elif CQ_AT_PATTERN.search(ai_text_clean):
-                await _ai_answer(ai_text_clean)
-            else:
-                for seg in await auto_convert_text(ai_text_clean):
-                    await _ai_answer(seg)
+    else:
+        if ai_text_clean:
+            _ai_answer = _get_ai_answer()
+            if _ai_answer:
+                if reply_to_message_id is not None:
+                    await _ai_answer(
+                        ai_text_clean,
+                        reply_to_message_id=reply_to_message_id,
+                    )
+                else:
+                    await _ai_answer(ai_text_clean)
 
     t_mem_start = time.time()
 

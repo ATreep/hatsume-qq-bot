@@ -303,47 +303,6 @@ def query_by_user_ids(
     return _row_dicts(conn.execute(query, params))
 
 
-def query_recent_memories(
-    conn: sqlite3.Connection,
-    group_id: int | None = None,
-    limit: int = 100,
-    since_time: float | None = None,
-) -> list[dict[str, Any]]:
-    """Return recent memory rows, optionally filtered by group, newest first.
-
-    This bounded read is reserved for learning evolution. At most 100 rows are
-    ever returned.
-    """
-    bounded_limit = max(0, min(int(limit), 100))
-    if bounded_limit == 0:
-        return []
-    conditions: list[str] = []
-    params: list[Any] = []
-    if group_id is not None:
-        conditions.append("group_id = ?")
-        params.append(validate_group_id(group_id))
-    if since_time is not None:
-        conditions.append("time > ?")
-        params.append(int(since_time))
-    params.append(bounded_limit)
-    where_clause = f" WHERE {' AND '.join(conditions)}" if conditions else ""
-    cursor = conn.execute(
-        "SELECT id, group_id, content, time FROM memories"
-        + where_clause
-        + " ORDER BY time DESC, id DESC LIMIT ?",
-        params,
-    )
-    return [
-        {
-            "id": int(memory_id),
-            "group_id": int(group_id),
-            "content": content,
-            "time": int(memory_time),
-        }
-        for memory_id, group_id, content, memory_time in cursor
-    ]
-
-
 def query_all_except(
     conn: sqlite3.Connection,
     group_id: int,
@@ -493,11 +452,6 @@ def _get_db() -> sqlite3.Connection:
     if _db_conn is None:
         _db_conn = init_db(store.get_plugin_data_file(_MEMORY_DB_FILE))
     return _db_conn
-
-
-def get_db() -> sqlite3.Connection:
-    """Return the process-lazy memory SQLite connection, creating it on demand."""
-    return _get_db()
 
 
 def _get_vector_store() -> MilvusVectorStore:

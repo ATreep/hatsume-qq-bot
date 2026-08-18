@@ -1424,7 +1424,7 @@ def test_ai_node_invalid_reply_target_uses_ordinary_send():
         nodes.create_agent = original_create_agent
 
     assert sent[0][1] is None
-    assert sent[0][0].data["text"] == "ordinary answer"
+    assert sent[0][0] == "ordinary answer"
     assert result["messages"][0].content == "ordinary answer"
 
 
@@ -1596,7 +1596,7 @@ def test_ai_node_reinvokes_after_tool_only_response():
     assert len(fake_agent.invocations) == 2
     assert fake_agent.invocations[1]["messages"] == [tool_call, tool_result]
     answer.assert_awaited_once()
-    assert answer.await_args.args[0].data["text"] == "最终回答"
+    assert answer.await_args.args[0] == "最终回答"
     assert saved == [("「小明」喜欢爵士乐", [])]
     assert result["messages"][0].content == (
         "[memory: 「小明」喜欢爵士乐 MEMORYCONTENTEND]\n最终回答"
@@ -2762,11 +2762,10 @@ def test_face_tag_stripped_from_user_text_preserved_in_aimessage():
         # User-facing text should NOT contain the face tag
         assert len(sent_messages) >= 1, "at least the text message should be sent"
         text_msg = sent_messages[0]
-        assert text_msg.type == "text"
-        assert "[ hatsumeface:" not in text_msg.data["text"], (
+        assert "[ hatsumeface:" not in text_msg, (
             "Sent text should not contain face tag"
         )
-        assert "今天天气真好呀" in text_msg.data["text"], (
+        assert "今天天气真好呀" in text_msg, (
             "Sent text should contain the message content without the tag"
         )
     finally:
@@ -2994,7 +2993,7 @@ def test_ai_node_reinvokes_after_thinking_only_response():
         "thinking-only output should trigger a re-invocation"
     )
     answer.assert_awaited_once()
-    assert answer.await_args.args[0].data["text"] == "最终回答"
+    assert answer.await_args.args[0] == "最终回答"
     # No thinking-only text may reach the user or the returned AIMessage
     assert result["messages"][0].content == "最终回答"
 
@@ -3240,6 +3239,60 @@ def test_ai_node_normal_flow_unaffected_by_new_error_types():
 
     assert result["messages"][0].content == "一切正常"
     assert len(sent_messages) >= 1
+
+
+def test_ai_node_delegates_markdown_rendering_to_sender_once():
+    """Image + LINKS rendering belongs to the sender and must be invoked once."""
+    nodes = _load_nodes_module()
+    nodes.auxiliary_messages_queue.clear()
+    nodes.auxiliary_source_queue.clear()
+    answer = AsyncMock()
+    mock_state = types.SimpleNamespace(
+        human_queue=[],
+        human_source_queue=[],
+        is_graph_running=True,
+        current_query_user_id=None,
+        end_requested=False,
+        ai_answer=answer,
+    )
+    nodes.bind_state(mock_state)
+    markdown = "# 结果\n[docs](https://example.com)"
+
+    class _GoodAgent:
+        def with_retry(self, **kw):
+            return self
+
+        async def ainvoke(self, *a, **kw):
+            return {
+                "messages": [types.SimpleNamespace(content=markdown, type="ai")]
+            }
+
+    original_create_agent = nodes.create_agent
+    original_auto_convert_text = getattr(nodes, "auto_convert_text", None)
+    converter = AsyncMock(
+        return_value=[
+            types.SimpleNamespace(type="image", data={"file": "rendered"}),
+            types.SimpleNamespace(type="text", data={"text": "LINKS"}),
+        ]
+    )
+    nodes.create_agent = lambda *args, **kwargs: _GoodAgent()
+    nodes.auto_convert_text = converter
+
+    try:
+        asyncio.run(
+            nodes.ai_node(
+                {"messages": [types.SimpleNamespace(content="你好", type="human")]}
+            )
+        )
+    finally:
+        nodes.create_agent = original_create_agent
+        if original_auto_convert_text is None:
+            del nodes.auto_convert_text
+        else:
+            nodes.auto_convert_text = original_auto_convert_text
+
+    converter.assert_not_awaited()
+    answer.assert_awaited_once_with(markdown)
 
 
 def test_chat_end_detect_node_skips_model_on_rate_limit():

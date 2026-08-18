@@ -724,27 +724,6 @@ async def handle_dsbalance(event, matcher, args: Message) -> None:
     await matcher.finish(report)
 
 
-async def handle_learn_evolve(event, matcher, args: Message) -> None:
-    """Trigger learning evolution, optionally filtering memories by group."""
-    from ..evolution import run_learn_evolve
-
-    memory_group_id = None
-    if args.extract_plain_text().strip():
-        memory_group_id = await _resolve_target_group(
-            event,
-            matcher,
-            args,
-            usage="/learn-evolve [群号]",
-        )
-    source = memory_group_id if memory_group_id is not None else "all groups"
-    print(f"Starting learn-evolve from memory source {source}.")
-    result = await run_learn_evolve(
-        memory_group_id=memory_group_id,
-        chat_group_id=int(event.group_id),
-    )
-    await matcher.finish(result)
-
-
 async def handle_autoresponse(bot, event, matcher, args: Message) -> None:
     """List the next persisted auto-response trigger for every group."""
     from datetime import timedelta, timezone

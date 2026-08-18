@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -84,7 +84,7 @@ role_sys_prompt = f"""
 
 # 其他格式
 
-- 有人让你点赞：告诉他发送“赞我”；查排行榜发送 `/likerank`。有人叫你“出芽”：立刻炸毛纠正。
+- 有人让你给 QQ 账号点赞：告诉他发送“赞我”；查排行榜发送 `/likerank`。有人叫你“出芽”：立刻炸毛纠正。
 - 代码用带语言名的反引号围栏；简单的数字可以直接输出，但复杂的数学公式必须使用 `$` 包围的 LaTeX，不要放进代码围栏；只有三言两语闲聊时不用 Markdown。
 
 # 输出前检查
@@ -93,7 +93,7 @@ role_sys_prompt = f"""
 - 没有心理或动作描写；
 - 无 emoji 表情；
 - 输出字数 30 字左右；如果是科普向，可以增多字数。
-- 需要时正确使用 `[CQ:at,qq=<QQ号>]` `[reply: <message_id>]`、`[memory: xxx MEMORYCONTENTEND, keyman: QQ号1, QQ号2, ...]`、`[hatsumeface: xxx]`。
+- 需要时正确使用 `[CQ:at,qq=<QQ号>]`、`[reply: <message_id>]`、`[memory: xxx MEMORYCONTENTEND, keyman: QQ号1, QQ号2, ...]`、`[hatsumeface: xxx]`。
 """
 
 soul = get_soul_prompt()
@@ -396,7 +396,7 @@ def build_todo_prompt(
 - 创建前先对照下方活动待办，避免语义重复；存储层还会拒绝完全相同的待办。
 - 可以结合近期对话上下文判断待办是否完成，不要求完成证据只出现在最后一条消息。
 - 只有 finish_condition 中的 Permitted finisher 和 Completion event 两项都满足时，才能调用 mark_todo；不确定时保留待办。
-- 待办变旧不等于完成，禁止因为接近或超过 48 小时而调用 mark_todo；过期待办由系统删除。
+- 待办变旧不等于完成，禁止因为接近或超过 72 小时而调用 mark_todo；过期待办由系统删除。
 - mark_todo 成功后，必须按工具返回的信息在本轮自然回复中 @ 发起人，并明确说明待办是因为完成条件满足而完成，不是因为过期。
 
 ## 当前群活动待办
@@ -404,38 +404,6 @@ def build_todo_prompt(
 """
 
 
-
-
-# ---------------------------------------------------------------------------
-# Learning evolution prompts
-# ---------------------------------------------------------------------------
-def build_learn_evolve_prompt(memories: Sequence[Mapping[str, Any]]) -> str:
-    """Build a memory-driven self-evolution system task."""
-    if memories:
-        lines = []
-        for index, memory in enumerate(memories, start=1):
-            memory_time = datetime.fromtimestamp(
-                int(memory["time"]),
-                timezone(timedelta(hours=8)),
-            ).strftime("%Y/%m/%d %H:%M:%S")
-            content = str(memory["content"]).strip()
-            group_id = int(memory["group_id"])
-            lines.append(
-                f"{index}. 群：{group_id}｜时间：{memory_time}｜内容：{content}"
-            )
-        memory_text = "\n".join(lines)
-    else:
-        memory_text = "（最近 24 小时没有可用记忆）"
-    return (
-        "(SYSTEM) 执行一次学习进化。阅读以下最近 24 小时的长期记忆，"
-        "从记忆反映的真实需求、问题或能力缺口中选择一个最值得实施的进化方向。"
-        "不要只小修小补，尝试做出大的改变：如新增功能、重要漏洞修复、机制重写等。"
-        "只选择一个方向，不要输出候选清单。调用 skill_loader 加载 self-evolution，"
-        "严格依据该 Skill 完成分析、修改、验证和重启；不要另建进化 Agent 或进化流程。"
-        "如果没有可用记忆，则说明本次没有依据并结束，不修改源码。\n\n"
-        "## 最近 24 小时记忆\n"
-        f"{memory_text}"
-    )
 
 
 # ---------------------------------------------------------------------------

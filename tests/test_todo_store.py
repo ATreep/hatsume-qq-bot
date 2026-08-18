@@ -29,7 +29,7 @@ def _load_store_module():
 
     config = types.ModuleType(f"{TEST_PACKAGE}.config")
     config.TODO_MAX_ITEMS = 15
-    config.TODO_EXPIRY_SECONDS = 48 * 60 * 60
+    config.TODO_EXPIRY_SECONDS = 72 * 60 * 60
     sys.modules[config.__name__] = config
 
     localstore = types.ModuleType("nonebot_plugin_localstore")

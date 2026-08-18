@@ -1,4 +1,4 @@
-"""Render OneBot QQ face segments as descriptions for LLM input."""
+"""Shared QQ emoji IDs, descriptions, and OneBot API helpers."""
 
 from __future__ import annotations
 
