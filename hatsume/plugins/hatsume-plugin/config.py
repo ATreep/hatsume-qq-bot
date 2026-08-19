@@ -221,5 +221,16 @@ TIMER_MAX_EXACT_POINTS: int = 10
 SKILLS_DIR: Path = Path(__file__).resolve().parents[3] / "data" / "hatsume-plugin" / "skills"
 COMMON_SKILLS_DIR: Path = SKILLS_DIR
 GROUP_SKILLS_DIR: Path = SKILLS_DIR / "groups"
+BUILTIN_SKILLS_DIR: Path = Path(__file__).resolve().parent / "skills" / "builtin"
+
+# ---------------------------------------------------------------------------
+# Hook module
+# ---------------------------------------------------------------------------
+HOOKS_DIR: Path = Path(__file__).resolve().parents[3] / "data" / "hatsume-plugin" / "hooks"
+HOOK_MAX_ACTIVE_PER_GROUP: int = 5
+HOOK_MIN_INTERVAL_SECONDS: int = 300
+HOOK_DEFAULT_INTERVAL_SECONDS: int = 900
+HOOK_DEFAULT_TIMEOUT_SECONDS: int = 15
+HOOK_MAX_TIMEOUT_SECONDS: int = 60
 
 CONTAINER_NAME_BASE = "hatsume-space"

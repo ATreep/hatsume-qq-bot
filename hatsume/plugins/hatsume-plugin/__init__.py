@@ -33,6 +33,11 @@ from .handlers.tools import (
 )
 from .handlers.social import handle_like, handle_likerank
 from .group_runtime import group_runtime_registry
+from .hooks import (
+    init_hook_system,
+    pause_hooks_for_groups,
+    restore_hooks,
+)
 from .memory import (
     configure_activated_group_callback,
     get_activated_group_ids,
@@ -48,6 +53,7 @@ from .timer import (
 # Initialize memory system and its activated-group snapshot on plugin startup.
 init_memory_system()
 configure_activated_group_callback(sync_auto_response_for_group)
+init_hook_system()
 
 async def _handle_bot_connect(bot: Bot) -> None:
     """Learn target-group routes before recovering background injections."""
@@ -56,10 +62,13 @@ async def _handle_bot_connect(bot: Bot) -> None:
         get_activated_group_ids(),
         group_runtime_registry.routed_group_ids(),
     )
+    restore_hooks(group_runtime_registry.routed_group_ids())
 
 
 async def _handle_bot_disconnect(bot: Bot) -> None:
-    for group_id in group_runtime_registry.unbind_bot(bot):
+    disconnected_group_ids = group_runtime_registry.unbind_bot(bot)
+    pause_hooks_for_groups(disconnected_group_ids)
+    for group_id in disconnected_group_ids:
         reconcile_auto_response_for_group(group_id)
 
 

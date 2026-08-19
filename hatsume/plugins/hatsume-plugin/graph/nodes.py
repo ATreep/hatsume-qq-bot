@@ -622,7 +622,46 @@ def inject_timer(
             _start_direct_conv(user_id, group_id, timer_msg)
 
 
-def _start_direct_conv(user_id: int, group_id: int, notify_msg: str) -> None:
+def inject_hook(
+    *,
+    group_id: int,
+    hook_name: str,
+    prompt: str,
+    event_text: str,
+    start_conversation_cb: Any = None,
+) -> None:
+    """Inject one Hook event into the owning group's conversation flow."""
+    normalized_name = str(hook_name).strip() or "unnamed"
+    normalized_prompt = str(prompt).strip()
+    normalized_event = str(event_text).strip()
+    if not normalized_event:
+        raise ValueError("Hook event text must not be empty")
+    hook_msg = (
+        f"(SYSTEM) Hook '{normalized_name}' detected a new event.\n\n"
+        "## Hook instructions\n"
+        f"{normalized_prompt}\n\n"
+        "## Hook event\n"
+        f"{normalized_event}"
+    )
+    runtime = group_runtime_registry.get_or_create(group_id)
+    state = runtime.conversation
+    if state.is_chatting:
+        state.human_queue.append(make_system_trigger_message(hook_msg, "hook"))
+        print(f"🪝 [inject_hook] Injected Hook {normalized_name} into human_queue")
+        return
+    if start_conversation_cb is not None:
+        start_conversation_cb(0, group_id, hook_msg)
+    else:
+        _start_direct_conv(0, group_id, hook_msg, trigger_type="hook")
+
+
+def _start_direct_conv(
+    user_id: int,
+    group_id: int,
+    notify_msg: str,
+    *,
+    trigger_type: str = "timer",
+) -> None:
     """Start a new graph conversation targeting a specific group directly.
 
     Used when no callback is registered (e.g., /autoresponse debug command).
@@ -634,7 +673,7 @@ def _start_direct_conv(user_id: int, group_id: int, notify_msg: str) -> None:
         user_id,
         group_id,
         notify_msg,
-        trigger_type="timer",
+        trigger_type=trigger_type,
     )
 
 

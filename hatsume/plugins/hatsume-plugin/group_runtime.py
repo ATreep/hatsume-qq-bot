@@ -229,6 +229,13 @@ class GroupRuntimeRegistry:
             print(f"Group runtime Agent shutdown failed: {exc}")
 
         try:
+            from .hooks import shutdown_hooks
+
+            await shutdown_hooks()
+        except Exception as exc:
+            print(f"Group runtime Hook shutdown failed: {exc}")
+
+        try:
             from .infra import shutdown_all_containers
 
             await shutdown_all_containers()

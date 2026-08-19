@@ -46,6 +46,9 @@ IsoWeekday = Annotated[int, Field(strict=True, ge=1, le=7)]
 MonthDay = Annotated[int, Field(strict=True, ge=1, le=31)]
 ImageSearchCount = Annotated[int, Field(strict=True, ge=1, le=10)]
 ImageOrientation = Literal["landscape", "portrait", "square"]
+HookIntervalSeconds = Annotated[int, Field(strict=True, ge=300)]
+HookTimeoutSeconds = Annotated[int, Field(strict=True, ge=1, le=60)]
+StrictBool = Annotated[bool, Field(strict=True)]
 
 
 class WeeklyTimePoint(TypedDict):
@@ -1384,6 +1387,197 @@ def skill_create(content: str) -> str:
     return mgr.save_skill(name, content)
 
 
+# ---------------------------------------------------------------------------
+# Hook tools
+# ---------------------------------------------------------------------------
+@tool
+async def create_hook(
+    name: str,
+    script_path: str,
+    prompt: str,
+    interval_seconds: HookIntervalSeconds = 900,
+    timeout_seconds: HookTimeoutSeconds = 15,
+) -> str:
+    """注册当前群的持久化 heartbeat Hook。
+
+    调用前必须加载 `hook-authoring` Skill，让 coding_agent 在
+    `data/hatsume-plugin/hooks/<当前群号>/` 写好可执行脚本并以验证模式试跑。
+    普通情况下必须拒绝无意义、应使用 Timer、或无法拆成快速增量检查的请求；
+    只有管理员明确坚持时可以绕过这个语义拒绝。无论谁请求，程序都强制
+    interval_seconds >= 300、1 <= timeout_seconds <= 60，且每群最多 5 个启用
+    Hook。未指定间隔时使用 900 秒，但应根据外部源成本主动选择更合理的间隔。
+
+    脚本 exit 0 表示无事件；exit 10 且 stdout 非空表示触发 chat_agent。
+    注册验证不会注入事件，也不得推进脚本游标。
+    """
+    runtime = get_current_group_runtime()
+    requester_id = runtime.conversation.current_query_user_id
+    if requester_id is None or requester_id <= 0:
+        return "错误：无法确定 Hook 创建者。"
+    from ..hooks import get_store
+    from ..hooks.executor import (
+        register_hook_job,
+        run_hook_script,
+        validate_hook_script_path,
+    )
+
+    try:
+        path = validate_hook_script_path(script_path, runtime.group_id)
+        result = await run_hook_script(
+            path,
+            timeout_seconds=timeout_seconds,
+            validation=True,
+        )
+        if result.error is not None:
+            return f"错误：Hook 脚本验证失败：{result.error}"
+        store = get_store()
+        record = store.create_hook(
+            group_id=runtime.group_id,
+            name=name,
+            script_path=str(path),
+            prompt=prompt,
+            interval_seconds=interval_seconds,
+            timeout_seconds=timeout_seconds,
+            created_by=requester_id,
+        )
+        try:
+            register_hook_job(record, store)
+        except Exception:
+            store.delete_hook(runtime.group_id, str(record["name"]))
+            raise
+    except Exception as exc:  # noqa: BLE001 - tool boundary returns safe text
+        return f"错误：创建 Hook 失败：{exc}"
+    return (
+        f"Hook '{record['name']}' 已创建：每 {record['interval_seconds']} 秒检查一次，"
+        f"单次超时 {record['timeout_seconds']} 秒。"
+    )
+
+
+@tool
+def list_hooks() -> str:
+    """列出当前群全部 Hook、运行状态、下次 heartbeat 与最近错误。"""
+    from ..hooks import get_store
+    from ..hooks.executor import get_hook_next_run
+
+    runtime = get_current_group_runtime()
+    records = get_store().list_hooks(runtime.group_id)
+    if not records:
+        return "当前群没有 Hook。"
+    lines = ["当前群 Hooks："]
+    for record in records:
+        next_run = get_hook_next_run(int(record["id"]))
+        next_text = next_run.isoformat() if next_run is not None else "未调度"
+        error = str(record.get("last_error") or "无")
+        lines.append(
+            f"- {record['name']} | {'启用' if record['enabled'] else '停用'} | "
+            f"间隔 {record['interval_seconds']}s | 超时 {record['timeout_seconds']}s | "
+            f"脚本 {record['script_path']} | 下次 {next_text} | "
+            f"上次退出码 {record['last_exit_code']} | 连续失败 "
+            f"{record['consecutive_failures']} | 最近错误 {error}"
+        )
+    return "\n".join(lines)
+
+
+@tool
+async def update_hook(
+    name: str,
+    script_path: str | None = None,
+    prompt: str | None = None,
+    interval_seconds: HookIntervalSeconds | None = None,
+    timeout_seconds: HookTimeoutSeconds | None = None,
+    enabled: StrictBool | None = None,
+) -> str:
+    """更新当前群一个 Hook 的脚本、提示词、间隔、超时或启用状态。"""
+    runtime = get_current_group_runtime()
+    from ..hooks import get_store
+    from ..hooks.executor import (
+        cancel_hook_execution,
+        register_hook_job,
+        run_hook_script,
+        validate_hook_script_path,
+    )
+
+    store = get_store()
+    previous = store.get_hook_by_name(runtime.group_id, name)
+    if previous is None:
+        return f"错误：Hook '{name}' 不存在。"
+    changes: dict[str, Any] = {}
+    if prompt is not None:
+        changes["prompt"] = prompt
+    if interval_seconds is not None:
+        changes["interval_seconds"] = interval_seconds
+    if timeout_seconds is not None:
+        changes["timeout_seconds"] = timeout_seconds
+    if enabled is not None:
+        changes["enabled"] = enabled
+    execution_cancelled = False
+    try:
+        if script_path is not None:
+            path = validate_hook_script_path(script_path, runtime.group_id)
+            await cancel_hook_execution(int(previous["id"]))
+            execution_cancelled = True
+            validation_timeout = (
+                timeout_seconds
+                if timeout_seconds is not None
+                else int(previous["timeout_seconds"])
+            )
+            result = await run_hook_script(
+                path,
+                timeout_seconds=validation_timeout,
+                validation=True,
+            )
+            if result.error is not None:
+                register_hook_job(previous, store)
+                return f"错误：Hook 脚本验证失败：{result.error}"
+            changes["script_path"] = str(path)
+        if not changes:
+            return "错误：没有提供要更新的 Hook 字段。"
+        if script_path is None:
+            await cancel_hook_execution(int(previous["id"]))
+            execution_cancelled = True
+        updated = store.update_hook(runtime.group_id, name, **changes)
+        try:
+            register_hook_job(updated, store)
+        except Exception:
+            rollback = {
+                field: previous[field]
+                for field in (
+                    "script_path",
+                    "prompt",
+                    "interval_seconds",
+                    "timeout_seconds",
+                    "enabled",
+                )
+            }
+            restored = store.update_hook(runtime.group_id, name, **rollback)
+            register_hook_job(restored, store)
+            raise
+    except Exception as exc:  # noqa: BLE001 - tool boundary returns safe text
+        if execution_cancelled:
+            try:
+                register_hook_job(previous, store)
+            except Exception:  # noqa: BLE001 - original failure is more relevant
+                print("⚠️ Unable to restore the previous Hook schedule")
+        return f"错误：更新 Hook 失败：{exc}"
+    return f"Hook '{updated['name']}' 已更新。"
+
+
+@tool
+async def delete_hook(name: str) -> str:
+    """删除当前群一个 Hook；保留脚本、游标及相邻配置文件。"""
+    runtime = get_current_group_runtime()
+    from ..hooks import get_store
+    from ..hooks.executor import cancel_hook_execution
+
+    store = get_store()
+    record = store.get_hook_by_name(runtime.group_id, name)
+    if record is None:
+        return f"错误：Hook '{name}' 不存在。"
+    await cancel_hook_execution(int(record["id"]))
+    store.delete_hook(runtime.group_id, name)
+    return f"Hook '{record['name']}' 已删除；脚本和状态文件已保留。"
+
+
 @tool
 async def membersearch(query: str) -> str:
     """
@@ -1813,6 +2007,10 @@ CHAT_TOOLS = [
     skill_remove,
     skill_download,
     skill_create,
+    create_hook,
+    list_hooks,
+    update_hook,
+    delete_hook,
     membersearch,
     query_stock_quote,
     stock_search,

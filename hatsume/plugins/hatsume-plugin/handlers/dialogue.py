@@ -506,9 +506,9 @@ def _start_conv_for_trigger(
     """Start a new conversation for an external trigger when not currently chatting.
 
     Uses bot.send_group_msg() to target the specific group directly.
-    trigger_type: "agent" or "timer" — controls user_id=None behavior.
-    Agent triggers use user_id=None when user_id==0 (no specific user to notify).
-    Timer triggers always pass the effective user_id.
+    trigger_type: "agent", "timer", or "hook" — controls user_id=None
+    behavior. Agent and Hook triggers use user_id=None when user_id==0 (no
+    specific user to notify). Timer triggers always pass the effective user_id.
     """
     from ..graph.tools import configure_tool_callbacks as configure_tools
 
@@ -537,7 +537,7 @@ def _start_conv_for_trigger(
     conv_state.ai_answer = _send_to_group
 
     effective_user_id: int | None = user_id
-    if trigger_type == "agent" and user_id == 0:
+    if trigger_type in {"agent", "hook"} and user_id == 0:
         effective_user_id = None
 
     async def _run() -> None:
@@ -548,6 +548,7 @@ def _start_conv_for_trigger(
                 configure_tools,
                 user_id=effective_user_id,
                 system_task_text=notify_msg,
+                system_trigger_type=trigger_type,
             )
 
     asyncio.create_task(_run())
@@ -631,6 +632,7 @@ async def start_new_conversation(
     messages: list[dict] | None = None,
     sources: list[dict] | None = None,
     system_task_text: str | None = None,
+    system_trigger_type: str = "system_task",
     flush_idle: bool = False,
 ) -> None:
     """Set up and invoke the LangGraph conversation from scratch."""
@@ -661,7 +663,7 @@ async def start_new_conversation(
 
             if system_task_text is not None:
                 conv_state.human_queue.append(
-                    make_system_trigger_message(system_task_text, "system_task")
+                    make_system_trigger_message(system_task_text, system_trigger_type)
                 )
 
             existing_task = conv_state._graph_task

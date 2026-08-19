@@ -222,7 +222,7 @@ class SkillManager:
 
 
 class GroupSkillManager:
-    """Read-only common Skills overlaid with one group's writable Skills."""
+    """Read-only built-in/common Skills overlaid with group-local Skills."""
 
     def __init__(
         self,
@@ -230,29 +230,52 @@ class GroupSkillManager:
         local_dir: Path,
         *,
         create_local: bool,
+        builtin_manager: SkillManager | None = None,
     ) -> None:
+        self._builtin_manager = builtin_manager
         self._common_manager = common_manager
         self._local_manager = SkillManager(local_dir, create_dir=create_local)
+
+    def _builtin_names(self) -> set[str]:
+        if self._builtin_manager is None:
+            return set()
+        return {skill["name"] for skill in self._builtin_manager.list_skills()}
 
     def _common_names(self) -> set[str]:
         return {skill["name"] for skill in self._common_manager.list_skills()}
 
+    def _readonly_names(self) -> set[str]:
+        return self._builtin_names() | self._common_names()
+
     def list_skills(self) -> list[dict[str, str]]:
-        common = self._common_manager.list_skills()
-        common_names = {skill["name"] for skill in common}
+        builtin = (
+            []
+            if self._builtin_manager is None
+            else self._builtin_manager.list_skills()
+        )
+        builtin_names = {skill["name"] for skill in builtin}
+        common = [
+            skill
+            for skill in self._common_manager.list_skills()
+            if skill["name"] not in builtin_names
+        ]
+        readonly_names = builtin_names | {skill["name"] for skill in common}
         local = [
             skill
             for skill in self._local_manager.list_skills()
-            if skill["name"] not in common_names
+            if skill["name"] not in readonly_names
         ]
-        return common + local
+        return builtin + common + local
 
     def load_skill(self, name: str) -> str:
         try:
             name = self._local_manager.validate_skill_name(name)
         except ValueError:
             return "错误：技能名称无效。"
-        if name in self._common_names():
+        if name in self._builtin_names():
+            assert self._builtin_manager is not None
+            result = self._builtin_manager.load_skill(name)
+        elif name in self._common_names():
             result = self._common_manager.load_skill(name)
         else:
             result = self._local_manager.load_skill(name)
@@ -263,8 +286,8 @@ class GroupSkillManager:
             name = self._local_manager.validate_skill_name(name)
         except ValueError:
             return "错误：技能名称无效。"
-        if name in self._common_names():
-            return f"错误：技能 '{name}' 是公共技能，不能删除。"
+        if name in self._readonly_names():
+            return f"错误：技能 '{name}' 是内置或公共技能，不能删除。"
         return self._local_manager.remove_skill(name)
 
     def save_skill(self, name: str, content: str) -> str:
@@ -272,8 +295,8 @@ class GroupSkillManager:
             name = self._local_manager.validate_skill_name(name)
         except ValueError:
             return "错误：技能名称无效。"
-        if name in self._common_names():
-            return f"错误：技能 '{name}' 是公共技能，不能覆盖。"
+        if name in self._readonly_names():
+            return f"错误：技能 '{name}' 是内置或公共技能，不能覆盖。"
         return self._local_manager.save_skill(name, content)
 
     def parse_frontmatter_text(self, text: str) -> dict[str, str] | None:

@@ -338,3 +338,55 @@ class TestInjectAgentNotification:
         )
 
         assert mock_state.human_queue[0][ai_mod.SYSTEM_TRIGGER_KEY] == "agent"
+
+
+class TestInjectHook:
+    def test_injects_dedicated_hook_trigger_into_active_group(self):
+        ai_mod = _load_ai_module()
+        first = MockState()
+        first.is_chatting = True
+        second = MockState()
+        second.is_chatting = True
+        _set_group_state(ai_mod, 201, first)
+        _set_group_state(ai_mod, 202, second)
+
+        ai_mod.inject_hook(
+            group_id=201,
+            hook_name="mailbox",
+            prompt="Summarize the new mail",
+            event_text="UID 42 from Alice",
+        )
+
+        assert second.human_queue == []
+        message = first.human_queue[0]
+        assert message[ai_mod.SYSTEM_TRIGGER_KEY] == "hook"
+        assert "Hook 'mailbox' detected a new event" in message["text"]
+        assert "Summarize the new mail" in message["text"]
+        assert "UID 42 from Alice" in message["text"]
+
+    def test_uses_callback_for_inactive_group(self):
+        ai_mod = _load_ai_module()
+        state = MockState()
+        _set_group_state(ai_mod, 203, state)
+        calls = []
+
+        ai_mod.inject_hook(
+            group_id=203,
+            hook_name="mailbox",
+            prompt="Handle it",
+            event_text="new message",
+            start_conversation_cb=lambda uid, gid, msg: calls.append((uid, gid, msg)),
+        )
+
+        assert calls[0][0:2] == (0, 203)
+        assert "new message" in calls[0][2]
+
+    def test_rejects_empty_event(self):
+        ai_mod = _load_ai_module()
+        with pytest.raises(ValueError, match="must not be empty"):
+            ai_mod.inject_hook(
+                group_id=203,
+                hook_name="mailbox",
+                prompt="Handle it",
+                event_text="  ",
+            )
