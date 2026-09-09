@@ -44,7 +44,6 @@ ALI_API_KEY: str = os.environ.get("ALI_API_KEY", "")
 # ---------------------------------------------------------------------------
 # External service URLs
 # ---------------------------------------------------------------------------
-STOCK_API_BASE: str = os.environ.get("STOCK_API_BASE", "http://43.143.209.38:5000")
 
 # ---------------------------------------------------------------------------
 # Base URLs (No `v1` suffix)
@@ -100,10 +99,13 @@ EMBEDDING_MODEL: str = "BAAI/bge-m3"
 # ---------------------------------------------------------------------------
 # Provider selection
 # ---------------------------------------------------------------------------
-PROVIDER: Literal["volc", "volc_plan", "kege", "zhth", "ar", "ruoli", "ds", "waw", "ali"] = "ruoli"
+PROVIDER: Literal["volc", "volc_plan", "kege", "zhth", "ar", "ruoli", "ds", "waw", "ali"] = "waw"
+CHAT_PROVIDER_SWITCH_CANDIDATES: tuple[str, ...] = ("ruoli", "waw")
+CHAT_PROVIDER_SWITCH_THRESHOLD_SECONDS: float = 100.0
+CHAT_PROVIDER_SWITCH_COOLDOWN_SECONDS: float = 12 * 60 * 60
 
 def get_base_url(
-    provider: Literal["volc", "volc_plan", "sf", "kege", "zhth", "ar", "ruoli", "ds", "waw"] = PROVIDER,
+    provider: Literal["volc", "volc_plan", "sf", "kege", "zhth", "ar", "ruoli", "ds", "waw", "ali"] = PROVIDER,
 ) -> str:
     match provider:
         case "volc_plan":
@@ -168,7 +170,7 @@ MAX_FORWARD_DEPTH: int = 3
 MAX_REAL_AT_SEGMENTS: int = 3
 FORWARD_API_TIMEOUT_SECONDS: int = 10
 LONG_MSG_THRESHOLD: int = 500
-POKE_GROUP_WHITELIST: frozenset[int] = frozenset({738458661})
+POKE_GROUP_WHITELIST: frozenset[int] = frozenset({})
 
 # ---------------------------------------------------------------------------
 # Chat tone (runtime personality layer)
@@ -221,7 +223,13 @@ TIMER_MAX_EXACT_POINTS: int = 10
 SKILLS_DIR: Path = Path(__file__).resolve().parents[3] / "data" / "hatsume-plugin" / "skills"
 COMMON_SKILLS_DIR: Path = SKILLS_DIR
 GROUP_SKILLS_DIR: Path = SKILLS_DIR / "groups"
-BUILTIN_SKILLS_DIR: Path = Path(__file__).resolve().parent / "skills" / "builtin"
+
+# MCP server definitions are JSON files, isolated by QQ group in the same
+# fashion as group-local Skills.  The directory is intentionally separate from
+# the Skill tree so MCP credentials and lifecycle state have an independent
+# ownership boundary.
+MCP_DIR: Path = Path(__file__).resolve().parents[3] / "data" / "hatsume-plugin" / "mcp"
+MCP_GROUPS_DIR: Path = MCP_DIR / "groups"
 
 # ---------------------------------------------------------------------------
 # Hook module

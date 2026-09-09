@@ -15,7 +15,7 @@ Hatsume 是一个面向 QQ 群聊的 AI 机器人，运行于 Python 3.12+，以
 
 ## 当前容器化运行副本
 
-当前部署副本运行在 `hatsume-containerization` 容器中，默认工作目录为 `/work`，home 目录为 `/root`，项目目录挂载到 `/work/hatsume`，容器时区固定为 `Asia/Shanghai`（UTC+8）。Shell 工具、后台 Agent、Hook heartbeat 和媒体文件操作都在同一容器内执行，并继续按群追踪进程、stdin 与脚本所有权。Hook 脚本和游标位于 `data/hatsume-plugin/hooks/<group-id>/`，元数据位于 `data/hatsume-plugin/hooks/hooks.db`；每群最多启用 5 个，间隔至少 300 秒，单次超时不超过 60 秒。NapCat 通过 `shared-net` 的 Docker DNS 连接 `ws://hatsume-containerization:6999/onebot/v11/ws`。
+当前部署副本运行在 `hatsume-containerization` 容器中，默认工作目录为 `/work`，home 目录为 `/root`，项目目录挂载到 `/work/hatsume`，容器时区固定为 `Asia/Shanghai`（UTC+8）。Shell 工具、后台 Agent、Hook heartbeat 和媒体文件操作都在同一容器内执行，并继续按群追踪进程、stdin 与脚本所有权。Hook 脚本和游标位于共享目录 `data/hatsume-plugin/hooks/`，不要求按群创建子目录；元数据位于 `data/hatsume-plugin/hooks/hooks.db`。每群最多启用 5 个，间隔至少 300 秒，单次超时不超过 60 秒。NapCat 通过 `shared-net` 的 Docker DNS 连接 `ws://hatsume-containerization:6999/onebot/v11/ws`。
 
 容器 PID 1 使用 `/work/hatsume/.container/supervise.sh` 启动 NoneBot。自我进化流程在完成功能修改与聚焦测试后自动运行 `hatsume-restart` 请求重启（无需用户确认）；重启前会检查是否存在未完成的 Agent，存在则创建或复用唯一的“重启等候”Todo，仅当收到 Agent 运行完成报告且当前没有任何正在运行的 Agent 时完成 Todo 并重启，否则保持未完成且不重启，不存在则直接重启。supervisor 会重新从当前源码启动进程。具体约束由 `data/hatsume-plugin/skills/self-evolution.md` 提供给运行时 Agent。
 

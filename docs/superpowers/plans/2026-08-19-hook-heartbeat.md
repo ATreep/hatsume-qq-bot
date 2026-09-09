@@ -119,19 +119,12 @@ Expected queued shape:
 - [ ] Coordinate validation, persistence, and scheduling so failed validation leaves no row and failed scheduling compensates persisted changes.
 - [ ] Run Hook tool tests and existing `tests/test_tools.py` focused registry cases.
 
-### Task 6: Source-owned built-in Skill
+### Task 6: Default Hook-authoring Skill
 
 **Files:**
-- Create: `hatsume/plugins/hatsume-plugin/skills/builtin/hook-authoring.md`
-- Modify: `hatsume/plugins/hatsume-plugin/skills/manager.py`
-- Modify: `hatsume/plugins/hatsume-plugin/skills/__init__.py`
-- Modify: `hatsume/plugins/hatsume-plugin/config.py`
-- Modify: `tests/test_skill_manager.py`
+- Create: `data/hatsume-plugin/skills/hook-authoring.md`
 
-- [ ] Add failing tests for built-in discovery, built-in-first loading, duplicate suppression, and refusal to overwrite/delete built-in names.
-- [ ] Extend `GroupSkillManager` with an optional built-in manager while preserving its current constructor behavior for callers and tests.
 - [ ] Add the `hook-authoring` Markdown Skill with frontmatter and the exact exit-code, cursor, validation, credential, interval, timeout, refusal, and registration instructions from the design.
-- [ ] Run Skill manager tests.
 
 ### Task 7: Documentation and runtime exclusions
 

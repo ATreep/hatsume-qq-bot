@@ -14,7 +14,6 @@ __all__ = ["GroupSkillManager", "SkillManager", "get_skill_manager"]
 # Singleton accessor (matching timer.get_store() pattern)
 # ---------------------------------------------------------------------------
 _common_skill_manager: SkillManager | None = None
-_builtin_skill_manager: SkillManager | None = None
 
 
 def get_skill_manager(
@@ -23,16 +22,14 @@ def get_skill_manager(
     create_local: bool = True,
 ) -> GroupSkillManager:
     """Return the common-plus-local Skill view for one group."""
-    from ..config import BUILTIN_SKILLS_DIR, COMMON_SKILLS_DIR, GROUP_SKILLS_DIR
+    from ..config import COMMON_SKILLS_DIR, GROUP_SKILLS_DIR
     from ..group_runtime import (
         get_current_group_runtime,
         group_runtime_registry,
         validate_group_id,
     )
 
-    global _builtin_skill_manager, _common_skill_manager
-    if _builtin_skill_manager is None:
-        _builtin_skill_manager = SkillManager(BUILTIN_SKILLS_DIR, create_dir=False)
+    global _common_skill_manager
     if _common_skill_manager is None:
         _common_skill_manager = SkillManager(COMMON_SKILLS_DIR)
 
@@ -52,7 +49,6 @@ def get_skill_manager(
         _common_skill_manager,
         GROUP_SKILLS_DIR / str(resolved_group_id),
         create_local=create_local,
-        builtin_manager=_builtin_skill_manager,
     )
     if runtime is not None:
         runtime.skill_manager = manager

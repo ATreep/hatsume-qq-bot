@@ -60,7 +60,8 @@ and explicit failure placeholders. Never silently drop unknown media segments.
 - `graph/nodes.py`: per-group transient auxiliary queues and graph-bound state.
 - `graph/tools.py`: per-group callbacks, media counters, and context-local shell limits.
 - `graph/agents.py`: group-owned background Agent instances, tasks, processes, and stdin queues.
-- `infra.py`: one `hatsume-space-<group-id>` container lifecycle per group, including subprocess counts and delayed stops.
+- `hooks/`: group-owned persistent heartbeats, bounded script processes, route-aware jobs, and dedicated chat injection.
+- `infra.py`: local `/work/hatsume` foreground/background execution in the current bot container, with group-owned subprocess counts, stdin, cancellation, and delayed logical deactivation.
 
 Every new state field needs initialization, reset/cleanup, and concurrency tests.
 Character-proxy activation must reuse `ConversationState.activate_chat()` and the
@@ -68,16 +69,30 @@ existing graph; do not add a separate reply pipeline or direct send path.
 Group-dependent APIs must use an explicitly validated group ID or the task-local
 runtime binding and must never fall back to a recent or default group.
 External triggers and group-member lookups must use the Bot registered for their
-explicit target group; do not call parameterless `nonebot.get_bot()`. Container
+explicit target group; do not call parameterless `nonebot.get_bot()`. Local Shell
 and sandbox-media call sites must pass their validated group ID into `infra.py`.
+`infra.py` must not invoke Docker or stop/delete the bot's own container. Shared
+local media paths must include the validated group ID.
+
+## Self-Modification and Restart
+
+After finishing a self-modification, before requesting a restart, check
+whether any unfinished Agent (still-running sub-agent or background task)
+exists. If any are still running, create or reuse one Todo named "重启等候".
+The Todo is completed and `hatsume-restart` runs only when both conditions hold:
+(1) an Agent completion report has been received; and (2) no Agent is currently
+running. Until then leave the Todo unfinished and skip the restart. This is the
+"all Agents finished -> automatically restart" completion event. If no Agent is
+unfinished, restart directly.
 
 ## Persistence
 
 - Memory metadata: `memory/engine.py` and SQLite `memory-db/memory.db`, with every row owned by a positive `group_id`; no full resident index.
 - Memory vectors: `memory/vector_store.py` and local Milvus `memory-db/memory_vectors.db`, keyed by SQLite memory ID and filtered by `group_id`.
-- Milvus Lite sessions must stop their embedded gRPC server after each operation; this process also forks Shell/Docker subprocesses.
+- Milvus Lite sessions must stop their embedded gRPC server after each operation; this process also forks local Shell subprocesses.
 - Timers: `timer/store.py`, SQLite `timer.db`, APScheduler jobs in `executor.py`.
 - Skills: common Markdown files are read-only; group-local mutations live under `SKILLS_DIR/groups/<group-id>`.
+- Hooks: metadata and scripts live under `data/hatsume-plugin/hooks/`; tools are task-local, scripts stay under their owning positive group directory, and program limits are five enabled Hooks, intervals of at least 300 seconds, and timeouts of 1..60 seconds.
 
 Use parameterized SQL and explicit commits. Schema migrations must be idempotent
 and tested against an existing database, not only an empty temporary database.

@@ -52,7 +52,7 @@ class ConversationState:
     transcript: list[dict] = field(default_factory=list)
     source_map: dict[str, list[dict]] = field(default_factory=dict)
     # Callbacks (set by handlers)
-    ai_answer: Callable[..., Coroutine[Any, Any, None]] | None = None
+    ai_answer: Callable[..., Coroutine[Any, Any, bool | None]] | None = None
 
     def activate_chat(self, session_id: str | None = None) -> None:
         """Mark the conversation as active — sets the is_chatting flag and

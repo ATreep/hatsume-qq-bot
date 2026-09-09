@@ -50,7 +50,7 @@ def validate_hook_script_path(
     *,
     hooks_root: Path = HOOKS_DIR,
 ) -> Path:
-    """Return one executable script resolved inside its owning group directory."""
+    """Return one executable script resolved inside the shared Hook directory."""
     if isinstance(group_id, bool) or not isinstance(group_id, int) or group_id <= 0:
         raise ValueError("group_id must be a positive integer")
     raw_path = str(script_path)
@@ -58,12 +58,12 @@ def validate_hook_script_path(
         raise ValueError("script_path must not be empty")
     if not Path(raw_path).is_absolute():
         raise ValueError("script_path must be an absolute path")
-    group_root = (hooks_root / str(group_id)).resolve()
+    hooks_root = Path(hooks_root).expanduser().resolve()
     try:
         resolved = Path(raw_path).expanduser().resolve(strict=True)
-        resolved.relative_to(group_root)
+        resolved.relative_to(hooks_root)
     except (FileNotFoundError, RuntimeError, ValueError) as exc:
-        raise ValueError("script_path must be inside the current group Hook directory") from exc
+        raise ValueError("script_path must be inside the shared Hook directory") from exc
     if not resolved.is_file():
         raise ValueError("Hook script must be a regular file")
     if not os.access(resolved, os.X_OK):
@@ -128,6 +128,10 @@ def _decode(value: bytes) -> str:
 
 def _redacted_error(value: str) -> str:
     return mask_secret_keys(str(value)).strip()
+
+
+def _heartbeat_log(message: str) -> None:
+    print(f"🪝 [hook-heartbeat] {message}", flush=True)
 
 
 async def run_hook_script(
@@ -260,6 +264,7 @@ async def execute_hook(
     """Execute one due Hook. Return False when it was skipped as already running."""
     lock = _execution_locks.setdefault(int(hook_id), asyncio.Lock())
     if lock.locked():
+        _heartbeat_log(f"skip hook_id={hook_id} reason=already_running")
         return False
     current_task = asyncio.current_task()
     if current_task is not None:
@@ -268,21 +273,35 @@ async def execute_hook(
         async with lock:
             resolved_store = _resolve_store(store)
             record = resolved_store.get_hook(int(hook_id))
-            if record is None or not record["enabled"]:
+            if record is None:
+                _heartbeat_log(f"skip hook_id={hook_id} reason=not_found")
+                return True
+            if not record["enabled"]:
+                _heartbeat_log(f"skip hook_id={hook_id} reason=disabled")
                 return True
             group_id = int(record["group_id"])
+            hook_name = str(record["name"])
+            context = f"hook_id={hook_id} group_id={group_id} name={hook_name!r}"
             if group_id not in group_runtime_registry.routed_group_ids():
+                _heartbeat_log(f"skip {context} reason=group_not_routed")
                 return True
             run_at = time.time()
+            started_at = time.monotonic()
+            _heartbeat_log(
+                f"start {context} script={record['script_path']!r} "
+                f"timeout={record['timeout_seconds']}s"
+            )
             try:
                 path = validate_hook_script_path(record["script_path"], group_id)
             except ValueError as exc:
+                error = _redacted_error(str(exc))
                 resolved_store.record_failure(
                     int(hook_id),
                     None,
-                    _redacted_error(str(exc)),
+                    error,
                     run_at,
                 )
+                _heartbeat_log(f"failure {context} stage=path_validation error={error!r}")
                 return True
             result = await run_hook_script(
                 path,
@@ -290,50 +309,74 @@ async def execute_hook(
                 workdir=workdir,
                 hook_id=int(hook_id),
             )
+            elapsed = time.monotonic() - started_at
+            stdout_bytes = len(result.stdout.encode("utf-8"))
+            stderr_bytes = len(result.stderr.encode("utf-8"))
+            if result.error is not None:
+                outcome = "failure"
+            elif result.exit_code == 10:
+                outcome = "trigger"
+            else:
+                outcome = "no_event"
+            _heartbeat_log(
+                f"finish {context} outcome={outcome} exit_code={result.exit_code} "
+                f"elapsed={elapsed:.3f}s stdout_bytes={stdout_bytes} "
+                f"stderr_bytes={stderr_bytes}"
+            )
             latest = resolved_store.get_hook(int(hook_id))
             if (
                 latest is None
                 or not latest["enabled"]
                 or latest["updated_at"] != record["updated_at"]
             ):
+                _heartbeat_log(f"skip_result {context} reason=hook_changed_during_run")
                 return True
             if result.error is not None:
+                error = _redacted_error(result.error)
                 resolved_store.record_failure(
                     int(hook_id),
                     result.exit_code,
-                    _redacted_error(result.error),
+                    error,
                     run_at,
                 )
+                _heartbeat_log(f"failure {context} stage=script error={error!r}")
                 return True
             if result.exit_code == 10:
                 if group_id not in group_runtime_registry.routed_group_ids():
+                    error = "Hook group route disappeared before injection"
                     resolved_store.record_failure(
                         int(hook_id),
                         result.exit_code,
-                        "Hook group route disappeared before injection",
+                        error,
                         run_at,
                     )
+                    _heartbeat_log(f"failure {context} stage=injection error={error!r}")
                     return True
                 if inject_fn is None:
                     from ..graph.nodes import inject_hook as resolved_inject
 
                     inject_fn = resolved_inject
                 try:
+                    _heartbeat_log(f"inject {context} event_bytes={stdout_bytes}")
                     inject_fn(
                         group_id=group_id,
-                        hook_name=str(record["name"]),
+                        hook_name=hook_name,
                         prompt=str(record["prompt"]),
                         event_text=result.stdout,
                     )
                 except Exception as exc:  # noqa: BLE001 - callback boundary
+                    error = _redacted_error(f"Hook injection failed: {exc}")
                     resolved_store.record_failure(
                         int(hook_id),
                         result.exit_code,
-                        _redacted_error(f"Hook injection failed: {exc}"),
+                        error,
                         run_at,
                     )
+                    _heartbeat_log(f"failure {context} stage=injection error={error!r}")
                     return True
+                _heartbeat_log(f"injected {context}")
             resolved_store.record_success(int(hook_id), int(result.exit_code or 0), run_at)
+            _heartbeat_log(f"success {context} outcome={outcome}")
             return True
     finally:
         if current_task is not None:

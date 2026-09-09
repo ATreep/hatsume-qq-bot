@@ -520,12 +520,12 @@ def _start_conv_for_trigger(
     target_bot = bot if bot is not None else group_runtime_registry.get_bot(group_id)
     conv_state = runtime.conversation
 
-    async def _send_to_group(msg, reply_to_message_id=None):
+    async def _send_to_group(msg, reply_to_message_id=None) -> bool:
         if msg == "[CONVERSATION END]":
             conv_state.end_conversation()
-            return
+            return False
         try:
-            await _send_group_ai_message(
+            return await _send_group_ai_message(
                 target_bot,
                 group_id,
                 msg,
@@ -533,6 +533,7 @@ def _start_conv_for_trigger(
             )
         except Exception as e:
             print(f"❌ _send_to_group failed: group={group_id} err={e}")
+            return False
 
     conv_state.ai_answer = _send_to_group
 
@@ -690,9 +691,16 @@ async def start_new_conversation(
         except asyncio.CancelledError:
             print(f"🛑 [graph:{runtime.group_id}] Conversation cancelled")
         finally:
-            if conv_state._graph_task is graph_task:
-                conv_state._graph_task = None
-                conv_state.is_graph_running = False
+            async with runtime.graph_start_lock:
+                if conv_state._graph_task is graph_task:
+                    conv_state._graph_task = None
+                    conv_state.is_graph_running = False
+                    try:
+                        from ..mcp.manager import get_mcp_manager
+
+                        await get_mcp_manager().close_conversation(runtime.group_id)
+                    except Exception as exc:
+                        print(f"⚠️ [mcp] Conversation cleanup failed: {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -875,8 +883,8 @@ async def handle_ai_message(
     group_id: int,
     retry: int = 0,
     reply_to_message_id: int | None = None,
-) -> None:
-    """Send an AI response to an explicit group. Retries up to 5 times."""
+) -> bool:
+    """Send an AI response, retrying up to five times, and report success."""
     if retry >= 5:
         try:
             await _send_group_ai_message(
@@ -886,14 +894,14 @@ async def handle_ai_message(
             )
         except Exception:
             pass
-        return
+        return False
 
     if msg == "[CONVERSATION END]":
         runtime = group_runtime_registry.get_existing(group_id)
         if runtime is not None:
             runtime.conversation.end_conversation()
         print("Current conversation ends")
-        return
+        return False
 
     try:
         sent = await _send_group_ai_message(
@@ -908,12 +916,14 @@ async def handle_ai_message(
                 group_id,
                 "（电波受到干扰...想要发出的内容丢失了...）",
             )
+            return False
+        return True
     except Exception as e:
         print("Send error: ", str(e))
         traceback.print_exc()
         await asyncio.sleep(3)
         print(f"Retry sending message, {retry=}")
-        await handle_ai_message(
+        return await handle_ai_message(
             msg,
             bot,
             group_id=group_id,

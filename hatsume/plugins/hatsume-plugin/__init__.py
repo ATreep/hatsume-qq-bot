@@ -19,11 +19,14 @@ from .config import ADMIN_QQ_ID
 from .handlers.dialogue import handle_group_increase, start_chat, user_chat_handle
 from .handlers.tools import (
     handle_agents,
+    handle_aps,
     handle_autoresponse,
     handle_dsbalance,
+    handle_hooks,
     handle_list_skills,
     handle_membersearch,
     handle_model,
+    handle_mcp,
     handle_poke,
     handle_proxy_command,
     handle_resetsandbox,
@@ -31,7 +34,6 @@ from .handlers.tools import (
     handle_timer,
     handle_todo,
 )
-from .handlers.social import handle_like, handle_likerank
 from .group_runtime import group_runtime_registry
 from .hooks import (
     init_hook_system,
@@ -150,10 +152,14 @@ model_cmd = on_command(
     priority=10,
     block=True,
 )
-like_match = on_fullmatch(("赞我", "互赞", "点赞"), priority=10, block=True)
+mcp_cmd = on_command(
+    "mcp",
+    rule=lambda event: str(event.get_user_id()) == ADMIN_QQ_ID,
+    priority=10,
+    block=True,
+)
 timer_cmd = on_command("timer", priority=10, block=True)
 skills_cmd = on_command("skills", priority=10, block=True)
-likerank_cmd = on_command("likerank", priority=10, block=True)
 membersearch_cmd = on_command("membersearch", priority=10, block=True)
 resetsandbox_cmd = on_command(
     "resetsandbox",
@@ -162,6 +168,13 @@ resetsandbox_cmd = on_command(
     block=True,
 )
 agents_cmd = on_command("agents", priority=10, block=True)
+hooks_cmd = on_command("hooks", priority=10, block=True)
+aps_cmd = on_command(
+    "aps",
+    rule=lambda event: str(event.get_user_id()) == ADMIN_QQ_ID,
+    priority=10,
+    block=True,
+)
 autoresponse_cmd = on_command("autoresponse", rule=lambda event: str(event.get_user_id()) == ADMIN_QQ_ID, priority=10, block=True)
 dsbalance_cmd = on_command("dsbalance", priority=10, block=True)
 proxy_cmd = on_command("proxy", priority=10, block=True)
@@ -206,6 +219,11 @@ async def _(args: Message = CommandArg()):
     await handle_model(model_cmd, args)
 
 
+@mcp_cmd.handle()
+async def _(event: GroupMessageEvent, args: Message = CommandArg()):
+    await handle_mcp(event, mcp_cmd, args)
+
+
 # ---------------------------------------------------------------------------
 # Timer handler
 # ---------------------------------------------------------------------------
@@ -222,22 +240,6 @@ async def _(event: GroupMessageEvent, args: Message = CommandArg()):
     await handle_list_skills(event, skills_cmd, args)
 
 
-# ---------------------------------------------------------------------------
-# Like handler
-# ---------------------------------------------------------------------------
-@like_match.handle()
-async def _(bot: Bot, event: GroupMessageEvent):
-    await handle_like(bot, event, like_match)
-
-
-# ---------------------------------------------------------------------------
-# Likerank handler
-# ---------------------------------------------------------------------------
-@likerank_cmd.handle()
-async def _(bot: Bot, event: GroupMessageEvent, args: Message = CommandArg()):
-    await handle_likerank(bot, event, likerank_cmd, args)
-
-
 @membersearch_cmd.handle()
 async def _(bot: Bot, event: GroupMessageEvent, args: Message = CommandArg()):
     await handle_membersearch(bot, event, membersearch_cmd, args)
@@ -251,6 +253,16 @@ async def _(event: GroupMessageEvent, args: Message = CommandArg()):
 @agents_cmd.handle()
 async def _(event: GroupMessageEvent, args: Message = CommandArg()):
     await handle_agents(event, agents_cmd, args)
+
+
+@hooks_cmd.handle()
+async def _(event: GroupMessageEvent, args: Message = CommandArg()):
+    await handle_hooks(event, hooks_cmd, args)
+
+
+@aps_cmd.handle()
+async def _():
+    await handle_aps(aps_cmd)
 
 
 @autoresponse_cmd.handle()

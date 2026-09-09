@@ -38,7 +38,12 @@ from ..group_runtime import (
     get_current_group_runtime,
     group_runtime_registry,
 )
-from ..models import get_advance_model, get_code_model, get_lite_model, get_mini_model
+from ..models import get_advance_model, get_intent_model, get_lite_model, get_mini_model
+from ..provider_switch import (
+    SLOW_THRESHOLD_SECONDS,
+    get_chat_provider,
+    report_chat_elapsed,
+)
 from ..prompts import (
     AUXILIARY_COMPACTION_PROMPT,
     CHAT_END_DETECT_PROMPT,
@@ -47,6 +52,7 @@ from ..prompts import (
     build_agent_state_prompt,
     build_face_injection_prompt,
     build_lively_tone_prompt,
+    build_mcp_server_prompt,
     build_memory_context_prompt,
     build_skill_prompt,
     role_sys_prompt,
@@ -93,7 +99,7 @@ CHAT_INTENT_MAX_ATTEMPTS = 3
 
 
 class ChatIntentJudgeResult(BaseModel):
-    """Structured decision returned before constructing ``chat_agent``."""
+    """Structured response decision returned by the intent model."""
 
     is_response: bool
     urgency_type: str = ""
@@ -120,7 +126,7 @@ def _get_chat_intend_judge_prompt() -> str:
     return str(
         _prompt_module_attr(
             "CHAT_INTEND_JUDGE_PROMPT",
-            "判断当前对话是否需要回复，只输出结构化判断结果。",
+            "判断当前对话是否需要回复，只输出结构化 JSON 判断结果。",
         )
     ).strip()
 
@@ -517,6 +523,24 @@ def _new_agent_messages(
     return response_messages
 
 
+def _contains_tool_calls(messages: list[Any]) -> bool:
+    """Return whether an agent response contains any tool invocation.
+
+    A retry after a tool-only response is allowed to turn the tool result into
+    user-facing text, but must not replay side-effecting tools such as agent
+    dispatch or direct media sends.
+    """
+    for message in messages:
+        tool_calls = (
+            message.get("tool_calls")
+            if isinstance(message, Mapping)
+            else getattr(message, "tool_calls", None)
+        )
+        if tool_calls:
+            return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Notification injection (agent & timer)
 # ---------------------------------------------------------------------------
@@ -823,23 +847,22 @@ async def ai_node(state: MessagesState) -> dict:
 
     print("Start chat intent judge...")
     t_judge_start = time.time()
-    if _has_injected_human_message(state) or admin_mode_enabled:
-        bypass_reason = "ADMIN MODE" if admin_mode_enabled else "injected system message"
-        print(f"[chat_intend_judge] Bypassed for {bypass_reason}")
+    if _has_injected_human_message(state):
+        print("[chat_intend_judge] Bypassed for injected system message")
     else:
         try:
             intent_result = await chat_intend_judge(
-                model=get_code_model("low"),
+                model=get_intent_model("low"),
                 messages=[last_human_msg],
             )
         except Exception as exc:
             reason = _result_reason(None, exc)
-            print(f"[chat_intend_judge] {reason}")
+            print(f"[chat_intend_judge] Response skipped: {reason}")
             return {"messages": []}
 
         if not _chat_intent_is_eligible(intent_result):
             reason = _result_reason(intent_result)
-            print(f"[chat_intend_judge] {reason}")
+            print(f"[chat_intend_judge] Response skipped: {reason}")
             return {"messages": []}
 
         print(
@@ -873,7 +896,11 @@ async def ai_node(state: MessagesState) -> dict:
 
     print("Memory retrieved: \n" + memory_summary)
 
-    model_chosen = get_advance_model(thinking=True)
+    chat_provider_used = get_chat_provider()
+    model_chosen = get_advance_model(
+        thinking=True,
+        provider=chat_provider_used,
+    )
     sys_prompt = _combined_system_prompt()
     sys_prompt += build_lively_tone_prompt(LIVELY_TONE_ENABLED)
     if admin_mode_enabled:
@@ -898,6 +925,17 @@ async def ai_node(state: MessagesState) -> dict:
     if skill_prompt:
         sys_prompt += skill_prompt
         print(f"[skills] Injected {len(skill_list)} skill(s) into system prompt")
+
+    from ..mcp.manager import get_mcp_manager
+
+    mcp_servers = [item for item in get_mcp_manager().list_servers() if item.enabled]
+    mcp_prompt = build_mcp_server_prompt([
+        {"name": item.name, "description": item.description}
+        for item in mcp_servers
+    ])
+    if mcp_prompt:
+        sys_prompt += mcp_prompt
+        print(f"[mcp] Injected {len(mcp_servers)} server description(s) into system prompt")
 
     # Inject running agent states into system prompt
     agent_prompt = build_agent_state_prompt()
@@ -924,6 +962,7 @@ async def ai_node(state: MessagesState) -> dict:
         _face_dict.setdefault(emotion, []).append(fname)
     emotions = list(_face_dict.keys())
     face_prompt = build_face_injection_prompt(emotions)
+
     if face_prompt:
         sys_prompt += face_prompt
         print(f"[face] Injected face prompt with {len(emotions)} emotions")
@@ -949,26 +988,69 @@ async def ai_node(state: MessagesState) -> dict:
             agent_messages = _without_image_url_parts(agent_messages)
         replyable_message_ids = _extract_replyable_message_ids(agent_messages)
 
-        chat_agent = create_agent(
-            model_chosen,
-            tools=get_chat_tools(),
-            system_prompt=sys_prompt,
-        )
-
         print("Start chat_agent invocation.")
 
-        t_invocation_start = time.time()
+        t_invocation_start = time.monotonic()
 
         set_shell_executor_limit(3)  # chat_agent: max 3 shell_executor calls per round
-        retrying_agent = chat_agent.with_retry(stop_after_attempt=5)
         invocation_messages = agent_messages
         response_texts: list[str] = []
+        active_mcp_tools: list[Any] = []
+        retry_without_tools = False
         for attempt in range(2):
-            response = await retrying_agent.ainvoke(
-                {"messages": invocation_messages},  # type: ignore
-                {"recursion_limit": 20},
+            t_pass_start = time.monotonic()
+            tools_for_attempt = (
+                []
+                if retry_without_tools
+                else get_chat_tools() + active_mcp_tools
             )
+            chat_agent = create_agent(
+                model_chosen,
+                tools=tools_for_attempt,
+                system_prompt=sys_prompt,
+            )
+            retrying_agent = chat_agent.with_retry(stop_after_attempt=5)
+            try:
+                response = await retrying_agent.ainvoke(
+                    {"messages": invocation_messages},  # type: ignore
+                    {"recursion_limit": 20},
+                )
+            except BaseException:
+                print(
+                    f"[chat_agent] pass={attempt + 1} failed "
+                    f"elapsed={time.monotonic() - t_pass_start:.3f}s",
+                    flush=True,
+                )
+                raise
             response_messages = response.get("messages", [])
+            from ..mcp.tools import consume_requested_tools, make_dynamic_tools
+
+            requested = consume_requested_tools()
+            print(
+                f"[chat_agent] pass={attempt + 1} completed "
+                f"elapsed={time.monotonic() - t_pass_start:.3f}s "
+                f"requested_mcp={requested!r} active_mcp_tools={len(active_mcp_tools)}",
+                flush=True,
+            )
+            if requested and attempt == 0:
+                grouped: dict[str, list[str]] = {}
+                for server_name, tool_name in requested:
+                    grouped.setdefault(server_name, []).append(tool_name)
+                for server_name, names in grouped.items():
+                    try:
+                        infos = await get_mcp_manager().discover_tools(server_name)
+                    except Exception as exc:
+                        print(
+                            f"⚠️ [mcp] Skipping unavailable server "
+                            f"{server_name!r}: {type(exc).__name__}: {exc}"
+                        )
+                        continue
+                    active_mcp_tools.extend(make_dynamic_tools(
+                        server_name,
+                        [item for item in infos if item.name in names],
+                    ))
+                invocation_messages = response_messages
+                continue
             new_messages = _new_agent_messages(
                 invocation_messages, response_messages
             )
@@ -990,12 +1072,46 @@ async def ai_node(state: MessagesState) -> dict:
             print("No visible AI text returned; invoking chat_agent again...")
             if response_messages:
                 invocation_messages = response_messages
+            # The first pass may have already performed an irreversible tool
+            # action.  The follow-up pass only needs to phrase its result; it
+            # must not be able to invoke the same tool a second time.
+            retry_without_tools = _contains_tool_calls(new_messages)
 
         ai_text = "\n".join(response_texts)
 
-        t_invocation_end = time.time()
+        t_invocation_end = time.monotonic()
 
-        print(f"Elapsed time of chat_agent invocation: {t_invocation_end - t_invocation_start}s")
+        elapsed_invocation = t_invocation_end - t_invocation_start
+        print(f"Elapsed time of chat_agent invocation: {elapsed_invocation}s")
+
+        # Provider auto-switching: a slow (>100s) chat_agent invocation marks
+        # the current provider slow (12h cooldown) and switches the advance
+        # model to the next healthy candidate (ruoli <-> waw).
+        switched_to = report_chat_elapsed(
+            elapsed_invocation,
+            provider=chat_provider_used,
+            started_at=t_invocation_start,
+        )
+        if switched_to is not None:
+            print(
+                f"[provider-switch] chat_agent took {elapsed_invocation:.1f}s "
+                f"(> {SLOW_THRESHOLD_SECONDS:.0f}s); switching provider "
+                f"'{chat_provider_used}' -> '{switched_to}'"
+            )
+        elif elapsed_invocation > SLOW_THRESHOLD_SECONDS:
+            current_provider = get_chat_provider()
+            if current_provider == chat_provider_used:
+                print(
+                    f"[provider-switch] chat_agent took {elapsed_invocation:.1f}s "
+                    f"(> {SLOW_THRESHOLD_SECONDS:.0f}s) but all candidate "
+                    f"providers are in cooldown; staying on '{chat_provider_used}'"
+                )
+            else:
+                print(
+                    f"[provider-switch] chat_agent took {elapsed_invocation:.1f}s "
+                    f"(> {SLOW_THRESHOLD_SECONDS:.0f}s); provider is already "
+                    f"'{current_provider}' after another invocation"
+                )
 
         # LLM outputs plain text directly
         print(f"Raw AI response: {ai_text}")
@@ -1023,18 +1139,17 @@ async def ai_node(state: MessagesState) -> dict:
             await _err_answer("❌ 模型认证失败，请检查配置。")
         return {"messages": []}
 
-    ai_text_history, reply_to_message_id = _parse_reply_directive(
+    ai_text_clean, reply_to_message_id = _parse_reply_directive(
         str(ai_text),
         replyable_message_ids,
     )
 
     # ── Extract face tag from ai_text ──
     face_emotion: str | None = None
-    ai_text_clean = ai_text_history
-    match = FACE_TAG_PATTERN.search(ai_text_history)
+    match = FACE_TAG_PATTERN.search(ai_text_clean)
     if match:
         face_emotion = match.group(1).strip()
-        ai_text_clean = FACE_TAG_PATTERN.sub("", ai_text_history).strip()
+        ai_text_clean = FACE_TAG_PATTERN.sub("", ai_text_clean).strip()
         print(f"[face] Detected face tag: {face_emotion}")
 
     # ── Extract memory record from ai_text ──
@@ -1043,6 +1158,9 @@ async def ai_node(state: MessagesState) -> dict:
         print(f"[memory] Extracted {len(mem_records)} memory record(s)")
 
     ai_text_clean = ai_text_clean.strip()
+    # Keep the model response unchanged in graph history. Control tags are
+    # parsed and removed only from the user-facing text above.
+    ai_text_history = str(ai_text)
     end_requested = conversation_state.end_requested
     if end_requested:
         print("[end_conversation] Suppressed the final AI reply.")
@@ -1096,10 +1214,15 @@ async def ai_node(state: MessagesState) -> dict:
         with open(face_path, "rb") as f:
             base64_str = base64.b64encode(f.read()).decode("utf-8")
         face_msg = MessageSegment.image("base64://" + base64_str, cache=False)
-        await _ai_answer_cb(face_msg)
+        try:
+            await _ai_answer_cb(face_msg)
+        except Exception:
+            print("❌ Failed to send face image")
+            traceback.print_exc()
 
     print(f"Elapsed time of ai_node: t_writing_mem={t_mem_end - t_mem_start}s, t_chat_agent={t_mem_start - t_start}s")
-    return {"messages": [AIMessage(ai_text_history)]}
+    messages = [AIMessage(ai_text_history)]
+    return {"messages": messages}
 
 
 # ---------------------------------------------------------------------------

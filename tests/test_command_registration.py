@@ -30,7 +30,7 @@ def test_removed_and_group_selectable_commands():
     assert "clear" not in commands
     assert "video" not in commands
     assert "learn-evolve" not in commands
-    assert {"agents", "skills", "likerank", "resetsandbox"} <= commands
+    assert {"agents", "skills", "likerank", "resetsandbox", "mcp"} <= commands
 
 
 def test_learning_evolution_module_and_midnight_registration_are_removed():

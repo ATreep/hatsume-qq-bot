@@ -22,6 +22,10 @@ Docker, Apple Photos, or network access.
   registry passed to `create_agent`.
 - Persistence: use temporary SQLite databases; cover migrations and repeated init.
 - Agent/process logic: cover success, timeout, cancellation, stdin, and cleanup.
+- Hook logic: use temporary group directories and SQLite, fake schedulers and short local scripts; cover path isolation, exit 0/10, validation side effects, timeout cleanup, non-reentrancy, route recovery, and dedicated queue injection.
+- Self-modification contracts (the unfinished-Agent -> Todo -> restart rule
+  in `AGENTS.md` and the `self-evolution` Skill) are asserted as text
+  contracts in `tests/test_self_evolution_runtime.py`.
 
 ## Commands
 

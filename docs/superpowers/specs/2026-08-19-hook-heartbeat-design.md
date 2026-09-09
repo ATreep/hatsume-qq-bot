@@ -32,8 +32,9 @@ causes `chat_agent` to handle an event in the owning QQ group.
   refusal, but the program-enforced interval and timeout limits still apply.
 - Triggered events join the target group's existing `human_queue`. A Hook must
   never start a second graph for a group that already has an active graph.
-- Hook scripts and their state live under
-  `data/hatsume-plugin/hooks/<group-id>/`.
+- Hook scripts and their state live under the shared
+  `data/hatsume-plugin/hooks/` directory; per-group ownership remains in the
+  Hook metadata rather than in the filesystem layout.
 
 ## Architecture
 
@@ -115,17 +116,17 @@ domain state; `last_run_at` is used to compute recovery behavior.
 
 ## Script Ownership And Validation
 
-Each group has a canonical script root:
+All groups share one canonical script root:
 
 ```text
-data/hatsume-plugin/hooks/<group-id>/
+data/hatsume-plugin/hooks/
 ```
 
 `create_hook` and script-changing `update_hook` only accept an existing regular
-file below the current task-local group's canonical root. Validation resolves
-the candidate and root paths, rejects path traversal and cross-group paths,
-and rejects symlinks whose resolved target escapes the group root. The stored
-path is the normalized canonical path.
+file below the shared canonical root. Validation resolves the candidate and
+root paths, rejects path traversal and paths outside the shared root, and
+rejects symlinks whose resolved target escapes it. The stored path is the
+normalized canonical path.
 
 Scripts are written before registration, normally by `coding_agent` after it
 loads the built-in Hook-authoring Skill. A registered script must be directly
@@ -286,19 +287,14 @@ administrator override is determined from the current query user's QQ ID and
 and Skill policy rather than a heuristic database check; interval, timeout,
 path, count, and process constraints are always enforced by the program.
 
-## Built-In Hook-Authoring Skill
+## Default Hook-Authoring Skill
 
-Ship a source-owned, read-only `hook-authoring` Skill rather than writing it into
-the private runtime `data/hatsume-plugin/skills/` repository. Extend Skill
-composition to merge these layers in precedence order:
-
-1. Source-owned built-in Skills.
-2. Existing public runtime Skills.
-3. Current group's local Skills.
-
-Built-in and public names are reserved: group-local Skills cannot overwrite or
-delete them. The Skill remains discoverable through the existing Skill list and
-is loaded through the existing `skill_read` flow.
+Store the read-only `hook-authoring` Skill with all other default Skills at
+`data/hatsume-plugin/skills/hook-authoring.md`. It is part of the existing
+public runtime Skill layer and is overlaid only by current-group local Skills.
+Public names are reserved: group-local Skills cannot overwrite or delete them.
+The Skill remains discoverable through the existing Skill list and is loaded
+through the existing `skill_read` flow.
 
 The Skill instructs the AI to:
 
@@ -309,7 +305,8 @@ The Skill instructs the AI to:
 - still restructure every accepted script into a run lasting at most 60
   seconds and use an interval of at least 300 seconds;
 - choose a conservative interval based on source cost and freshness needs;
-- store scripts and state only under the owning group's Hook directory;
+- store scripts and state only under the shared Hook directory, using stable
+  names to avoid collisions;
 - use an incremental durable cursor and atomic cursor writes;
 - honor `HATSUME_HOOK_VALIDATION=1` by checking the source without mutating the
   durable cursor or other externally visible state;
@@ -340,7 +337,8 @@ delivery continues through the target `GroupRuntime`.
   through the existing trusted AI/Shell workflow; the feature does not accept
   script text from untrusted protocol payloads.
 - Direct subprocess execution avoids shell interpolation of stored paths.
-- Canonical path enforcement prevents cross-group reads through the Hook tools.
+- Canonical path enforcement prevents reads outside the shared Hook directory
+  through the Hook tools.
 - Hook output and errors are bounded and credential-redacted before storage or
   logging.
 - The runtime never invokes Docker or stops the Hatsume container.

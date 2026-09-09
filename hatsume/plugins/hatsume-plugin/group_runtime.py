@@ -41,6 +41,8 @@ class GroupRuntime:
     character_proxy: Any = None
     character_proxy_termination_handle: asyncio.TimerHandle | None = None
     skill_manager: Any = None
+    mcp_requested_tools: list[tuple[str, str]] = field(default_factory=list)
+    mcp_active_tools: list[Any] = field(default_factory=list)
     agent_tasks: set[asyncio.Task[Any]] = field(default_factory=set)
 
     is_video_rate_limited_callback: Any = None
@@ -234,6 +236,13 @@ class GroupRuntimeRegistry:
             await shutdown_hooks()
         except Exception as exc:
             print(f"Group runtime Hook shutdown failed: {exc}")
+
+        try:
+            from .mcp.manager import get_mcp_manager
+
+            await get_mcp_manager().close_all()
+        except Exception as exc:
+            print(f"Group runtime MCP shutdown failed: {exc}")
 
         try:
             from .infra import shutdown_all_containers

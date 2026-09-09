@@ -224,6 +224,44 @@ async def handle_model(matcher, args: Message) -> None:
     )
 
 
+async def handle_mcp(event, matcher, args: Message) -> None:
+    """Administrator diagnostics for group-isolated MCP JSON configs."""
+    if str(event.get_user_id()) != str(ADMIN_QQ_ID):
+        await matcher.finish("只有管理员可以使用 /mcp。")
+        return
+    from ..mcp.manager import get_mcp_manager
+
+    parts = args.extract_plain_text().strip().split()
+    if not parts or parts[0] in {"help", "-h"}:
+        await matcher.finish("用法：/mcp list [群号] | tools <server> [群号] | refresh <server> [群号] | status [群号]")
+        return
+    subcommand = parts[0].lower()
+    target_group = int(event.group_id)
+    if parts and parts[-1].isdigit() and int(parts[-1]) != target_group:
+        target_group = await _resolve_target_group(event, matcher, Message(" ".join(parts[-1:])), usage="/mcp <命令> [群号]")
+        parts = parts[:-1]
+    manager = get_mcp_manager()
+    try:
+        if subcommand == "list":
+            servers = manager.list_servers(target_group)
+            result = "\n".join(f"- {item.name}：{item.description}（{'启用' if item.enabled else '停用'}）" for item in servers) or "目标群没有 MCP Server。"
+        elif subcommand in {"tools", "refresh"} and len(parts) >= 2:
+            infos = await manager.discover_tools(parts[1], target_group, refresh=subcommand == "refresh")
+            result = "\n".join(f"- {item.name}：{item.description or '无描述'}" for item in infos) or "该 Server 没有工具。"
+        elif subcommand == "status":
+            result = "\n".join(f"- {item.name}：{'启用' if item.enabled else '停用'}" for item in manager.list_servers(target_group)) or "目标群没有 MCP Server。"
+        elif subcommand in {"enable", "disable"} and len(parts) >= 2:
+            manager.set_enabled(parts[1], subcommand == "enable", target_group)
+            result = f"✅ 已{'启用' if subcommand == 'enable' else '停用'} MCP Server：{parts[1]}"
+        elif subcommand == "remove" and len(parts) >= 2:
+            result = "✅ MCP Server 已删除。" if manager.remove(parts[1], target_group) else "目标群不存在该 MCP Server。"
+        else:
+            result = "用法：/mcp list [群号] | tools <server> [群号] | refresh <server> [群号] | status [群号] | enable/disable/remove <server> [群号]"
+    except Exception as exc:
+        result = f"❌ MCP 操作失败：{exc}"
+    await matcher.finish(result)
+
+
 async def handle_todo(event, matcher, args: Message) -> None:
     """List active todos for the current group or an admin-selected group."""
     text = args.extract_plain_text().strip()
@@ -604,6 +642,88 @@ async def handle_agents(event, matcher, args: Message) -> None:
         else:
             lines.append(f"\n🟡 {name} — 执行中\n  任务：{task}")
 
+    await matcher.finish("\n".join(lines))
+
+
+async def handle_hooks(event, matcher, args: Message) -> None:
+    """Handle /hooks [group_id] with group-filtered persistent state."""
+    target_group_id = await _resolve_target_group(
+        event,
+        matcher,
+        args,
+        usage="/hooks [群号]",
+    )
+    from ..hooks import get_store
+    from ..hooks.executor import get_hook_next_run
+
+    try:
+        records = get_store().list_hooks(target_group_id)
+    except Exception as exc:
+        print(f"❌ hooks command failed: {exc}")
+        await matcher.finish("❌ Hook 数据库暂时不可用。")
+        return
+
+    scope = (
+        "当前群" if target_group_id == int(event.group_id) else f"群 {target_group_id}"
+    )
+    if not records:
+        await matcher.finish(f"{scope}没有 Hook。")
+        return
+
+    lines = [f"{scope} Hooks（{len(records)} 项）："]
+    for index, record in enumerate(records, start=1):
+        next_run = get_hook_next_run(int(record["id"]))
+        next_text = next_run.isoformat() if next_run is not None else "未调度"
+        last_exit_text = (
+            str(record["last_exit_code"])
+            if record["last_exit_code"] is not None
+            else "无"
+        )
+        lines.extend(
+            [
+                "",
+                f"{index}. {record['name']}（ID：{record['id']}）",
+                f"状态：{'启用' if record['enabled'] else '停用'}",
+                f"间隔：{record['interval_seconds']} 秒；超时：{record['timeout_seconds']} 秒",
+                f"脚本：{record['script_path']}",
+                f"下次运行：{next_text}",
+                f"上次退出码：{last_exit_text}",
+                f"连续失败：{record['consecutive_failures']}",
+                f"最近错误：{record['last_error'] or '无'}",
+            ]
+        )
+    await matcher.finish("\n".join(lines))
+
+
+async def handle_aps(matcher) -> None:
+    """List every job currently registered with the shared APScheduler."""
+    from nonebot import require
+
+    scheduler = require("nonebot_plugin_apscheduler").scheduler
+    try:
+        jobs = sorted(scheduler.get_jobs(), key=lambda job: str(job.id))
+    except Exception as exc:
+        print(f"❌ aps command failed: {exc}")
+        await matcher.finish("❌ APScheduler 状态暂时不可用。")
+        return
+
+    if not jobs:
+        await matcher.finish("APScheduler 当前没有已注册任务。")
+        return
+
+    lines = [f"APScheduler 已注册任务（{len(jobs)} 项）："]
+    for index, job in enumerate(jobs, start=1):
+        next_run = getattr(job, "next_run_time", None)
+        next_text = next_run.isoformat() if next_run is not None else "暂停或未排期"
+        lines.extend(
+            [
+                "",
+                f"{index}. {job.id}",
+                f"名称：{job.name}",
+                f"触发器：{job.trigger}",
+                f"下次运行：{next_text}",
+            ]
+        )
     await matcher.finish("\n".join(lines))
 
 

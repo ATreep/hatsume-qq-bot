@@ -53,7 +53,7 @@ flowchart LR
 | 视频发送 | send_video | 支持 HTTP URL、沙盒绝对路径和沙盒 file:// 文件，每轮最多一个 | graph/tools.py |
 | 视频生成 | generate_video | Seedance 1.0/1.5 文生视频或图生视频，并轮询任务结果；聊天工具返回 URL，由 send_video 发送 | graph/tools.py、models.py |
 | 高级模型切换 | 管理员 /model [模型名] | 查看或切换当前进程的高级模型名，不改变供应商、Base URL 或 API Key | handlers/tools.py、models.py、config.py |
-| ADMIN MODE | `ADMIN_QQ_ID` 本人发送含大写 `BYPASS` 的普通消息 | 程序校验顶层发送者和当前消息正文；本轮直接跳过 `chat_intend_judge`，chat_agent 保持当前高级模型、防御性移除历史 `image_url`/`img_url` 输入段并注入完整沙盒操作授权，下一轮恢复未过滤输入 | graph/nodes.py、models.py、prompts.py |
+| ADMIN MODE | `ADMIN_QQ_ID` 本人发送含大写 `BYPASS` 的普通消息 | 程序校验顶层发送者和当前消息正文；本轮 chat_agent 保持当前高级模型、防御性移除历史 `image_url`/`img_url` 输入段并注入完整沙盒操作授权，下一轮恢复未过滤输入 | graph/nodes.py、models.py、prompts.py |
 | 本地 Shell | 管理员 /ccsh、/cc 或 shell_executor | 在当前 `hatsume-containerization` 的 `/work` 执行，home 为 `/root`，源码位于 `/work/hatsume`；进程、计数和延迟逻辑停用按群隔离 | handlers/tools.py、graph/tools.py、infra.py |
 | 后台长任务 | agent_dispatch(background_shell, ...) | 后台运行长时间或交互式命令，周期判断继续、通知、输入、结束或终止 | graph/agents.py、infra.py |
 | 编码 Agent | agent_dispatch(coding_agent, ...) | 使用代码模型与 Shell、Skill、搜索、图像工具处理复杂开发任务 | graph/agents.py、prompts.py |
@@ -73,6 +73,8 @@ flowchart LR
 | 凭证脱敏 | AI 文本回复与直接群发文本 | 遮盖常见 API Key 和 Token 形式 | utils/security.py、handlers/dialogue.py |
 | 运行时重置 | 管理员 /resetsandbox [群号] | 取消目标群 Agent/进程/stdin，并只移除该群逻辑进程状态，不停止 bot 容器 | handlers/tools.py、infra.py、graph/agents.py |
 | Agent 监控 | /agents [群号] | 列出目标群运行中的 Agent；跨群查看仅管理员 | handlers/tools.py、graph/agents.py |
+| Hook 查看 | /hooks [群号] | 列出目标群全部 Hook、状态、脚本、调度与最近错误；跨群查看仅管理员 | handlers/tools.py、hooks/ |
+| APScheduler 查看 | 管理员 /aps | 列出当前进程注册的全部 APScheduler job、trigger 与下次运行时间 | handlers/tools.py |
 
 ## 2. 用户命令与消息触发
 
@@ -96,6 +98,8 @@ flowchart LR
 | /membersearch <关键词> | 所有人 | 模糊搜索当前群成员，最多返回五个 | handlers/tools.py |
 | /likerank [群号] | 所有人；跨群仅管理员 | 展示目标群累计点赞前十名 | handlers/social.py |
 | /agents [群号] | 所有人；跨群仅管理员 | 展示目标群正在运行的后台 Agent | handlers/tools.py |
+| /hooks [群号] | 所有人；跨群仅管理员 | 无参数列出当前群全部 Hook；管理员可指定群号查看其他群 | handlers/tools.py |
+| /aps | 管理员 | 列出当前 APScheduler 注册的全部任务、触发器和下次运行时间 | handlers/tools.py |
 | /todo [群号] | 所有人；跨群仅管理员 | 无参数列出当前群全部活动待办；管理员可指定群号查看其他群 | handlers/tools.py |
 | /model [模型名] | 管理员 | 无参数查看高级模型；有参数时只切换当前进程使用的模型名 | handlers/tools.py |
 | /ccsh <命令>、/cc <命令> | 管理员 | 在 bot 容器 `/work` 执行 Shell，home 为 `/root` | handlers/tools.py |
@@ -238,7 +242,7 @@ stateDiagram-v2
 - 图历史超过 60 条 LangGraph 消息时，删除最早的一对 Human/AI 消息。
 - ai_node 自动检索记忆，注入 Skill 列表、运行中 Agent 状态、当前群定时任务概览、当前群待办、可选表情图片提示和调用时的本地日期时间，再用 CHAT_TOOLS 创建 LangChain Agent。进入节点时先删除所有已满 72 小时的待办；Todo 数据库不可用时只注入不可用状态，不中断普通回复。主调用异常最多重试五次；若结果只有工具调用、工具结果、空白或 `[xxx: xxx]` 类控制标记且未请求结束对话，则携带本次 Agent 消息状态额外调用一次。递归上限为 60。
 - ai_node 每轮读取辅助队列的非破坏性快照，临时放在当前 Human 内容之前；同一辅助上下文会持续进入后续轮次，直到新写入触发压缩。发送前移除 reply、memory 与 face 标签；图历史会移除 reply 控制标记，但保留现有 face 与 memory 标签历史语义。
-- ai_node 只解析当前 HumanMessage 中顶层 `type=message` 的 JSON。发送者 QQ ID 等于非空 `ADMIN_QQ_ID` 且该消息的直接正文包含大小写敏感的 `BYPASS` 时，本轮像系统注入消息一样直接跳过 `chat_intend_judge`，本地 `sys_prompt` 追加 ADMIN MODE，chat_agent 保持当前高级模型，并在不修改 LangGraph 历史的前提下从全部模型输入消息复制过滤历史 `image_url` 与 `img_url` 内容段；回复引用、合并转发、辅助上下文和历史消息均不能触发，下一轮恢复未过滤输入与基础角色 Prompt。当前普通消息图片同时以沙盒 Markdown 路径和 `image_url` data URI 输入，回复图片仍使用沙盒 Markdown 路径。
+- ai_node 只解析当前 HumanMessage 中顶层 `type=message` 的 JSON。每轮先用 `get_intent_model()` 单独调用 chat_intend_judge；判断为 skip 时不创建或调用 chat_agent，判断为 respond 时打印回复类型与原因后继续。系统注入任务绕过判断以保证执行。发送者 QQ ID 等于非空 `ADMIN_QQ_ID` 且该消息的直接正文包含大小写敏感的 `BYPASS` 时，本地 `sys_prompt` 追加 ADMIN MODE，chat_agent 保持当前高级模型，并在不修改 LangGraph 历史的前提下从全部模型输入消息复制过滤历史 `image_url` 与 `img_url` 内容段；回复引用、合并转发、辅助上下文和历史消息均不能触发，下一轮恢复未过滤输入与基础角色 Prompt。当前普通消息图片同时以沙盒 Markdown 路径和 `image_url` data URI 输入，回复图片仍使用沙盒 Markdown 路径。
 - chat_agent 调用 end_conversation 后，ConversationState 立即关闭聊天并清空 chat_peers；ai_node 抑制该轮文本和表情发送，human_node 随即路由到 finish。下一次主动提及通过 activate_chat() 解除结束标记。
 - finish_conversation_node 清理图运行标记和 Human 队列，重置 Skill 单轮去重，把 Human/AI/Tool 历史规范化后放回辅助队列，最后发送 [CONVERSATION END]。
 
@@ -487,15 +491,17 @@ configure_tool_callbacks() 在每次新图启动时把发送回调、当前用�
 
 ### 6.2 Heartbeat Hooks
 
-`hooks/store.py` 通过 localstore 定位 `hooks/hooks.db`，以 WAL 和 reentrant operation lock 保存按正整数 group_id 隔离的 Hook。每群最多五个 enabled 记录；名称在群内唯一，interval_seconds 至少 300，timeout_seconds 为 1..60。脚本、游标与受保护配置固定放在 `data/hatsume-plugin/hooks/<group-id>/`，路径解析拒绝跨群、穿越和 symlink 逃逸。
+`hooks/store.py` 通过 localstore 定位 `hooks/hooks.db`，以 WAL 和 reentrant operation lock 保存按正整数 group_id 隔离的 Hook。每群最多五个 enabled 记录；名称在群内唯一，interval_seconds 至少 300，timeout_seconds 为 1..60。脚本、游标与受保护配置固定放在共享目录 `data/hatsume-plugin/hooks/`，不要求按群创建子目录；路径解析拒绝目录外路径、穿越和 symlink 逃逸。
 
-`hooks/executor.py` 为每个 enabled 且有显式 Bot 路由的 Hook 注册一个 coalesced APScheduler interval job，`max_instances=1` 并额外以每 Hook lock 防止验证与正式运行重入。首次恢复等待一个完整 interval；漏检只立即补一次，不重放多次。断线取消相应 job 但保留数据库与脚本，重连恢复，shutdown 终止并回收全部运行中进程。
+`hooks/executor.py` 为每个 enabled 且有显式 Bot 路由的 Hook 注册一个 coalesced APScheduler interval job，`max_instances=1` 并额外以每 Hook lock 防止验证与正式运行重入。首次恢复等待一个完整 interval；漏检只立即补一次，不重放多次。每次 heartbeat 会向控制台打印 Hook ID、群号、名称、脚本、超时、耗时、退出码、输出字节数、触发注入和脱敏失败阶段，但不打印事件正文。断线取消相应 job 但保留数据库与脚本，重连恢复，shutdown 终止并回收全部运行中进程。
 
 脚本必须带 shebang 且可执行，由 `asyncio.create_subprocess_exec` 在当前容器 `/work` 下直接启动。exit 0 表示无变化；exit 10 且非空 stdout 表示事件；其他退出码、空 exit-10、超过 8 KiB stdout、超时或启动失败只更新失败状态。创建和换脚本设置 `HATSUME_HOOK_VALIDATION=1` 试跑，不注入、不更新运行状态，脚本必须在此模式下不推进游标。
 
 `inject_hook()` 是独立公开注入函数。活动群图将 `hook` 标记消息追加到本群 human_queue；空闲群用已有 graph-start lock 和 direct-conversation 路径启动新图。内部标记绕过结束检测并在模型输入前移除，不创建 Hook 专属 Agent 或第二张图。
 
-源码只读 `skills/builtin/hook-authoring.md` 指导 LLM 判断 Hook/Timer 边界、编写幂等增量游标、保护凭证、验证 0/10 协议并选择保守间隔。Skill 合并顺序为源码内置、公共运行时、群本地；内置和公共名称都不可被群本地覆盖或删除。
+只读 `/hooks [group_id]` 命令默认列出当前群的全部 Hook，并显示启用状态、间隔、超时、脚本路径、下次运行、最近退出码、连续失败和最近错误；只有管理员可以指定其他群号。
+
+公共只读 `data/hatsume-plugin/skills/hook-authoring.md` 指导 LLM 判断 Hook/Timer 边界、编写幂等增量游标、保护凭证、验证 0/10 协议并选择保守间隔。Skill 合并顺序继续为公共默认 Skill、群本地 Skill；公共名称不可被群本地覆盖或删除。
 
 ### 6.3 群聊待办
 
@@ -602,7 +608,7 @@ sequenceDiagram
 utils/md_to_image.py 在文本超过 500 字或包含富 Markdown 时：
 
 - 使用 Python Markdown、Pymdown 扩展和代码高亮生成 HTML。
-- 支持表格、任务列表、KaTeX 公式、明暗主题和随机角色印章。
+- 支持表格、任务列表、KaTeX 公式和明暗主题，并使用低干扰的猫娘风格配色。
 - 使用 nonebot-plugin-htmlrender 截图。
 - 把原文 URL 作为额外文本段保留，使图片中的链接仍可点击。
 - 渲染失败时回退为纯文本。
@@ -701,7 +707,7 @@ graph/tools.py、graph/agents.py、graph/nodes.py 与 handlers/dialogue.py 之�
 | hatsume/plugins/hatsume-plugin/hooks/executor.py | 脚本路径/协议验证、bounded subprocess、heartbeat 作业、恢复与清理。 |
 | `hatsume/plugins/hatsume-plugin/utils/__init__.py` | QQ 昵称查询、时间、头像 URL、统一消息 JSON、forward JSON 和带五分钟缓存的成员模糊搜索。 |
 | hatsume/plugins/hatsume-plugin/qq_emoji.py | 共享 QQ 表情 ID 映射，并把 OneBot face 段转为文本。 |
-| hatsume/plugins/hatsume-plugin/utils/md_to_image.py | Markdown、代码、公式和表格到 HTML 与图片的转换，包含主题、角色印章、链接提取和纯文本回退。 |
+| hatsume/plugins/hatsume-plugin/utils/md_to_image.py | Markdown、代码、公式和表格到 HTML 与图片的转换，包含猫娘风格主题、链接提取和纯文本回退。 |
 | hatsume/plugins/hatsume-plugin/utils/security.py | 无框架依赖的敏感凭证正则识别与脱敏。 |
 
 ### 8.3 隔离模块与公共模块
@@ -748,7 +754,7 @@ graph/tools.py、graph/agents.py、graph/nodes.py 与 handlers/dialogue.py 之�
 | `utils/md_to_image.py`、`utils/security.py` | 无群可变状态的渲染与纯文本脱敏 |
 | `virtual/image/Dockerfile`、`virtual/image_pack.sh` | 构建所有群共享的 Ubuntu 26.04 LTS 镜像；Dockerfile 安装 ubuntu-standard、开发/网络工具、Python、Node.js、GitHub CLI、Claude Code 与 Agent 工具依赖 |
 
-`BUILTIN_SKILLS_DIR` 中的源码 Skill 与 `COMMON_SKILLS_DIR` 中的运行时 Markdown Skill 都是公共只读资产；不会复制进群目录，Agent 只能通过工具修改所属群的本地 overlay。源码内置名称优先，公共和群本地层均不能覆盖。
+`COMMON_SKILLS_DIR` 中的运行时 Markdown Skill 是统一的默认公共只读资产；不会复制进群目录，Agent 只能通过工具修改所属群的本地 overlay，群本地层不能覆盖公共名称。
 
 `virtual/` 保留原镜像构建与历史启动脚本，但当前 bot 运行时不会调用它们。
 ## 9. 测试模块索引
@@ -770,7 +776,7 @@ graph/tools.py、graph/agents.py、graph/nodes.py 与 handlers/dialogue.py 之�
 | tests/test_background_shell_stdin_integration.py | stdin 请求、用户回复、模型转换与进程输入集成链路。 |
 | tests/test_chat_send.py | AI 文本、图片、视频发送、@、重试、分段与边界行为。 |
 | tests/test_character_proxy.py | 每群 RAM 状态、并行代理、终止销毁、@ peer、画像与身份作用域。 |
-| tests/test_command_registration.py | `/clear`、`/video` 缺席及四个群参数命令注册。 |
+| tests/test_command_registration.py | `/clear`、`/video` 缺席及群参数命令注册。 |
 | tests/test_container_lifecycle.py | 本地 runtime 独立锁/引用计数/停用任务/进程、取消时 kill/await、超时输出、群路径图片缓存和 reset 定向清理。 |
 | tests/test_local_execution.py | `/work/hatsume` 前后台执行、本地文件复制、无 Docker 清理与群隔离图片路径。 |
 | tests/test_self_evolution_runtime.py | supervisor、直接 NoneBot runner、重启 helper 与 self-evolution Skill 契约。 |
@@ -790,7 +796,7 @@ graph/tools.py、graph/agents.py、graph/nodes.py 与 handlers/dialogue.py 之�
 | tests/test_reasoning_content.py | reasoning_content 在 LangChain 消息转换中的往返保留。 |
 | tests/test_secret_gate.py | 多类 API Key 脱敏与误报边界。 |
 | tests/test_skill_create.py | Skill 保存、覆盖、缓存失效与 frontmatter 校验。 |
-| tests/test_skill_manager.py | Skill 扫描、源码内置/公共只读/群本地三层 overlay、冲突、安全文件名、路径穿越、缓存、去重和无副作用查看。 |
+| tests/test_skill_manager.py | Skill 扫描、公共只读/群本地 overlay、冲突、安全文件名、路径穿越、缓存、去重和无副作用查看。 |
 | tests/test_social.py | likes 扁平格式拒绝、整数校验、原文件保留、群隔离、likerank 参数与授权。 |
 | tests/test_thought_signature.py | thought_signature 修补、捕获、恢复、缺失兼容，以及高级模型名向标准工厂的动态转发。 |
 | tests/test_todo_prompt.py | Todo role prompt 的字段格式、创建/完成规则、低信任数据边界和不可用状态。 |
@@ -836,11 +842,10 @@ data/ 是运行时目录，常见内容包括：
 - data/hatsume-plugin/timer-v2-db/timer.db*：当前定时任务数据库及 WAL/SHM。
 - data/hatsume-plugin/todo-db/todo.db*：每群对话待办数据库及 WAL/SHM。
 - data/hatsume-plugin/hooks/hooks.db*：每群 Hook 元数据及 WAL/SHM。
-- data/hatsume-plugin/hooks/<group-id>/：AI 编写的 Hook 脚本、游标和本地受保护配置。
+- data/hatsume-plugin/hooks/：AI 编写的 Hook 脚本、游标和本地受保护配置（不按群拆分子目录）。
 - data/hatsume-plugin/likes.json：按群保存的累计点赞数据；只接受 `{group_id: {user_id: count}}`。
 - data/hatsume-plugin/skills/*.md：所有群可见且 Agent 不可修改的公共 Skill。
 - data/hatsume-plugin/skills/groups/<group-id>/*.md：目标群可修改的本地 Skill。
-- hatsume/plugins/hatsume-plugin/skills/builtin/*.md：随源码发布的内置只读 Skill，不属于 data 运行仓库。
 - data/hatsume-plugin/faces/：AI 表情和 Markdown 印章图片。
 - 生成、下载或导出的媒体文件。
 - data/nonebot_plugin_htmlrender/ 等插件缓存。

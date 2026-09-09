@@ -6,8 +6,6 @@ bypassing a Jinja2 autoescape bug in its ``render_markdown`` template.
 
 from __future__ import annotations
 
-import base64
-import random
 import re
 import traceback
 from datetime import datetime
@@ -74,30 +72,31 @@ def _is_dark_mode() -> bool:
 
 
 _DARK_MODE_CSS = """
-body{background-color:#1a1418}
-.markdown-body{background-color:#2d1f28;color:#d8cdd2}
+html,body{background-color:#1a1418}
+.markdown-body{--hm-ink:#eadde3;--hm-muted:#b6a4ae;--hm-accent:#f0a0b8;--hm-accent-strong:#f3afc3;--hm-surface:rgba(45,34,42,.72);--hm-soft:#3a2833;--hm-border:#513847;--hm-glow:rgba(240,130,166,.10);--hm-glow-soft:rgba(183,112,145,.08);--hm-shine:rgba(255,220,232,.06);background-color:var(--hm-surface);color:var(--hm-ink);border-color:var(--hm-border);box-shadow:0 8px 24px rgba(0,0,0,.28)}
 .markdown-body h1,.markdown-body h2{color:#f0a0b8;border-bottom-color:#3d2a35}
 .markdown-body h3,.markdown-body h4{color:#d8cdd2}
 .markdown-body h5,.markdown-body h6{color:#b0a0a8}
 .markdown-body a{color:#f0a0b8}
 .markdown-body a:hover{color:#f5c0d0}
 .markdown-body strong,.markdown-body b{color:#e8dde2}
-.markdown-body blockquote{background-color:#241720;color:#b0a0a8;border-left-color:#d4456a}
+.markdown-body blockquote{background-color:#3a2833;color:#b6a4ae;background-image:linear-gradient(118deg,rgba(183,112,145,.08) 0%,rgba(255,255,255,0) 68%);border:1px solid #513847;box-shadow:none}
+.markdown-body blockquote::before{color:rgba(240,160,184,.68)}
 .markdown-body hr::before{color:#f0a0b8}
 .markdown-body hr{border-bottom-color:#3d2a35;background-color:#3d2a35}
 .markdown-body code,.markdown-body tt{background-color:#3d2535;color:#f0a0b8}
 .markdown-body kbd{background-color:#2d1f2a;color:#d8cdd2;border-color:#3d2a35;box-shadow:inset 0 -1px 0 #3d2a35}
-.markdown-body table tr{background-color:#2d1f28;border-top-color:#3d2a35}
+.markdown-body .highlight pre,.markdown-body .codehilite pre,.markdown-body pre{border-color:#513847;background-color:#30232b}
+.markdown-body table{border:1px solid #513847}
+.markdown-body table tr{background-color:#2d1f28;border-top-color:#513847}
 .markdown-body table tr:nth-child(2n){background-color:#261a24}
 .markdown-body table tr:first-child{background-color:#2d1f2a}
-.markdown-body table td,.markdown-body table th{border-color:#3d2a35}
+.markdown-body table td,.markdown-body table th{border-color:#513847}
 .markdown-body table th{color:#f0a0b8}
 .markdown-body .footnotes{color:#b0a0a8;border-top-color:#3d2a35}
 .markdown-body .footnotes li:target{color:#d8cdd2}
 .markdown-body dl dt{color:#d8cdd2}
 .markdown-body .absent{color:#f0a0b8}
-.markdown-body .hatsume-stamp{background:#5e3e52;border-color:#b678a0;box-shadow:2px 4px 16px rgba(0,0,0,0.3),0 0 0 0}
-.markdown-body .hatsume-stamp span{color:#b0a0a8}
 .markdown-body .pl-c{color:#908088}
 .markdown-body .pl-ent{color:#8cc0a0}
 .markdown-body .pl-k{color:#f0a0b8}
@@ -226,37 +225,6 @@ def _format_links(links: list[str]) -> str:
     return "\n".join(lines)
 
 
-# ---- random face selection ---------------------------------------------------
-
-
-async def _get_random_face_b64() -> str | None:
-    """Pick a random face PNG, return base64 data URI.
-
-    Returns None if the faces directory is empty or missing.
-    Each call selects a fresh random face for visual variety.
-    """
-    faces_dir = _get_data_dir() / "faces"
-    if not faces_dir.is_dir():
-        return None
-
-    pngs = list(
-        f for f in faces_dir.iterdir()
-        if f.suffix.lower() == ".png"
-    )
-    if not pngs:
-        return None
-
-    chosen = random.choice(pngs)
-    try:
-        f = await anyio.open_file(str(chosen), mode="rb")
-        async with f:
-            content = await f.read()
-        b64 = base64.b64encode(content).decode("ascii")
-        return f"data:image/png;base64,{b64}"
-    except Exception:
-        return None
-
-
 _cached_css: str | None = None
 _cached_katex: tuple[str, str, str, str] | None = None  # css, js, mhchem, mathtex
 
@@ -342,17 +310,6 @@ async def _markdown_to_html(md_text: str) -> str:
                 f"<script defer>{mathtex_js}</script>"
             )
 
-    # ---- Build stamp footer ----
-    stamp_html = ""
-    face_b64 = await _get_random_face_b64()
-    if face_b64:
-        stamp_html = (
-            '<div class="hatsume-stamp">'
-            f'<img src="{face_b64}" alt="初芽" />'
-            "<span>— 初芽 —</span>"
-            "</div>"
-        )
-
     page = (
         '<!DOCTYPE html><html>'
         '<head>'
@@ -360,14 +317,32 @@ async def _markdown_to_html(md_text: str) -> str:
         '<meta charset="utf-8">'
         f"<style>{css}</style>"
         "<style>"
-        ".markdown-body{box-sizing:border-box;min-width:200px;"
-        "max-width:980px;margin:48px;padding:45px}"
+        "html,body{margin:0;background:#fff3f7}"
+        "body{position:relative;isolation:isolate;box-sizing:border-box;padding:16px;overflow-x:hidden;"
+        "scrollbar-gutter:stable both-edges}"
+        "body::before{content:'';position:fixed;inset:-30%;z-index:0;pointer-events:none;"
+        "background-image:radial-gradient(ellipse 8px 6px at 38px 44px,rgba(202,119,151,.095) 0 96%,transparent 100%),"
+        "radial-gradient(circle at 24px 28px,rgba(202,119,151,.095) 0 3px,transparent 3.5px),"
+        "radial-gradient(circle at 34px 23px,rgba(202,119,151,.095) 0 3px,transparent 3.5px),"
+        "radial-gradient(circle at 45px 23px,rgba(202,119,151,.095) 0 3px,transparent 3.5px),"
+        "radial-gradient(circle at 54px 29px,rgba(202,119,151,.095) 0 3px,transparent 3.5px);"
+        "background-size:120px 108px;background-position:0 0;transform:rotate(45deg)}"
+        ".markdown-body{position:relative;z-index:1;box-sizing:border-box;min-width:0;"
+        "width:100%;max-width:none;"
+        "margin:12px 0;padding:clamp(24px,5vw,45px)}"
+        "@media(max-width:767px){.markdown-body{padding:24px 20px}}"
+        "@media(prefers-color-scheme:dark){html,body{background:#1a1418}"
+        "body::before{background-image:radial-gradient(ellipse 8px 6px at 38px 44px,rgba(244,170,194,.065) 0 96%,transparent 100%),"
+        "radial-gradient(circle at 24px 28px,rgba(244,170,194,.065) 0 3px,transparent 3.5px),"
+        "radial-gradient(circle at 34px 23px,rgba(244,170,194,.065) 0 3px,transparent 3.5px),"
+        "radial-gradient(circle at 45px 23px,rgba(244,170,194,.065) 0 3px,transparent 3.5px),"
+        "radial-gradient(circle at 54px 29px,rgba(244,170,194,.065) 0 3px,transparent 3.5px)}}"
         + _CODE_WRAP_CSS
         + (_DARK_MODE_CSS if _is_dark_mode() else "") +
         "</style>"
         "</head>"
         "<body>"
-        f'<article class="markdown-body">{html_body}{stamp_html}</article>'
+        f'<article class="markdown-body">{html_body}</article>'
         "</body>"
         f"{extra}"
         "</html>"

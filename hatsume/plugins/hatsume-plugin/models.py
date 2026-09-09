@@ -37,9 +37,11 @@ from .config import (
     SEEDREAM_4_0,
     VOLCENGINE_BASE_URL,
     WAWAPI_IMAGE_API_KEY,
+    _get_int_env,
     get_api_key,
     get_base_url,
 )
+from .provider_switch import get_chat_provider
 
 if TYPE_CHECKING:
     from langchain_core.messages import BaseMessage
@@ -144,33 +146,50 @@ def get_openai_api_model(
 def get_google_api_model(
     model_name: str,
     reasoning_effort: ReasoningEffort = "low",
+    provider: Optional[str] = None,
 ) -> ChatGoogleGenerativeAI:
+    if provider is None:
+        provider = _config.PROVIDER
     return ChatGoogleGenerativeAI(
-        base_url=get_base_url(),
+        base_url=get_base_url(provider),
         model=model_name,
-        api_key=get_api_key()(),
+        api_key=get_api_key(provider)(),
         thinking_budget=_to_gemini_thinking_budget(reasoning_effort),
     )
 
 def get_standard_api_model(
     model_name: str,
     reasoning_effort: ReasoningEffort = "low",
+    provider: Optional[str] = None,
 ) -> BaseChatModel:
     """Create the standard chat model."""
     return get_google_api_model(
         model_name,
         reasoning_effort=reasoning_effort,
+        provider=provider,
     )
 
 def get_advance_model(
     thinking: bool = True,
     reasoning_effort: ReasoningEffort = "medium",
+    provider: Optional[str] = None,
 ) -> BaseChatModel:
     model_name = _config.ADVANCE_MODEL_NAME
-    print(f"⚡ Using {model_name} for advance model")
+    if provider is None:
+        provider = get_chat_provider()
+    print(f"⚡ Using {model_name} via provider '{provider}' for advance model")
+    effective_effort = reasoning_effort if thinking else "none"
+    if provider == _config.PROVIDER:
+        # Preserve the historical factory call shape for the default provider;
+        # this also keeps lightweight factory shims backward-compatible.
+        return get_standard_api_model(
+            model_name,
+            reasoning_effort=effective_effort,
+        )
     return get_standard_api_model(
         model_name,
-        reasoning_effort=reasoning_effort if thinking else "none",
+        reasoning_effort=effective_effort,
+        provider=provider,
     )
 
 
@@ -191,13 +210,22 @@ def get_view_image_model() -> BaseChatModel:
 def get_mini_model() -> BaseChatModel:
     return get_standard_api_model(LITE_MODEL_NAME, reasoning_effort="low")
 
-def get_code_model(reasoning_effort: ReasoningEffort = "medium") -> BaseChatModel:
+def get_intent_model(reasoning_effort: ReasoningEffort = "medium") -> BaseChatModel:
     return get_openai_api_model(
         model_name= QWEN_3_7_FLASH,
         reasoning_effort=reasoning_effort,
         base_url=ALI_BASE_URL,
         api_key=ALI_API_KEY,
         is_response=True,
+        extra_body=None
+    )
+
+def get_code_model(reasoning_effort: ReasoningEffort = "medium") -> BaseChatModel:
+    return get_openai_api_model(
+        model_name= QWEN_3_7_FLASH,
+        reasoning_effort=reasoning_effort,
+        base_url=ALI_BASE_URL,
+        api_key=ALI_API_KEY,
         extra_body=None   
     )
 
