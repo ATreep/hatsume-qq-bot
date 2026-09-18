@@ -18,7 +18,7 @@ from nonebot import require
 from ..config import HOOKS_DIR
 from ..group_runtime import group_runtime_registry
 from ..utils.security import mask_secret_keys
-from .store import HOOK_MAX_TIMEOUT_SECONDS, HookStore
+from .store import HOOK_MAX_TIMEOUT_SECONDS, HOOK_TRIGGER_HEARTBEAT, HookStore
 
 scheduler = require("nonebot_plugin_apscheduler").scheduler
 
@@ -279,6 +279,9 @@ async def execute_hook(
             if not record["enabled"]:
                 _heartbeat_log(f"skip hook_id={hook_id} reason=disabled")
                 return True
+            if str(record.get("trigger_type") or HOOK_TRIGGER_HEARTBEAT) != HOOK_TRIGGER_HEARTBEAT:
+                _heartbeat_log(f"skip hook_id={hook_id} reason=message_match_trigger")
+                return True
             group_id = int(record["group_id"])
             hook_name = str(record["name"])
             context = f"hook_id={hook_id} group_id={group_id} name={hook_name!r}"
@@ -399,10 +402,19 @@ def register_hook_job(
     *,
     now: float | None = None,
 ) -> Any | None:
-    """Register or replace one enabled Hook job when its group is routable."""
+    """Register or replace one enabled heartbeat Hook job when its group is routable.
+
+    Message-match Hooks never own a scheduler job; they fire from incoming
+    group messages.
+    """
     hook_id = int(record["id"])
     group_id = int(record["group_id"])
-    if not record["enabled"] or group_id not in group_runtime_registry.routed_group_ids():
+    if (
+        not record["enabled"]
+        or str(record.get("trigger_type") or HOOK_TRIGGER_HEARTBEAT)
+        != HOOK_TRIGGER_HEARTBEAT
+        or group_id not in group_runtime_registry.routed_group_ids()
+    ):
         cancel_hook_job(hook_id)
         return None
     current = time.time() if now is None else float(now)
@@ -439,7 +451,11 @@ def restore_hook_jobs(
             scheduler.remove_job(job.id)
     enabled = store.list_enabled_hooks()
     for record in enabled:
-        if int(record["group_id"]) in routed:
+        if (
+            int(record["group_id"]) in routed
+            and str(record.get("trigger_type") or HOOK_TRIGGER_HEARTBEAT)
+            == HOOK_TRIGGER_HEARTBEAT
+        ):
             register_hook_job(record, store, now=now)
         else:
             cancel_hook_job(int(record["id"]))

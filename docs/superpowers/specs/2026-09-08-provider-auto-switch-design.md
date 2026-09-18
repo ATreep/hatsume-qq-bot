@@ -4,7 +4,7 @@
 
 Automatically switch the LLM provider used by `chat_agent` when the provider
 becomes slow. The trigger is the monotonic duration of a `chat_agent` invocation:
-if it exceeds 100 seconds, the bot switches the advance model's provider to the
+if it exceeds 150 seconds, the bot switches the advance model's provider to the
 next healthy candidate. The candidate auto-switching list is `ruoli` and `waw`.
 
 ## Product Requirements
@@ -14,13 +14,13 @@ next healthy candidate. The candidate auto-switching list is `ruoli` and `waw`.
   their fixed providers.
 - The switching trigger is a completed `chat_agent` invocation whose elapsed
   time (the existing `t_invocation_start` → `t_invocation_end` window in
-  `ai_node`) exceeds 100 seconds. Errors and exceptions never trigger a
+  `ai_node`) exceeds 150 seconds. Errors and exceptions never trigger a
   switch; only latency does.
 - A provider marked slow stays "slow" for a 12-hour cooldown. A switch only
   moves to a candidate that is not currently in its cooldown window.
 - If every candidate is in cooldown, the bot stays on the current provider
   and logs a warning — no flip-flopping between two slow providers.
-- A fast invocation (≤ 100s) clears the current provider's slow mark
+- A fast invocation (≤ 150s) clears the current provider's slow mark
   (recovery signal).
 - Provider state is in-memory only. A bot restart resets the selection to the
   static `config.PROVIDER` default (currently `waw`).
@@ -32,7 +32,7 @@ next healthy candidate. The candidate auto-switching list is `ruoli` and `waw`.
 A dependency-light module owning all switching logic:
 
 - `CANDIDATE_PROVIDERS = ("ruoli", "waw")` — the candidate auto-switching list.
-- `SLOW_THRESHOLD_SECONDS = 100.0` — the latency trigger.
+- `SLOW_THRESHOLD_SECONDS = 150.0` — the latency trigger.
 - `SLOW_COOLDOWN_SECONDS = 12 * 60 * 60` — how long a slow mark lasts.
 - `ProviderSwitcher` class:
   - Holds `current` provider and a `slow_until: dict[str, float]` map.
@@ -69,7 +69,7 @@ A dependency-light module owning all switching logic:
 - After the existing elapsed-time print of the `chat_agent` invocation, call
   `report_chat_elapsed(t_invocation_end - t_invocation_start, provider=..., started_at=...)`.
 - When a switch is returned, print
-  `[provider-switch] chat_agent took Xs (> 100s); provider 'waw' -> 'ruoli'`
+  `[provider-switch] chat_agent took Xs (> 150s); provider 'waw' -> 'ruoli'`
   so operators can observe the behavior in logs.
 
 ## Error Handling

@@ -16,6 +16,15 @@ from .config import (
 
 
 
+def peer_session_id(group_id: int, user_id: int) -> str:
+    """Canonical ``ConversationState.chat_peers`` key for one group member.
+
+    Matches the OneBot V11 group session id used by incoming
+    ``GroupMessageEvent`` handling.
+    """
+    return f"group_{int(group_id)}_{int(user_id)}"
+
+
 # ---------------------------------------------------------------------------
 # Conversation state
 # ---------------------------------------------------------------------------

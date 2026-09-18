@@ -91,6 +91,7 @@ role_sys_prompt = f"""
 - 请求已实际完成；
 - 语气自然、标点不必工整；
 - 没有心理或动作描写；
+- 仅输出聊天内容，无任何机械化辅助性文本；
 - 无 emoji 表情；
 - 输出字数 30 字左右；如果是科普向，可以增多字数。
 - 需要时正确使用 `[CQ:at,qq=<QQ号>]`、`[reply: <message_id>]`、`[memory: xxx MEMORYCONTENTEND, keyman: QQ号1, QQ号2, ...]`, `[hatsumeface: xxx]`...。
@@ -447,7 +448,7 @@ CODING_AGENT_PROMPT = (
 # ---------------------------------------------------------------------------
 
 def get_auto_response_prompt() -> str:
-   return "(SYSTEM) 参与群聊话题、用你的 Skills 或 Tools 随便做点什么有趣的任务，或者回想记忆中的某个趣事分享一下。" 
+   return "(SYSTEM) 参与群聊话题、用你的 Skills 或 Tools 随便做点什么有趣的任务，或者回想记忆中的某个趣事分享一下。注意：此次输出不要回复或@任何人。" 
 
 # ---------------------------------------------------------------------------
 # Background shell agent — decision prompt

@@ -19,6 +19,7 @@ def _get_int_env(name: str) -> int:
 # Bot identity
 # ---------------------------------------------------------------------------
 BOT_QQ_ID: int = _get_int_env("BOT_QQ_ID")
+BOT_DISPLAY_NAME: str = "初芽"
 AGENT_QQ_EMAIL = os.getenv("AGENT_QQ_EMAIL", "")
 ADMIN_QQ_ID: str = os.getenv("ADMIN_QQ_ID", "")
 GITHUB_ACCOUNT = os.getenv("GITHUB_ACCOUNT", "")
@@ -61,7 +62,7 @@ AR_BASE_URL = "https://agentrouter.org"
 RUOLI_BASE_URL = "https://ruoli.dev"
 PEXELS_BASE_URL = "https://api.pexels.com"
 WAWAPI_BASE_URL = "https://wawapii.com"
-ALI_BASE_URL = "https://ws-1h26pj40tzf8hqys.cn-beijing.maas.aliyuncs.com/compatible-mode"
+ALI_BASE_URL = os.environ.get("ALI_BASE_URL", "") 
 
 
 # ---------------------------------------------------------------------------
@@ -69,9 +70,9 @@ ALI_BASE_URL = "https://ws-1h26pj40tzf8hqys.cn-beijing.maas.aliyuncs.com/compati
 # ---------------------------------------------------------------------------
 DOUBAO_2_LITE: str = "doubao-seed-2-0-lite"
 DOUBAO_2_MINI: str = "doubao-seed-2-0-mini"
-DEEPSEEK_V4_FLASH_FREE = "deepseek-v4-flash-free"
+DEEPSEEK_FLASH = "deepseek-flash"
 MIMO_2_5_FREE = "mimo-v2.5-free"
-DEEPSEEK_V4_FLASH = "deepseek-v4-flash"
+DEEPSEEK_V4_1_FLASH = "deepseek-v4.1-flash"
 SEEDREAM_5_0_LITE: str = "doubao-seedream-5.0-lite"
 SEEDREAM_4_0 = "doubao-seedream-4-0-250828"
 SEEDANCE_1_5: str = "doubao-seedance-1-5-pro-251215"
@@ -80,15 +81,15 @@ GPT_IMAGE_2 = "gpt-image-2:stable"
 GPT_5_6_LUNA = "gpt-5.6-luna"
 GPT_5_6_TERRA = "gpt-5.6-terra"
 GPT_5_5 = "gpt-5.5"
-GEMINI_3_5_FLASH = "gemini-3.5-flash"
-GEMINI_3_7_FLASH = "gemini-3.7-flash"
-GROK_4_5 = "grok-4.5"
+GEMINI_3_8_FLASH = "gemini-3.8-flash"
+GROK_4_6 = "grok-4.6"
 GROK_IMAGINE_IMAGE = "grok-imagine-image:stable"
 LAGUNA_S_2_1_FREE = "laguna-s-2.1-free"
 QWEN_3_7_FLASH = "qwen3.7-flash"
+QWEN_3_8_FLASH = "qwen3.8-flash"
 
-ADVANCE_MODEL_NAME: str = GEMINI_3_7_FLASH
-LITE_MODEL_NAME =  GEMINI_3_7_FLASH
+ADVANCE_MODEL_NAME: str = QWEN_3_8_FLASH 
+LITE_MODEL_NAME: str =  QWEN_3_7_FLASH
 
 
 # ---------------------------------------------------------------------------
@@ -99,10 +100,10 @@ EMBEDDING_MODEL: str = "BAAI/bge-m3"
 # ---------------------------------------------------------------------------
 # Provider selection
 # ---------------------------------------------------------------------------
-PROVIDER: Literal["volc", "volc_plan", "kege", "zhth", "ar", "ruoli", "ds", "waw", "ali"] = "waw"
-CHAT_PROVIDER_SWITCH_CANDIDATES: tuple[str, ...] = ("ruoli", "waw")
-CHAT_PROVIDER_SWITCH_THRESHOLD_SECONDS: float = 100.0
-CHAT_PROVIDER_SWITCH_COOLDOWN_SECONDS: float = 12 * 60 * 60
+PROVIDER: Literal["volc", "volc_plan", "kege", "zhth", "ar", "ruoli", "ds", "waw", "ali"] = "ali"
+CHAT_PROVIDER_SWITCH_CANDIDATES: tuple[str, ...] = ("ali",)
+CHAT_PROVIDER_SWITCH_THRESHOLD_SECONDS: float = 150.0
+CHAT_PROVIDER_SWITCH_COOLDOWN_SECONDS: float = 3 * 60 * 60
 
 def get_base_url(
     provider: Literal["volc", "volc_plan", "sf", "kege", "zhth", "ar", "ruoli", "ds", "waw", "ali"] = PROVIDER,
@@ -189,8 +190,8 @@ TODO_EXPIRY_SECONDS: int = 72 * 60 * 60
 AUTO_RESPONSE_GROUP_BLACKLIST: frozenset[int] = frozenset(
     {376347217, 579996918, 902317662}
 )
-AUTO_RESPONSE_MIN_INTERVAL_MINUTES: int = 30
-AUTO_RESPONSE_MAX_INTERVAL_MINUTES: int = 120
+AUTO_RESPONSE_MIN_INTERVAL_MINUTES: int = 180
+AUTO_RESPONSE_MAX_INTERVAL_MINUTES: int = 360
 AUTO_RESPONSE_QUIET_START_HOUR: int = 2
 AUTO_RESPONSE_QUIET_END_HOUR: int = 6
 # ---------------------------------------------------------------------------

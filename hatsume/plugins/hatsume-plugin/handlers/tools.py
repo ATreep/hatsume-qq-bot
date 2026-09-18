@@ -672,22 +672,36 @@ async def handle_hooks(event, matcher, args: Message) -> None:
 
     lines = [f"{scope} Hooks（{len(records)} 项）："]
     for index, record in enumerate(records, start=1):
-        next_run = get_hook_next_run(int(record["id"]))
-        next_text = next_run.isoformat() if next_run is not None else "未调度"
-        last_exit_text = (
-            str(record["last_exit_code"])
-            if record["last_exit_code"] is not None
-            else "无"
-        )
+        if str(record.get("trigger_type") or "heartbeat") == "message_match":
+            match_user = record["match_user_id"]
+            match_user_text = "任意成员" if not match_user else f"QQ {match_user}"
+            trigger_lines = [
+                "触发方式：用户消息匹配",
+                f"触发人：{match_user_text}",
+                f"匹配正则：/{record['match_pattern']}/",
+                f"上次触发：{record['last_run_at'] or '无'}",
+            ]
+        else:
+            next_run = get_hook_next_run(int(record["id"]))
+            next_text = next_run.isoformat() if next_run is not None else "未调度"
+            last_exit_text = (
+                str(record["last_exit_code"])
+                if record["last_exit_code"] is not None
+                else "无"
+            )
+            trigger_lines = [
+                "触发方式：脚本 heartbeat",
+                f"间隔：{record['interval_seconds']} 秒；超时：{record['timeout_seconds']} 秒",
+                f"脚本：{record['script_path']}",
+                f"下次运行：{next_text}",
+                f"上次退出码：{last_exit_text}",
+            ]
         lines.extend(
             [
                 "",
                 f"{index}. {record['name']}（ID：{record['id']}）",
                 f"状态：{'启用' if record['enabled'] else '停用'}",
-                f"间隔：{record['interval_seconds']} 秒；超时：{record['timeout_seconds']} 秒",
-                f"脚本：{record['script_path']}",
-                f"下次运行：{next_text}",
-                f"上次退出码：{last_exit_text}",
+                *trigger_lines,
                 f"连续失败：{record['consecutive_failures']}",
                 f"最近错误：{record['last_error'] or '无'}",
             ]

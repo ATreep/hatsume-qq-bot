@@ -1,7 +1,8 @@
-"""SQLite persistence for per-group heartbeat Hooks."""
+"""SQLite persistence for per-group Hooks (heartbeat and message triggers)."""
 
 from __future__ import annotations
 
+import re
 import sqlite3
 import threading
 import time
@@ -23,6 +24,13 @@ from ..config import (
 HOOK_MAX_NAME_LENGTH = 64
 HOOK_MAX_PROMPT_LENGTH = 2_000
 HOOK_MAX_ERROR_LENGTH = 2_000
+HOOK_MAX_PATTERN_LENGTH = 200
+
+HOOK_TRIGGER_HEARTBEAT = "heartbeat"
+HOOK_TRIGGER_MESSAGE = "message_match"
+HOOK_TRIGGER_TYPES = (HOOK_TRIGGER_HEARTBEAT, HOOK_TRIGGER_MESSAGE)
+
+ANY_MATCH_USER_ID = 0
 
 EXPECTED_COLUMNS = {
     "id",
@@ -40,6 +48,17 @@ EXPECTED_COLUMNS = {
     "last_exit_code",
     "last_error",
     "consecutive_failures",
+    "trigger_type",
+    "match_user_id",
+    "match_pattern",
+}
+
+# Columns added after the first release of the Hook database. Existing
+# databases are migrated in place by ``init_db`` instead of being rejected.
+MIGRATED_COLUMNS: dict[str, str] = {
+    "trigger_type": "TEXT NOT NULL DEFAULT 'heartbeat'",
+    "match_user_id": "INTEGER",
+    "match_pattern": "TEXT",
 }
 
 
@@ -81,6 +100,32 @@ def _enabled(value: Any) -> bool:
     if not isinstance(value, bool):
         raise TypeError("enabled must be a boolean")
     return value
+
+
+def _trigger_type(value: Any) -> str:
+    normalized = str(value).strip()
+    if normalized not in HOOK_TRIGGER_TYPES:
+        raise ValueError(
+            f"trigger_type must be one of {', '.join(HOOK_TRIGGER_TYPES)}"
+        )
+    return normalized
+
+
+def _match_user_id(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError("match_user_id must be an integer >= 0")
+    return value
+
+
+def _match_pattern(value: Any) -> str:
+    if value is None:
+        raise ValueError("match_pattern must not be empty")
+    normalized = _bounded_text(value, "match_pattern", HOOK_MAX_PATTERN_LENGTH)
+    try:
+        re.compile(normalized)
+    except re.error as exc:
+        raise ValueError(f"match_pattern must be a valid regular expression: {exc}") from exc
+    return normalized
 
 
 class HookStore:
@@ -135,15 +180,20 @@ class HookStore:
                         last_exit_code INTEGER,
                         last_error TEXT,
                         consecutive_failures INTEGER NOT NULL DEFAULT 0,
+                        trigger_type TEXT NOT NULL DEFAULT 'heartbeat',
+                        match_user_id INTEGER,
+                        match_pattern TEXT,
                         UNIQUE (group_id, name)
                     )
                     """
                 )
-                columns = {
-                    str(row["name"])
-                    for row in conn.execute("PRAGMA table_info('hooks')")
-                }
-                if columns != EXPECTED_COLUMNS:
+                columns = self._table_columns(conn)
+                for name in sorted(EXPECTED_COLUMNS - columns):
+                    definition = MIGRATED_COLUMNS.get(name)
+                    if definition is None:
+                        raise RuntimeError("incompatible Hook database schema")
+                    conn.execute(f"ALTER TABLE hooks ADD COLUMN {name} {definition}")
+                if self._table_columns(conn) != EXPECTED_COLUMNS:
                     raise RuntimeError("incompatible Hook database schema")
                 conn.commit()
             except BaseException:
@@ -159,6 +209,10 @@ class HookStore:
         result["enabled"] = bool(result["enabled"])
         return result
 
+    @staticmethod
+    def _table_columns(conn: sqlite3.Connection) -> set[str]:
+        return {str(row["name"]) for row in conn.execute("PRAGMA table_info('hooks')")}
+
     def _active_count(self, conn: sqlite3.Connection, group_id: int) -> int:
         row = conn.execute(
             "SELECT COUNT(*) AS count FROM hooks WHERE group_id = ? AND enabled = 1",
@@ -171,18 +225,37 @@ class HookStore:
         *,
         group_id: int,
         name: str,
-        script_path: str,
+        script_path: str = "",
         prompt: str,
         interval_seconds: int = HOOK_DEFAULT_INTERVAL_SECONDS,
         timeout_seconds: int = HOOK_DEFAULT_TIMEOUT_SECONDS,
         created_by: int,
         enabled: bool = True,
+        trigger_type: str = HOOK_TRIGGER_HEARTBEAT,
+        match_user_id: int | None = None,
+        match_pattern: str | None = None,
     ) -> dict[str, Any]:
         resolved_group_id = _positive_int(group_id, "group_id")
         resolved_creator = _positive_int(created_by, "created_by")
         resolved_name = _bounded_text(name, "name", HOOK_MAX_NAME_LENGTH)
         resolved_prompt = _bounded_text(prompt, "prompt", HOOK_MAX_PROMPT_LENGTH)
-        resolved_path = _script_path(script_path)
+        resolved_trigger = _trigger_type(trigger_type)
+        if resolved_trigger == HOOK_TRIGGER_HEARTBEAT:
+            if match_user_id is not None or match_pattern is not None:
+                raise ValueError(
+                    "heartbeat Hooks must not define match_user_id or match_pattern"
+                )
+            resolved_path = _script_path(script_path)
+            resolved_match_user_id: int | None = None
+            resolved_match_pattern: str | None = None
+        else:
+            if str(script_path).strip():
+                raise ValueError("message_match Hooks must not define a script_path")
+            resolved_path = ""
+            resolved_match_user_id = _match_user_id(
+                ANY_MATCH_USER_ID if match_user_id is None else match_user_id
+            )
+            resolved_match_pattern = _match_pattern(match_pattern)
         resolved_interval = _bounded_int(
             interval_seconds,
             "interval_seconds",
@@ -208,8 +281,9 @@ class HookStore:
                         INSERT INTO hooks (
                             group_id, name, script_path, prompt,
                             interval_seconds, timeout_seconds, enabled,
-                            created_by, created_at, updated_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            created_by, created_at, updated_at,
+                            trigger_type, match_user_id, match_pattern
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             resolved_group_id,
@@ -222,6 +296,9 @@ class HookStore:
                             resolved_creator,
                             now,
                             now,
+                            resolved_trigger,
+                            resolved_match_user_id,
+                            resolved_match_pattern,
                         ),
                     )
                 except sqlite3.IntegrityError as exc:
@@ -291,6 +368,8 @@ class HookStore:
             "interval_seconds",
             "timeout_seconds",
             "enabled",
+            "match_user_id",
+            "match_pattern",
         }
         unknown = set(changes) - allowed
         if unknown:
@@ -318,6 +397,10 @@ class HookStore:
             )
         if "enabled" in changes:
             normalized["enabled"] = int(_enabled(changes["enabled"]))
+        if "match_user_id" in changes:
+            normalized["match_user_id"] = _match_user_id(changes["match_user_id"])
+        if "match_pattern" in changes:
+            normalized["match_pattern"] = _match_pattern(changes["match_pattern"])
 
         with self._operation_lock:
             conn = self._connection()
@@ -328,6 +411,20 @@ class HookStore:
                 ).fetchone()
                 if current is None:
                     raise ValueError(f"Hook '{resolved_name}' does not exist")
+                current_trigger = str(current["trigger_type"])
+                if current_trigger == HOOK_TRIGGER_HEARTBEAT:
+                    incompatible = {"match_user_id", "match_pattern"} & set(normalized)
+                else:
+                    incompatible = {
+                        "script_path",
+                        "interval_seconds",
+                        "timeout_seconds",
+                    } & set(normalized)
+                if incompatible:
+                    raise ValueError(
+                        f"{current_trigger} Hooks do not support fields: "
+                        f"{', '.join(sorted(incompatible))}"
+                    )
                 if (
                     normalized.get("enabled") == 1
                     and not bool(current["enabled"])
@@ -363,6 +460,33 @@ class HookStore:
                     return None
                 conn.execute("DELETE FROM hooks WHERE id = ?", (int(row["id"]),))
             return self._row(row)
+
+    def list_enabled_message_hooks(self, group_id: int) -> list[dict[str, Any]]:
+        """Return enabled message-match Hooks that watch one group."""
+        resolved_group_id = _positive_int(group_id, "group_id")
+        with self._operation_lock:
+            rows = self._connection().execute(
+                """
+                SELECT * FROM hooks
+                WHERE group_id = ? AND enabled = 1 AND trigger_type = ?
+                ORDER BY created_at, id
+                """,
+                (resolved_group_id, HOOK_TRIGGER_MESSAGE),
+            ).fetchall()
+            return [record for row in rows if (record := self._row(row)) is not None]
+
+    def record_trigger(self, hook_id: int, run_at: float) -> None:
+        """Record one successful message-triggered Hook fire."""
+        resolved_id = _positive_int(hook_id, "hook_id")
+        with self._operation_lock, self._connection() as conn:
+            conn.execute(
+                """
+                UPDATE hooks
+                SET last_run_at = ?, last_error = NULL, consecutive_failures = 0
+                WHERE id = ?
+                """,
+                (float(run_at), resolved_id),
+            )
 
     def record_success(self, hook_id: int, exit_code: int, run_at: float) -> None:
         resolved_id = _positive_int(hook_id, "hook_id")

@@ -49,6 +49,7 @@ ImageOrientation = Literal["landscape", "portrait", "square"]
 HookIntervalSeconds = Annotated[int, Field(strict=True, ge=300)]
 HookTimeoutSeconds = Annotated[int, Field(strict=True, ge=1, le=60)]
 StrictBool = Annotated[bool, Field(strict=True)]
+MatchUserId = Annotated[int, Field(strict=True, ge=0)]
 
 
 class WeeklyTimePoint(TypedDict):
@@ -252,6 +253,107 @@ def find_memory(query: str) -> str:
     """
     print("Call query_memory tool:", query)
     return query_memory(query)
+
+
+@tool
+def search_history_messages(
+    keyword: str | None = None,
+    sender_qq_id: int | None = None,
+    start_time: str | None = None,
+    end_time: str | None = None,
+    limit: int = 20,
+) -> str:
+    """
+    检索本群（当前群聊）的历史聊天记录。
+
+    当用户询问以下内容时，使用此工具：
+    - 之前群里聊过什么、回忆某件事或某个话题
+    - 谁说过某句话、某人之前提到过什么
+    - 过去某段时间群里的讨论
+
+    ## 参数
+    - keyword: 关键词，对消息正文做模糊匹配。可省略。
+    - sender_qq_id: 只看某个 QQ 号的发言。可省略。
+      想看你自己（bot）的发言时，填入你的 QQ 号。
+    - start_time / end_time: 时间范围，格式 "YYYY-MM-DD HH:MM"。可省略。
+    - limit: 返回条数上限，默认 20，最大 50。
+
+    ## 注意
+    - 只能检索当前群，无法检索其他群。
+    - 结果按时间正序排列。
+    - 图片以沙箱路径内联（如 ![图片](/tmp/...)），该路径可能已失效。
+    """
+    from datetime import datetime
+
+    from ..message_db import (
+        MAX_SEARCH_LIMIT,
+        MessageValidationError,
+        get_store,
+        parse_local_time,
+    )
+
+    group_id = get_current_group_id()
+    if group_id is None:
+        return "错误：当前不在群聊上下文中，无法检索历史消息。"
+
+    if isinstance(limit, bool) or not isinstance(limit, int):
+        return "错误：limit 必须是整数。"
+    if limit < 1:
+        return "错误：limit 必须大于 0。"
+    effective_limit = min(limit, MAX_SEARCH_LIMIT)
+
+    cleaned_keyword: str | None = None
+    if isinstance(keyword, str) and keyword.strip():
+        cleaned_keyword = keyword.strip()
+
+    sender: int | None = None
+    if sender_qq_id is not None:
+        if (
+            isinstance(sender_qq_id, bool)
+            or not isinstance(sender_qq_id, int)
+            or sender_qq_id < 0
+        ):
+            return "错误：sender_qq_id 必须是有效的 QQ 号。"
+        sender = sender_qq_id
+
+    try:
+        start_ts = (
+            parse_local_time(start_time, "start_time") if start_time else None
+        )
+        end_ts = parse_local_time(end_time, "end_time") if end_time else None
+        if start_ts is not None and end_ts is not None and start_ts > end_ts:
+            return "错误：start_time 晚于 end_time。"
+        records = get_store().search_messages(
+            group_id,
+            keyword=cleaned_keyword,
+            sender_qq_id=sender,
+            start_time=start_ts,
+            end_time=end_ts,
+            limit=effective_limit,
+        )
+    except MessageValidationError as exc:
+        return str(exc)
+    except Exception as exc:
+        print(f"❌ search_history_messages failed: {exc}")
+        traceback.print_exc()
+        return "❌ 检索历史消息失败，请稍后再试。"
+
+    if not records:
+        return "本群没有符合条件的历史消息。"
+
+    lines: list[str] = []
+    for record in reversed(records):
+        stamp = datetime.fromtimestamp(record["created_at"]).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+        speaker = record["sender_name"] or str(record["sender_qq_id"])
+        lines.append(
+            f"[{stamp}] {speaker}({record['sender_qq_id']}): {record['content']}"
+        )
+
+    header = f"本群历史消息（返回 {len(records)} 条，按时间正序）："
+    footer = "提示：内容中的图片路径位于沙盒 /tmp，可能已失效，需要时请重新获取。"
+    return header + "\n" + "\n".join(lines) + "\n" + footer
 
 
 def _format_search_results(results: list[dict[str, Any]]) -> str:
@@ -948,7 +1050,7 @@ async def create_todo(
     """创建一个待办事项。
 
     ## 简介
-    当“当前聊天记录”出现值得在未来条件满足时继续完成的事情，可以主动调用；
+    当“当前聊天记录”出现值得在未来某个客观条件满足时继续完成的事情时，你可以创建一个待办事项；
     禁止仅根据“背景聊天记录”创建。
     区分：如果用户希望设置提醒，且提醒触发的时机是某个事件而不是具体的时间，则使用 create_todo 而不是 create_xxx_timer。
 
@@ -1391,7 +1493,7 @@ def skill_create(content: str) -> str:
 # Hook tools
 # ---------------------------------------------------------------------------
 @tool
-async def create_hook(
+async def create_heartbeat_hook(
     name: str,
     script_path: str,
     prompt: str,
@@ -1399,6 +1501,11 @@ async def create_hook(
     timeout_seconds: HookTimeoutSeconds = 15,
 ) -> str:
     """注册当前群的持久化 heartbeat Hook。
+
+    当用要求「帮我监听某个外部事件」时，必须使用此类型 Hook，而不是消息匹配 Hook。
+    例如：
+    - 当你收到来自 XXX 的邮件时，向我发送提醒
+    - 当网站 XXX 上有新文章时，及时邮件通知我
 
     调用前必须加载 `hook-authoring` Skill，让 coding_agent 在
     `data/hatsume-plugin/hooks/` 写好可执行脚本并以验证模式试跑。
@@ -1408,7 +1515,8 @@ async def create_hook(
     Hook。未指定间隔时使用 900 秒，但应根据外部源成本主动选择更合理的间隔。
 
     脚本 exit 0 表示无事件；exit 10 且 stdout 非空表示触发 chat_agent。
-    注册验证不会注入事件，也不得推进脚本游标。
+    注册验证不会注入事件，也不得推进脚本游标。用户要求「群里有人说某类话时
+    反应」时不要写脚本，改用 `create_message_hook`。
     """
     runtime = get_current_group_runtime()
     requester_id = runtime.conversation.current_query_user_id
@@ -1454,8 +1562,55 @@ async def create_hook(
 
 
 @tool
+async def create_message_hook(
+    name: str,
+    prompt: str,
+    match_pattern: str,
+    match_user_id: MatchUserId = 0,
+) -> str:
+    """注册一个「用户消息匹配」触发方式的持久化 Hook。
+
+    当用户要求「群里有人说某类话时反应」时，必须使用此类型 Hook，而不是 heartbeat Hook。
+
+    与 heartbeat Hook 不同，此类型不运行脚本、不注册 APScheduler 间隔：
+    每当当前群收到新消息（不含机器人自己发送的消息）时，只要发送者匹配 match_user_id 且消息纯文本命中
+    match_pattern 正则，就立即把 prompt 与命中的消息注入本群 chat_agent。
+    触发群号即当前群（Hook 所属群）。match_user_id 传 0 表示不限制触发人；
+    match_pattern 使用 Python 正则语法，长度不超过 200 字符。
+    触发成功后该成员会被加入本群会话 chat_peers，其后续消息继续参与对话。
+    每群最多 5 个启用 Hook；成功触发不会删除 Hook，只会更新运行状态，
+    只有显式调用 delete_hook 才会移除。
+    """
+    runtime = get_current_group_runtime()
+    requester_id = runtime.conversation.current_query_user_id
+    if requester_id is None or requester_id <= 0:
+        return "错误：无法确定 Hook 创建者。"
+    from ..hooks import get_store
+
+    try:
+        record = get_store().create_hook(
+            group_id=runtime.group_id,
+            name=name,
+            prompt=prompt,
+            created_by=requester_id,
+            trigger_type="message_match",
+            match_pattern=match_pattern,
+            match_user_id=match_user_id,
+        )
+    except Exception as exc:  # noqa: BLE001 - tool boundary returns safe text
+        return f"错误：创建消息触发 Hook 失败：{exc}"
+    user_scope = (
+        "任意成员" if not record["match_user_id"] else f"QQ {record['match_user_id']}"
+    )
+    return (
+        f"消息触发 Hook '{record['name']}' 已创建：群 {record['group_id']} 内 "
+        f"{user_scope} 的消息匹配 /{record['match_pattern']}/ 时立即触发。"
+    )
+
+
+@tool
 def list_hooks() -> str:
-    """列出当前群全部 Hook、运行状态、下次 heartbeat 与最近错误。"""
+    """列出当前群全部 Hook、触发方式、运行状态、下次 heartbeat 与最近错误。"""
     from ..hooks import get_store
     from ..hooks.executor import get_hook_next_run
 
@@ -1465,14 +1620,26 @@ def list_hooks() -> str:
         return "当前群没有 Hook。"
     lines = ["当前群 Hooks："]
     for record in records:
-        next_run = get_hook_next_run(int(record["id"]))
-        next_text = next_run.isoformat() if next_run is not None else "未调度"
+        if str(record.get("trigger_type") or "heartbeat") == "message_match":
+            user_scope = (
+                "任意成员" if not record["match_user_id"] else f"QQ {record['match_user_id']}"
+            )
+            trigger_text = (
+                f"消息匹配 | 触发人 {user_scope} | 正则 /{record['match_pattern']}/ | "
+                f"上次触发 {record['last_run_at'] or '无'}"
+            )
+        else:
+            next_run = get_hook_next_run(int(record["id"]))
+            next_text = next_run.isoformat() if next_run is not None else "未调度"
+            trigger_text = (
+                f"heartbeat | 间隔 {record['interval_seconds']}s | "
+                f"超时 {record['timeout_seconds']}s | 脚本 {record['script_path']} | "
+                f"下次 {next_text} | 上次退出码 {record['last_exit_code']}"
+            )
         error = str(record.get("last_error") or "无")
         lines.append(
             f"- {record['name']} | {'启用' if record['enabled'] else '停用'} | "
-            f"间隔 {record['interval_seconds']}s | 超时 {record['timeout_seconds']}s | "
-            f"脚本 {record['script_path']} | 下次 {next_text} | "
-            f"上次退出码 {record['last_exit_code']} | 连续失败 "
+            f"{trigger_text} | 连续失败 "
             f"{record['consecutive_failures']} | 最近错误 {error}"
         )
     return "\n".join(lines)
@@ -1486,8 +1653,14 @@ async def update_hook(
     interval_seconds: HookIntervalSeconds | None = None,
     timeout_seconds: HookTimeoutSeconds | None = None,
     enabled: StrictBool | None = None,
+    match_pattern: str | None = None,
+    match_user_id: MatchUserId | None = None,
 ) -> str:
-    """更新当前群一个 Hook 的脚本、提示词、间隔、超时或启用状态。"""
+    """更新当前群一个 Hook 的脚本、提示词、间隔、超时、启用状态或匹配规则。
+
+    heartbeat Hook 只能更新脚本相关字段；message_match Hook 只能更新
+    prompt、启用状态、match_pattern 与 match_user_id。"""
+
     runtime = get_current_group_runtime()
     from ..hooks import get_store
     from ..hooks.executor import (
@@ -1501,6 +1674,13 @@ async def update_hook(
     previous = store.get_hook_by_name(runtime.group_id, name)
     if previous is None:
         return f"错误：Hook '{name}' 不存在。"
+    if str(previous.get("trigger_type") or "heartbeat") == "message_match":
+        if script_path is not None:
+            return f"错误：Hook '{name}' 是消息触发类型，不支持 script_path。"
+        if interval_seconds is not None or timeout_seconds is not None:
+            return f"错误：Hook '{name}' 是消息触发类型，不支持间隔或超时。"
+    elif match_pattern is not None or match_user_id is not None:
+        return f"错误：Hook '{name}' 是 heartbeat 类型，不支持匹配字段。"
     changes: dict[str, Any] = {}
     if prompt is not None:
         changes["prompt"] = prompt
@@ -1510,6 +1690,10 @@ async def update_hook(
         changes["timeout_seconds"] = timeout_seconds
     if enabled is not None:
         changes["enabled"] = enabled
+    if match_pattern is not None:
+        changes["match_pattern"] = match_pattern
+    if match_user_id is not None:
+        changes["match_user_id"] = match_user_id
     execution_cancelled = False
     try:
         if script_path is not None:
@@ -1547,6 +1731,8 @@ async def update_hook(
                     "interval_seconds",
                     "timeout_seconds",
                     "enabled",
+                    "match_pattern",
+                    "match_user_id",
                 )
             }
             restored = store.update_hook(runtime.group_id, name, **rollback)
@@ -1852,6 +2038,7 @@ CHAT_TOOLS = [
     search_image,
     shell_executor,
     find_memory,
+    search_history_messages,
     view_image,
     generate_image,
     # generate_video,
@@ -1870,7 +2057,8 @@ CHAT_TOOLS = [
     skill_remove,
     skill_download,
     skill_create,
-    create_hook,
+    create_heartbeat_hook,
+    create_message_hook,
     list_hooks,
     update_hook,
     delete_hook,

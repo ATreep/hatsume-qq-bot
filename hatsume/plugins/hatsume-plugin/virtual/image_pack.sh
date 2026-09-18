@@ -36,29 +36,23 @@ sys.stdout.write(value)
 PY
 }
 
-load_optional_dotenv_value() {
-    local key="$1"
-    "${PYTHON_BIN}" - "${ENV_FILE}" "${key}" <<'PY'
-import sys
-from dotenv import dotenv_values
-
-env_file, key = sys.argv[1:]
-value = dotenv_values(env_file).get(key)
-if isinstance(value, str):
-    sys.stdout.write(value)
-PY
-}
-
 CLAWMAIL_API_KEY="$(load_dotenv_value CLAWMAIL_API_KEY)"
 DS_API_KEY="$(load_dotenv_value DS_API_KEY)"
-GH_TOKEN="$(load_optional_dotenv_value GH_TOKEN)"
-export CLAWMAIL_API_KEY DS_API_KEY GH_TOKEN
+GH_TOKEN="$(load_dotenv_value GH_TOKEN)"
+CODING_BASE_URL="$(load_dotenv_value CODING_BASE_URL)"
+CODING_MODEL_NAME="$(load_dotenv_value CODING_MODEL_NAME)"
+CODING_API_KEY="$(load_dotenv_value CODING_API_KEY)"
+export CLAWMAIL_API_KEY DS_API_KEY GH_TOKEN CODING_BASE_URL CODING_MODEL_NAME CODING_API_KEY
 DOCKER_BUILDKIT=1 docker build \
     --no-cache \
     --secret "id=clawmail_api_key,env=CLAWMAIL_API_KEY" \
     --secret "id=ds_api_key,env=DS_API_KEY" \
+    --secret "id=gh_token,env=GH_TOKEN" \
+    --secret "id=coding_base_url,env=CODING_BASE_URL" \
+    --secret "id=coding_model_name,env=CODING_MODEL_NAME" \
+    --secret "id=coding_api_key,env=CODING_API_KEY" \
     -t "${IMAGE_NAME}" \
     "${SCRIPT_DIR}/image"
 
-unset CLAWMAIL_API_KEY DS_API_KEY GH_TOKEN
+unset CLAWMAIL_API_KEY DS_API_KEY GH_TOKEN CODING_BASE_URL CODING_MODEL_NAME CODING_API_KEY
 docker save "${IMAGE_NAME}" | zstd -T0 -19 > "${ARCHIVE_PATH}"

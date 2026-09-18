@@ -28,6 +28,7 @@ class GroupRuntime:
     conversation: ConversationState = field(init=False)
     bot: Any = None
     graph_start_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    auxiliary_compaction_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     auxiliary_messages_queue: list[dict] = field(default_factory=list)
     auxiliary_source_queue: list[dict] = field(default_factory=list)

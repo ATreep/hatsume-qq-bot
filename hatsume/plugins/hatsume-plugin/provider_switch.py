@@ -1,15 +1,14 @@
-"""Provider auto-switching for the chat_agent model, driven by invocation latency.
+"""Global provider auto-switching for the standard language models.
 
 When a completed ``chat_agent`` invocation takes longer than
 ``SLOW_THRESHOLD_SECONDS``, the current provider is marked slow for
-``SLOW_COOLDOWN_SECONDS`` and the advance model switches to the next
-candidate that is not in its cooldown window. If every candidate is slow,
+``SLOW_COOLDOWN_SECONDS`` and all standard advanced/lite/mini model factories
+switch to the next candidate that is not in its cooldown window. If every candidate is slow,
 the selection stays put — the bot prefers one known-slow provider over
 flip-flopping between two of them.
 
 State is in-memory only: a restart resets the selection to the static
-``config.PROVIDER`` default. Only the advance model used by ``chat_agent``
-follows the dynamic selection; every other model keeps its fixed provider.
+``config.PROVIDER`` default. Explicit special-purpose providers remain fixed.
 """
 
 from __future__ import annotations
@@ -23,9 +22,15 @@ from . import config as _config
 # Provider-switch configuration lives in config.py with the other runtime
 # settings. Keep these aliases local so the state machine remains readable and
 # its public constants remain available to callers/tests.
-CANDIDATE_PROVIDERS = _config.CHAT_PROVIDER_SWITCH_CANDIDATES
-SLOW_THRESHOLD_SECONDS = _config.CHAT_PROVIDER_SWITCH_THRESHOLD_SECONDS
-SLOW_COOLDOWN_SECONDS = _config.CHAT_PROVIDER_SWITCH_COOLDOWN_SECONDS
+CANDIDATE_PROVIDERS = getattr(
+    _config, "CHAT_PROVIDER_SWITCH_CANDIDATES", ("ruoli", "waw")
+)
+SLOW_THRESHOLD_SECONDS = getattr(
+    _config, "CHAT_PROVIDER_SWITCH_THRESHOLD_SECONDS", 150.0
+)
+SLOW_COOLDOWN_SECONDS = getattr(
+    _config, "CHAT_PROVIDER_SWITCH_COOLDOWN_SECONDS", 3 * 60 * 60
+)
 
 
 class ProviderSwitcher:
@@ -121,9 +126,14 @@ _switcher = ProviderSwitcher(
 )
 
 
-def get_chat_provider() -> str:
-    """Return the provider the advance (chat_agent) model should use."""
+def get_model_provider() -> str:
+    """Return the provider used by standard advanced/lite/mini models."""
     return _switcher.current
+
+
+def get_chat_provider() -> str:
+    """Backward-compatible alias for the shared model provider."""
+    return get_model_provider()
 
 
 def report_chat_elapsed(
