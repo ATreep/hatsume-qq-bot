@@ -46,6 +46,10 @@ IsoWeekday = Annotated[int, Field(strict=True, ge=1, le=7)]
 MonthDay = Annotated[int, Field(strict=True, ge=1, le=31)]
 ImageSearchCount = Annotated[int, Field(strict=True, ge=1, le=10)]
 ImageOrientation = Literal["landscape", "portrait", "square"]
+HookIntervalSeconds = Annotated[int, Field(strict=True, ge=300)]
+HookTimeoutSeconds = Annotated[int, Field(strict=True, ge=1, le=60)]
+StrictBool = Annotated[bool, Field(strict=True)]
+MatchUserId = Annotated[int, Field(strict=True, ge=0)]
 
 
 class WeeklyTimePoint(TypedDict):
@@ -249,6 +253,107 @@ def find_memory(query: str) -> str:
     """
     print("Call query_memory tool:", query)
     return query_memory(query)
+
+
+@tool
+def search_history_messages(
+    keyword: str | None = None,
+    sender_qq_id: int | None = None,
+    start_time: str | None = None,
+    end_time: str | None = None,
+    limit: int = 20,
+) -> str:
+    """
+    检索本群（当前群聊）的历史聊天记录。
+
+    当用户询问以下内容时，使用此工具：
+    - 之前群里聊过什么、回忆某件事或某个话题
+    - 谁说过某句话、某人之前提到过什么
+    - 过去某段时间群里的讨论
+
+    ## 参数
+    - keyword: 关键词，对消息正文做模糊匹配。可省略。
+    - sender_qq_id: 只看某个 QQ 号的发言。可省略。
+      想看你自己（bot）的发言时，填入你的 QQ 号。
+    - start_time / end_time: 时间范围，格式 "YYYY-MM-DD HH:MM"。可省略。
+    - limit: 返回条数上限，默认 20，最大 50。
+
+    ## 注意
+    - 只能检索当前群，无法检索其他群。
+    - 结果按时间正序排列。
+    - 图片以沙箱路径内联（如 ![图片](/tmp/...)），该路径可能已失效。
+    """
+    from datetime import datetime
+
+    from ..message_db import (
+        MAX_SEARCH_LIMIT,
+        MessageValidationError,
+        get_store,
+        parse_local_time,
+    )
+
+    group_id = get_current_group_id()
+    if group_id is None:
+        return "错误：当前不在群聊上下文中，无法检索历史消息。"
+
+    if isinstance(limit, bool) or not isinstance(limit, int):
+        return "错误：limit 必须是整数。"
+    if limit < 1:
+        return "错误：limit 必须大于 0。"
+    effective_limit = min(limit, MAX_SEARCH_LIMIT)
+
+    cleaned_keyword: str | None = None
+    if isinstance(keyword, str) and keyword.strip():
+        cleaned_keyword = keyword.strip()
+
+    sender: int | None = None
+    if sender_qq_id is not None:
+        if (
+            isinstance(sender_qq_id, bool)
+            or not isinstance(sender_qq_id, int)
+            or sender_qq_id < 0
+        ):
+            return "错误：sender_qq_id 必须是有效的 QQ 号。"
+        sender = sender_qq_id
+
+    try:
+        start_ts = (
+            parse_local_time(start_time, "start_time") if start_time else None
+        )
+        end_ts = parse_local_time(end_time, "end_time") if end_time else None
+        if start_ts is not None and end_ts is not None and start_ts > end_ts:
+            return "错误：start_time 晚于 end_time。"
+        records = get_store().search_messages(
+            group_id,
+            keyword=cleaned_keyword,
+            sender_qq_id=sender,
+            start_time=start_ts,
+            end_time=end_ts,
+            limit=effective_limit,
+        )
+    except MessageValidationError as exc:
+        return str(exc)
+    except Exception as exc:
+        print(f"❌ search_history_messages failed: {exc}")
+        traceback.print_exc()
+        return "❌ 检索历史消息失败，请稍后再试。"
+
+    if not records:
+        return "本群没有符合条件的历史消息。"
+
+    lines: list[str] = []
+    for record in reversed(records):
+        stamp = datetime.fromtimestamp(record["created_at"]).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+        speaker = record["sender_name"] or str(record["sender_qq_id"])
+        lines.append(
+            f"[{stamp}] {speaker}({record['sender_qq_id']}): {record['content']}"
+        )
+
+    header = f"本群历史消息（返回 {len(records)} 条，按时间正序）："
+    footer = "提示：内容中的图片路径位于沙盒 /tmp，可能已失效，需要时请重新获取。"
+    return header + "\n" + "\n".join(lines) + "\n" + footer
 
 
 def _format_search_results(results: list[dict[str, Any]]) -> str:
@@ -474,7 +579,7 @@ async def view_image(image_url: str) -> str:
     ## 参数：
     - image_url: 图片地址，支持：
         1) HTTP/HTTPS 网络图片 URL
-        2) 容器内图片的 file:// 绝对路径，如 "file:///work/hatsume/image.png"
+        2) 容器内图片的 file:// 绝对路径，如 "file:///work/folder/image.png"
     """
     url = image_url.strip()
     if not url:
@@ -618,8 +723,8 @@ async def send_video(video_url: str) -> str:
     ## 参数：
     - video_url: 视频地址，支持
         1) HTTP/HTTPS URL
-        2) 容器文件绝对路径（如 "/work/hatsume/path/to/video.mp4"）
-        3) 容器 file:// 绝对路径（如 "file:///work/hatsume/path/to/video.mp4"）
+        2) 容器文件绝对路径（如 "/work/path/to/video.mp4"）
+        3) 容器 file:// 绝对路径（如 "file:///work/path/to/video.mp4"）
 
     ## 注意：
     - 每轮 ai_node 最多调用一次
@@ -767,7 +872,6 @@ async def shell_executor(shell: str, timeout: int) -> str:
 
     ## 约束：
     - 此工具无法执行交互式命令，如安装包时必须使用 `apt install -y` 或 `apt install --assume-yes`。
-    - /work/hatsume 是当前 Hatsume 源码仓库；修改前先 cd /work/hatsume 并读取适用的 AGENTS.md。
     - 只有你自己可以访问沙盒，用户无法访问沙盒。
     - 禁止将沙盒中的路径告诉用户。你必须通过描述、调用工具或上传到 GitHub 仓库的方式向用户展示沙盒中的文件。
     """
@@ -945,7 +1049,7 @@ async def create_todo(
     """创建一个待办事项。
 
     ## 简介
-    当“当前聊天记录”出现值得在未来条件满足时继续完成的事情，可以主动调用；
+    当“当前聊天记录”出现值得在未来某个客观条件满足时继续完成的事情时，你可以创建一个待办事项；
     禁止仅根据“背景聊天记录”创建。
     区分：如果用户希望设置提醒，且提醒触发的时机是某个事件而不是具体的时间，则使用 create_todo 而不是 create_xxx_timer。
 
@@ -1384,6 +1488,294 @@ def skill_create(content: str) -> str:
     return mgr.save_skill(name, content)
 
 
+# ---------------------------------------------------------------------------
+# Hook tools
+# ---------------------------------------------------------------------------
+@tool
+async def create_heartbeat_hook(
+    name: str,
+    script_path: str,
+    prompt: str,
+    interval_seconds: HookIntervalSeconds = 900,
+    timeout_seconds: HookTimeoutSeconds = 15,
+    notified_user_ids: list[int] | None = None,
+) -> str:
+    """注册当前群的持久化 heartbeat Hook。
+
+    当用要求「帮我监听某个外部事件」时，必须使用此类型 Hook，而不是消息匹配 Hook。
+    例如：
+    - 当你收到来自 XXX 的邮件时，向我发送提醒
+    - 当网站 XXX 上有新文章时，及时邮件通知我
+
+    调用前必须加载 `hook-authoring` Skill，让 coding_agent 在
+    `data/hatsume-plugin/hooks/` 写好可执行脚本并以验证模式试跑。
+    普通情况下必须拒绝无意义、应使用 Timer、或无法拆成快速增量检查的请求；
+    只有管理员明确坚持时可以绕过这个语义拒绝。无论谁请求，程序都强制
+    interval_seconds >= 300、1 <= timeout_seconds <= 60，且每群最多 5 个启用
+    Hook。未指定间隔时使用 900 秒，但应根据外部源成本主动选择更合理的间隔。
+
+    notified_user_ids 用于指定事件发生后需要被提醒的群成员 QQ 号；不需要指定时传空值
+    或空列表。仅传入明确需要被通知的用户，不要把群号或机器人 QQ 号放入此列表。
+
+    脚本 exit 0 表示无事件；exit 10 且 stdout 非空表示触发 chat_agent。
+    注册验证不会注入事件，也不得推进脚本游标。用户要求「群里有人说某类话时
+    反应」时不要写脚本，改用 `create_message_hook`。
+    """
+    runtime = get_current_group_runtime()
+    requester_id = runtime.conversation.current_query_user_id
+    if requester_id is None or requester_id <= 0:
+        return "错误：无法确定 Hook 创建者。"
+    from ..hooks import get_store
+    from ..hooks.executor import (
+        register_hook_job,
+        run_hook_script,
+        validate_hook_script_path,
+    )
+
+    try:
+        path = validate_hook_script_path(script_path, runtime.group_id)
+        result = await run_hook_script(
+            path,
+            timeout_seconds=timeout_seconds,
+            validation=True,
+        )
+        if result.error is not None:
+            return f"错误：Hook 脚本验证失败：{result.error}"
+        store = get_store()
+        record = store.create_hook(
+            group_id=runtime.group_id,
+            name=name,
+            script_path=str(path),
+            prompt=prompt,
+            interval_seconds=interval_seconds,
+            timeout_seconds=timeout_seconds,
+            created_by=requester_id,
+            notified_user_ids=notified_user_ids,
+        )
+        try:
+            register_hook_job(record, store)
+        except Exception:
+            store.delete_hook(runtime.group_id, str(record["name"]))
+            raise
+    except Exception as exc:  # noqa: BLE001 - tool boundary returns safe text
+        return f"错误：创建 Hook 失败：{exc}"
+    return (
+        f"Hook '{record['name']}' 已创建：每 {record['interval_seconds']} 秒检查一次，"
+        f"单次超时 {record['timeout_seconds']} 秒；"
+        f"通知用户：{record['notified_user_ids'] or '无'}。"
+    )
+
+
+@tool
+async def create_message_hook(
+    name: str,
+    prompt: str,
+    match_pattern: str,
+    match_user_id: MatchUserId = 0,
+) -> str:
+    """注册一个「用户消息匹配」触发方式的持久化 Hook。
+
+    当用户要求「群里有人说某类话时反应」时，必须使用此类型 Hook，而不是 heartbeat Hook。
+
+    与 heartbeat Hook 不同，此类型不运行脚本、不注册 APScheduler 间隔：
+    每当当前群收到新消息（不含机器人自己发送的消息）时，只要发送者匹配 match_user_id 且消息纯文本命中
+    match_pattern 正则，就立即把 prompt 与命中的消息注入本群 chat_agent。
+    触发群号即当前群（Hook 所属群）。match_user_id 传 0 表示不限制触发人；
+    match_pattern 使用 Python 正则语法，长度不超过 200 字符。
+    触发成功后该成员会被加入本群会话 chat_peers，其后续消息继续参与对话。
+    每群最多 5 个启用 Hook；成功触发不会删除 Hook，只会更新运行状态，
+    只有显式调用 delete_hook 才会移除。
+    """
+    runtime = get_current_group_runtime()
+    requester_id = runtime.conversation.current_query_user_id
+    if requester_id is None or requester_id <= 0:
+        return "错误：无法确定 Hook 创建者。"
+    from ..hooks import get_store
+
+    try:
+        record = get_store().create_hook(
+            group_id=runtime.group_id,
+            name=name,
+            prompt=prompt,
+            created_by=requester_id,
+            trigger_type="message_match",
+            match_pattern=match_pattern,
+            match_user_id=match_user_id,
+        )
+    except Exception as exc:  # noqa: BLE001 - tool boundary returns safe text
+        return f"错误：创建消息触发 Hook 失败：{exc}"
+    user_scope = (
+        "任意成员" if not record["match_user_id"] else f"QQ {record['match_user_id']}"
+    )
+    return (
+        f"消息触发 Hook '{record['name']}' 已创建：群 {record['group_id']} 内 "
+        f"{user_scope} 的消息匹配 /{record['match_pattern']}/ 时立即触发。"
+    )
+
+
+@tool
+def list_hooks() -> str:
+    """列出当前群全部 Hook、触发方式、运行状态、下次 heartbeat 与最近错误。"""
+    from ..hooks import get_store
+    from ..hooks.executor import get_hook_next_run
+
+    runtime = get_current_group_runtime()
+    records = get_store().list_hooks(runtime.group_id)
+    if not records:
+        return "当前群没有 Hook。"
+    lines = ["当前群 Hooks："]
+    for record in records:
+        if str(record.get("trigger_type") or "heartbeat") == "message_match":
+            user_scope = (
+                "任意成员" if not record["match_user_id"] else f"QQ {record['match_user_id']}"
+            )
+            trigger_text = (
+                f"消息匹配 | 触发人 {user_scope} | 正则 /{record['match_pattern']}/ | "
+                f"上次触发 {record['last_run_at'] or '无'}"
+            )
+        else:
+            next_run = get_hook_next_run(int(record["id"]))
+            next_text = next_run.isoformat() if next_run is not None else "未调度"
+            trigger_text = (
+                f"heartbeat | 间隔 {record['interval_seconds']}s | "
+                f"超时 {record['timeout_seconds']}s | 脚本 {record['script_path']} | "
+                f"下次 {next_text} | 上次退出码 {record['last_exit_code']} | "
+                f"通知用户 {record.get('notified_user_ids') or '无'}"
+            )
+        error = str(record.get("last_error") or "无")
+        lines.append(
+            f"- {record['name']} | {'启用' if record['enabled'] else '停用'} | "
+            f"{trigger_text} | 连续失败 "
+            f"{record['consecutive_failures']} | 最近错误 {error}"
+        )
+    return "\n".join(lines)
+
+
+@tool
+async def update_hook(
+    name: str,
+    script_path: str | None = None,
+    prompt: str | None = None,
+    interval_seconds: HookIntervalSeconds | None = None,
+    timeout_seconds: HookTimeoutSeconds | None = None,
+    enabled: StrictBool | None = None,
+    match_pattern: str | None = None,
+    match_user_id: MatchUserId | None = None,
+    notified_user_ids: list[int] | None = None,
+) -> str:
+    """更新当前群一个 Hook 的脚本、提示词、通知用户、间隔、超时、启用状态或匹配规则。
+
+    仅 heartbeat Hook 可更新 script_path、notified_user_ids、interval_seconds、timeout_seconds；
+    message_match Hook 只能更新 prompt、 启用状态、 match_pattern 与 match_user_id。"""
+
+    runtime = get_current_group_runtime()
+    from ..hooks import get_store
+    from ..hooks.executor import (
+        cancel_hook_execution,
+        register_hook_job,
+        run_hook_script,
+        validate_hook_script_path,
+    )
+
+    store = get_store()
+    previous = store.get_hook_by_name(runtime.group_id, name)
+    if previous is None:
+        return f"错误：Hook '{name}' 不存在。"
+    if str(previous.get("trigger_type") or "heartbeat") == "message_match":
+        if script_path is not None:
+            return f"错误：Hook '{name}' 是消息触发类型，不支持 script_path。"
+        if interval_seconds is not None or timeout_seconds is not None:
+            return f"错误：Hook '{name}' 是消息触发类型，不支持间隔或超时。"
+    elif match_pattern is not None or match_user_id is not None:
+        return f"错误：Hook '{name}' 是 heartbeat 类型，不支持匹配字段。"
+    if notified_user_ids is not None and str(previous.get("trigger_type") or "heartbeat") != "heartbeat":
+        return f"错误：Hook '{name}' 是消息触发类型，不支持被通知用户。"
+    changes: dict[str, Any] = {}
+    if prompt is not None:
+        changes["prompt"] = prompt
+    if interval_seconds is not None:
+        changes["interval_seconds"] = interval_seconds
+    if timeout_seconds is not None:
+        changes["timeout_seconds"] = timeout_seconds
+    if enabled is not None:
+        changes["enabled"] = enabled
+    if match_pattern is not None:
+        changes["match_pattern"] = match_pattern
+    if match_user_id is not None:
+        changes["match_user_id"] = match_user_id
+    if notified_user_ids is not None:
+        changes["notified_user_ids"] = notified_user_ids
+    execution_cancelled = False
+    try:
+        if script_path is not None:
+            path = validate_hook_script_path(script_path, runtime.group_id)
+            await cancel_hook_execution(int(previous["id"]))
+            execution_cancelled = True
+            validation_timeout = (
+                timeout_seconds
+                if timeout_seconds is not None
+                else int(previous["timeout_seconds"])
+            )
+            result = await run_hook_script(
+                path,
+                timeout_seconds=validation_timeout,
+                validation=True,
+            )
+            if result.error is not None:
+                register_hook_job(previous, store)
+                return f"错误：Hook 脚本验证失败：{result.error}"
+            changes["script_path"] = str(path)
+        if not changes:
+            return "错误：没有提供要更新的 Hook 字段。"
+        if script_path is None:
+            await cancel_hook_execution(int(previous["id"]))
+            execution_cancelled = True
+        updated = store.update_hook(runtime.group_id, name, **changes)
+        try:
+            register_hook_job(updated, store)
+        except Exception:
+            rollback = {
+                field: previous[field]
+                for field in (
+                    "script_path",
+                    "prompt",
+                    "interval_seconds",
+                    "timeout_seconds",
+                    "enabled",
+                    "match_pattern",
+                    "match_user_id",
+                    "notified_user_ids",
+                )
+            }
+            restored = store.update_hook(runtime.group_id, name, **rollback)
+            register_hook_job(restored, store)
+            raise
+    except Exception as exc:  # noqa: BLE001 - tool boundary returns safe text
+        if execution_cancelled:
+            try:
+                register_hook_job(previous, store)
+            except Exception:  # noqa: BLE001 - original failure is more relevant
+                print("⚠️ Unable to restore the previous Hook schedule")
+        return f"错误：更新 Hook 失败：{exc}"
+    return f"Hook '{updated['name']}' 已更新。"
+
+
+@tool
+async def delete_hook(name: str) -> str:
+    """删除当前群一个 Hook；保留脚本、游标及相邻配置文件。"""
+    runtime = get_current_group_runtime()
+    from ..hooks import get_store
+    from ..hooks.executor import cancel_hook_execution
+
+    store = get_store()
+    record = store.get_hook_by_name(runtime.group_id, name)
+    if record is None:
+        return f"错误：Hook '{name}' 不存在。"
+    await cancel_hook_execution(int(record["id"]))
+    store.delete_hook(runtime.group_id, name)
+    return f"Hook '{record['name']}' 已删除；脚本和状态文件已保留。"
+
+
 @tool
 async def membersearch(query: str) -> str:
     """
@@ -1424,143 +1816,6 @@ async def membersearch(query: str) -> str:
         return "未找到匹配的群成员。"
 
     return json.dumps(results, ensure_ascii=False)
-
-
-@tool(description="查询美股单只股票的实时报价。输入股票代码，返回名称、当前价格、涨跌幅、开盘价、最高/最低价和成交量。")
-def query_stock_quote(symbol: str) -> str:
-    """Query real-time quote for a single US stock by its ticker symbol."""
-    from .. import config
-
-    base_url = getattr(config, "STOCK_API_BASE", "http://43.143.209.38:5000")
-    url = f"{base_url.rstrip('/')}/api/data"
-    symbol_upper = str(symbol).strip().upper()
-    print(f"Query stock quote: {symbol_upper}")
-
-    try:
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-    except requests.exceptions.HTTPError as e:
-        status_code = e.response.status_code if e.response is not None else 0
-        print(f"Stock quote HTTP error: {status_code or 'unknown'}")
-        if status_code in (401, 403):
-            return "股票数据接口鉴权失败。"
-        if status_code == 429:
-            return "股票数据接口请求过于频繁，请稍后重试。"
-        if status_code:
-            return f"股票数据接口返回 HTTP {status_code}。"
-        return "股票数据接口返回了未知 HTTP 错误。"
-    except requests.exceptions.SSLError as e:
-        print(f"Stock quote SSL error: {e}")
-        return "股票数据接口无法验证 SSL 证书。"
-    except requests.exceptions.Timeout as e:
-        print(f"Stock quote timeout: {e}")
-        return "股票数据接口请求超时。"
-    except requests.exceptions.ConnectionError as e:
-        print(f"Stock quote connection error: {e}")
-        return "暂时无法连接股票数据接口。"
-    except requests.exceptions.InvalidJSONError as e:
-        print(f"Stock quote response error: {e}")
-        return "股票数据接口返回了无效数据。"
-    except requests.exceptions.RequestException as e:
-        print(f"Stock quote request error: {e}")
-        return "股票数据接口请求异常。"
-
-    quotes = data.get("quotes") if isinstance(data, dict) else None
-    if not isinstance(quotes, dict):
-        return "股票数据接口返回了无效数据。"
-
-    quote = quotes.get(symbol_upper)
-    if quote is None:
-        return f"未找到股票代码 {symbol_upper} 的报价信息。"
-
-    name = str(quote.get("name", symbol_upper))
-    price = quote.get("price")
-    change_percent = quote.get("changePercent")
-    open_price = quote.get("open")
-    high = quote.get("high")
-    low = quote.get("low")
-    volume = quote.get("volume")
-
-    def _fmt(val):
-        """Format a numeric value to 2 decimal places, or leave string/int untouched."""
-        if isinstance(val, bool):
-            return ""
-        if isinstance(val, float):
-            return f"{val:.2f}"
-        if val is not None:
-            return str(val)
-        return "暂无"
-
-    parts = [f"### {name}（{symbol_upper}）"]
-    parts.append(f"- **当前价格**：{_fmt(price)}")
-    parts.append(f"- **涨跌幅**：{_fmt(change_percent)}%")
-    parts.append(f"- **开盘价**：{_fmt(open_price)}")
-    parts.append(f"- **最高价**：{_fmt(high)}")
-    parts.append(f"- **最低价**：{_fmt(low)}")
-    vol_str = f"{volume:,}" if isinstance(volume, int) else str(volume) if volume is not None else "暂无"
-    parts.append(f"- **成交量**：{vol_str}")
-    return "\n".join(parts)
-
-
-@tool(description="搜索股票代码列表。根据关键词（股票名片段或行业板块名称）模糊匹配，返回最多 10 条匹配结果，每条包含 symbol、name 和 sector。")
-def stock_search(query: str) -> str:
-    """Search the stock universe by name substring or sector, returning up to 10 matches as JSON."""
-    import json
-
-    from .. import config
-
-    base_url = getattr(config, "STOCK_API_BASE", "http://43.143.209.38:5000")
-    url = f"{base_url.rstrip('/')}/api/stocks"
-    query_lower = str(query).strip().lower()
-    print(f"Search stocks: {query_lower!r}")
-
-    try:
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-    except requests.exceptions.SSLError as e:
-        print(f"Stock search SSL error: {e}")
-        return "股票数据接口无法验证 SSL 证书。"
-    except requests.exceptions.Timeout as e:
-        print(f"Stock search timeout: {e}")
-        return "股票数据接口请求超时。"
-    except requests.exceptions.ConnectionError as e:
-        print(f"Stock search connection error: {e}")
-        return "暂时无法连接股票数据接口。"
-    except requests.exceptions.InvalidJSONError as e:
-        print(f"Stock search response error: {e}")
-        return "股票数据接口返回了无效数据。"
-    except requests.exceptions.RequestException as e:
-        print(f"Stock search request error: {e}")
-        return "股票数据接口请求异常。"
-
-    stocks = data.get("stocks") if isinstance(data, dict) else None
-    if not isinstance(stocks, list):
-        return "股票数据接口返回了无效数据。"
-
-    query = query_lower.strip()
-    results = []
-    for stock in stocks:
-        if not isinstance(stock, dict):
-            continue
-        name = str(stock.get("name", "")).lower()
-        symbol = str(stock.get("symbol", "")).lower()
-        sector = str(stock.get("sector", "")).lower()
-        if query in name or query in symbol or query in sector:
-            results.append({
-                "symbol": stock.get("symbol"),
-                "name": stock.get("name"),
-                "sector": stock.get("sector"),
-            })
-        if len(results) >= 10:
-            break
-
-    if not results:
-        return f"未找到与 {query!r} 匹配的股票。"
-
-    return json.dumps(results, ensure_ascii=False)
-
 
 # ---------------------------------------------------------------------------
 # Agent dispatch tool
@@ -1795,6 +2050,7 @@ CHAT_TOOLS = [
     search_image,
     shell_executor,
     find_memory,
+    search_history_messages,
     view_image,
     generate_image,
     # generate_video,
@@ -1813,9 +2069,12 @@ CHAT_TOOLS = [
     skill_remove,
     skill_download,
     skill_create,
+    create_heartbeat_hook,
+    create_message_hook,
+    list_hooks,
+    update_hook,
+    delete_hook,
     membersearch,
-    query_stock_quote,
-    stock_search,
     agent_dispatch,
     respond_to_shell_prompt,
     create_character_proxy,
@@ -1833,4 +2092,7 @@ def get_chat_tools() -> list[Any]:
         if get_character_proxy() is None
         else create_character_proxy
     )
-    return [tool_item for tool_item in CHAT_TOOLS if tool_item is not unavailable]
+    from ..mcp.tools import get_mcp_management_tools
+
+    builtins = [tool_item for tool_item in CHAT_TOOLS if tool_item is not unavailable]
+    return builtins + get_mcp_management_tools()

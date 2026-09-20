@@ -19,6 +19,7 @@ def _get_int_env(name: str) -> int:
 # Bot identity
 # ---------------------------------------------------------------------------
 BOT_QQ_ID: int = _get_int_env("BOT_QQ_ID")
+BOT_DISPLAY_NAME: str = "初芽"
 AGENT_QQ_EMAIL = os.getenv("AGENT_QQ_EMAIL", "")
 ADMIN_QQ_ID: str = os.getenv("ADMIN_QQ_ID", "")
 GITHUB_ACCOUNT = os.getenv("GITHUB_ACCOUNT", "")
@@ -44,7 +45,6 @@ ALI_API_KEY: str = os.environ.get("ALI_API_KEY", "")
 # ---------------------------------------------------------------------------
 # External service URLs
 # ---------------------------------------------------------------------------
-STOCK_API_BASE: str = os.environ.get("STOCK_API_BASE", "http://43.143.209.38:5000")
 
 # ---------------------------------------------------------------------------
 # Base URLs (No `v1` suffix)
@@ -62,7 +62,7 @@ AR_BASE_URL = "https://agentrouter.org"
 RUOLI_BASE_URL = "https://ruoli.dev"
 PEXELS_BASE_URL = "https://api.pexels.com"
 WAWAPI_BASE_URL = "https://wawapii.com"
-ALI_BASE_URL = "https://ws-1h26pj40tzf8hqys.cn-beijing.maas.aliyuncs.com/compatible-mode"
+ALI_BASE_URL = os.environ.get("ALI_BASE_URL", "") 
 
 
 # ---------------------------------------------------------------------------
@@ -70,9 +70,9 @@ ALI_BASE_URL = "https://ws-1h26pj40tzf8hqys.cn-beijing.maas.aliyuncs.com/compati
 # ---------------------------------------------------------------------------
 DOUBAO_2_LITE: str = "doubao-seed-2-0-lite"
 DOUBAO_2_MINI: str = "doubao-seed-2-0-mini"
-DEEPSEEK_V4_FLASH_FREE = "deepseek-v4-flash-free"
+DEEPSEEK_FLASH = "deepseek-flash"
 MIMO_2_5_FREE = "mimo-v2.5-free"
-DEEPSEEK_V4_FLASH = "deepseek-v4-flash"
+DEEPSEEK_V4_1_FLASH = "deepseek-v4.1-flash"
 SEEDREAM_5_0_LITE: str = "doubao-seedream-5.0-lite"
 SEEDREAM_4_0 = "doubao-seedream-4-0-250828"
 SEEDANCE_1_5: str = "doubao-seedance-1-5-pro-251215"
@@ -81,15 +81,16 @@ GPT_IMAGE_2 = "gpt-image-2:stable"
 GPT_5_6_LUNA = "gpt-5.6-luna"
 GPT_5_6_TERRA = "gpt-5.6-terra"
 GPT_5_5 = "gpt-5.5"
-GEMINI_3_5_FLASH = "gemini-3.5-flash"
-GEMINI_3_7_FLASH = "gemini-3.7-flash"
-GROK_4_5 = "grok-4.5"
+GEMINI_3_8_FLASH = "gemini-3.8-flash"
+GROK_4_6 = "grok-4.6"
 GROK_IMAGINE_IMAGE = "grok-imagine-image:stable"
 LAGUNA_S_2_1_FREE = "laguna-s-2.1-free"
 QWEN_3_7_FLASH = "qwen3.7-flash"
+QWEN_3_8_FLASH = "qwen3.8-flash"
+JEV_1_13 = "jev-1.13-free"
 
-ADVANCE_MODEL_NAME: str = GEMINI_3_7_FLASH
-LITE_MODEL_NAME =  GEMINI_3_7_FLASH
+ADVANCE_MODEL_NAME: str = QWEN_3_8_FLASH 
+LITE_MODEL_NAME: str =  QWEN_3_7_FLASH
 
 
 # ---------------------------------------------------------------------------
@@ -100,10 +101,13 @@ EMBEDDING_MODEL: str = "BAAI/bge-m3"
 # ---------------------------------------------------------------------------
 # Provider selection
 # ---------------------------------------------------------------------------
-PROVIDER: Literal["volc", "volc_plan", "kege", "zhth", "ar", "ruoli", "ds", "waw", "ali"] = "ruoli"
+PROVIDER: Literal["volc", "volc_plan", "kege", "zhth", "ar", "ruoli", "ds", "waw", "ali"] = "ali"
+CHAT_PROVIDER_SWITCH_CANDIDATES: tuple[str, ...] = ("ali",)
+CHAT_PROVIDER_SWITCH_THRESHOLD_SECONDS: float = 150.0
+CHAT_PROVIDER_SWITCH_COOLDOWN_SECONDS: float = 3 * 60 * 60
 
 def get_base_url(
-    provider: Literal["volc", "volc_plan", "sf", "kege", "zhth", "ar", "ruoli", "ds", "waw"] = PROVIDER,
+    provider: Literal["volc", "volc_plan", "sf", "kege", "zhth", "ar", "ruoli", "ds", "waw", "ali"] = PROVIDER,
 ) -> str:
     match provider:
         case "volc_plan":
@@ -168,7 +172,7 @@ MAX_FORWARD_DEPTH: int = 3
 MAX_REAL_AT_SEGMENTS: int = 3
 FORWARD_API_TIMEOUT_SECONDS: int = 10
 LONG_MSG_THRESHOLD: int = 500
-POKE_GROUP_WHITELIST: frozenset[int] = frozenset({738458661})
+POKE_GROUP_WHITELIST: frozenset[int] = frozenset({})
 
 # ---------------------------------------------------------------------------
 # Chat tone (runtime personality layer)
@@ -179,7 +183,7 @@ LIVELY_TONE_ENABLED: bool = True
 # Todo list
 # ---------------------------------------------------------------------------
 TODO_MAX_ITEMS: int = 15
-TODO_EXPIRY_SECONDS: int = 48 * 60 * 60
+TODO_EXPIRY_SECONDS: int = 72 * 60 * 60
 
 # ---------------------------------------------------------------------------
 # Auto response timer
@@ -216,17 +220,27 @@ TIMER_MAX_FREQUENCY_POINTS: int = 5
 TIMER_MAX_EXACT_POINTS: int = 10
 
 # ---------------------------------------------------------------------------
-# Learning evolution
-# ---------------------------------------------------------------------------
-# 单次读取记忆上限（条）与最近记忆窗口（小时）。
-LEARN_EVOLVE_MEMORY_LIMIT: int = 100
-LEARN_EVOLVE_WINDOW_HOURS: int = 24
-
-# ---------------------------------------------------------------------------
 # Skill module
 # ---------------------------------------------------------------------------
 SKILLS_DIR: Path = Path(__file__).resolve().parents[3] / "data" / "hatsume-plugin" / "skills"
 COMMON_SKILLS_DIR: Path = SKILLS_DIR
 GROUP_SKILLS_DIR: Path = SKILLS_DIR / "groups"
+
+# MCP server definitions are JSON files, isolated by QQ group in the same
+# fashion as group-local Skills.  The directory is intentionally separate from
+# the Skill tree so MCP credentials and lifecycle state have an independent
+# ownership boundary.
+MCP_DIR: Path = Path(__file__).resolve().parents[3] / "data" / "hatsume-plugin" / "mcp"
+MCP_GROUPS_DIR: Path = MCP_DIR / "groups"
+
+# ---------------------------------------------------------------------------
+# Hook module
+# ---------------------------------------------------------------------------
+HOOKS_DIR: Path = Path(__file__).resolve().parents[3] / "data" / "hatsume-plugin" / "hooks"
+HOOK_MAX_ACTIVE_PER_GROUP: int = 5
+HOOK_MIN_INTERVAL_SECONDS: int = 300
+HOOK_DEFAULT_INTERVAL_SECONDS: int = 900
+HOOK_DEFAULT_TIMEOUT_SECONDS: int = 15
+HOOK_MAX_TIMEOUT_SECONDS: int = 60
 
 CONTAINER_NAME_BASE = "hatsume-space"

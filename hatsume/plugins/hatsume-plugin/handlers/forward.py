@@ -12,7 +12,7 @@ from nonebot.adapters.onebot.v11 import Message
 
 from ..config import FORWARD_API_TIMEOUT_SECONDS, MAX_FORWARD_DEPTH
 from ..utils import message_to_json
-from .qqface import render_qqface
+from ..qq_emoji import render_qqface
 
 logger = logging.getLogger(__name__)
 

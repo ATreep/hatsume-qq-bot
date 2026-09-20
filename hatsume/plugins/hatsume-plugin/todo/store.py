@@ -198,7 +198,7 @@ class TodoStore:
         return max(cursor.rowcount, 0)
 
     def delete_expired(self, *, now: float | None = None) -> int:
-        """Hard-delete all items at or beyond the 48-hour boundary."""
+        """Hard-delete all items at or beyond the 72-hour boundary."""
         effective_now = time.time() if now is None else now
         with self.transaction() as conn:
             return self._delete_expired_with_connection(conn, now=effective_now)

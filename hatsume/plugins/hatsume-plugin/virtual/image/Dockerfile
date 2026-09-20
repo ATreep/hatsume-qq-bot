@@ -2,10 +2,6 @@
 
 FROM ubuntu:26.04
 
-ARG CLAWMAIL_API_KEY
-ARG DS_API_KEY
-ARG GH_TOKEN
-
 ENV DEBIAN_FRONTEND=noninteractive
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
@@ -89,29 +85,40 @@ RUN pip3 config set global.index-url \
 
 RUN npm install -g @anthropic-ai/claude-code
 
-RUN npm install -g @tencent-qqmail/agently-cli \
-    && npm install -g --force @clawemail/mail-cli
+RUN npm install -g --force @clawemail/mail-cli
 
-RUN install -d -m 700 /root/.config/hatsume \
+RUN --mount=type=secret,id=coding_api_key,required=true \
+    --mount=type=secret,id=coding_base_url,required=true \
+    --mount=type=secret,id=coding_model_name,required=true \
+    --mount=type=secret,id=clawmail_api_key,required=true \
+    --mount=type=secret,id=gh_token,required=true \
+    install -d -m 700 /root/.config/hatsume \
     && install -d -m 755 /etc/hatsume \
     && if ! mail-cli auth apikey set \
-        "${CLAWMAIL_API_KEY}" > /dev/null 2>&1; then \
+        "$(cat /run/secrets/clawmail_api_key)" > /dev/null 2>&1; then \
         echo 'Failed to configure mail-cli API authentication.' >&2; \
         exit 1; \
     fi \
-    && mail-cli auth login --user hatsume@claw.163.com
+    && mail-cli auth login --user hatsume@claw.163.com \
+    && { \
+        printf 'export ANTHROPIC_AUTH_TOKEN=%q\n' "$(cat /run/secrets/coding_api_key)"; \
+        printf 'export GH_TOKEN=%q\n' "$(cat /run/secrets/gh_token)"; \
+        printf 'export ANTHROPIC_BASE_URL=%q\n' "$(cat /run/secrets/coding_base_url)"; \
+        printf 'export ANTHROPIC_MODEL=%q\n' "$(cat /run/secrets/coding_model_name)"; \
+        printf 'export ANTHROPIC_DEFAULT_OPUS_MODEL=%q\n' "$(cat /run/secrets/coding_model_name)"; \
+        printf 'export ANTHROPIC_DEFAULT_SONNET_MODEL=%q\n' "$(cat /run/secrets/coding_model_name)"; \
+        printf 'export ANTHROPIC_DEFAULT_HAIKU_MODEL=%q\n' "$(cat /run/secrets/coding_model_name)"; \
+        printf 'export CLAUDE_CODE_SUBAGENT_MODEL=%q\n' "$(cat /run/secrets/coding_model_name)"; \
+    } > /etc/hatsume/bash_env \
+    && chmod 600 /etc/hatsume/bash_env
 
-ENV PATH="/root/.local/bin:${PATH}" \
+ENV HOME="/root"
+
+ENV TZ="Asia/Shanghai" \
+    PATH="/work/hatsume/.container:/root/.local/bin:${PATH}" \
     BASH_ENV="/etc/hatsume/bash_env" \
-    ANTHROPIC_BASE_URL="https://api.deepseek.com/anthropic" \
-    ANTHROPIC_MODEL="deepseek-v4-flash" \
-    ANTHROPIC_DEFAULT_OPUS_MODEL="deepseek-v4-flash" \
-    ANTHROPIC_DEFAULT_SONNET_MODEL="deepseek-v4-flash" \
-    ANTHROPIC_DEFAULT_HAIKU_MODEL="deepseek-v4-flash" \
-    ANTHROPIC_AUTH_TOKEN="${DS_API_KEY}" \
-    CLAUDE_CODE_SUBAGENT_MODEL="deepseek-v4-flash" \
     CLAUDE_CODE_EFFORT_LEVEL="high" \
     CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS="0" \
-    GH_TOKEN="${GH_TOKEN}"
+    CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT="1"
 
 WORKDIR /work

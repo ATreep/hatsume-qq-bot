@@ -4,7 +4,7 @@
 
 ## 1. 功能总览
 
-Hatsume 是一个 Python 3.12+ 的 NoneBot2 插件，通过 OneBot V11 接入 QQ 群聊。插件在 `hatsume-containerization` 容器的单个 Bot 进程内运行，源码位于 `/work/hatsume`，LangGraph 管理多轮对话，SQLite 保存长期记忆元数据与定时任务，Milvus Lite 保存记忆向量；外部边界包括 OneBot、模型和媒体供应商、网络搜索与 macOS Photos。
+Hatsume 是一个 Python 3.12+ 的 NoneBot2 插件，通过 OneBot V11 接入 QQ 群聊。插件在 `hatsume-containerization` 容器的单个 Bot 进程内运行，源码位于 `/work/hatsume`，LangGraph 管理多轮对话，SQLite 保存长期记忆元数据、定时任务与按群 Hook，Milvus Lite 保存记忆向量；外部边界包括 OneBot、模型和媒体供应商、网络搜索与 macOS Photos。
 
 ~~~mermaid
 flowchart LR
@@ -35,16 +35,18 @@ flowchart LR
 | 多轮对话 | @机器人、提及“初芽 / hatsume / 出芽” | 每群一个串行 LangGraph；不同群的图可并行运行 | group_runtime.py、handlers/dialogue.py、graph/builder.py、graph/nodes.py |
 | 群聊旁听上下文 | 不属于当前 chat_peers 的群消息 | 持续保留为辅助上下文，超限时压缩 | handlers/dialogue.py、graph/nodes.py |
 | 回复消息解析 | QQ 回复消息 | 保存被回复者、文本、图片和合并转发摘要 | handlers/dialogue.py |
+| Agent 定向发言入聊 | chat_agent 输出 `[reply: <message_id>]` 或 `[CQ:at,qq=...]` | 被回复者与被 @ 的成员立即加入本群 chat_peers，其后续消息进入主对话而非辅助上下文 | graph/nodes.py、state.py |
 | 合并转发解析 | QQ 合并转发消息 | 兼容 OneBot 标准与常见厂商变体，递归解析嵌套节点并保留发送者 | handlers/forward.py |
-| 图片理解输入 | 普通消息或回复中的图片 | 下载并校验后按消息 ID 与图片顺序保存到沙盒，JSON 内记录绝对路径；合并转发仍保留临时 URL | handlers/dialogue.py、infra.py |
+| 图片理解输入 | 普通消息或回复中的图片 | 下载并校验后按消息 ID 与图片顺序保存到沙盒，JSON 内记录绝对路径；当前普通消息同时附加多模态图片块，合并转发仍保留临时 URL | handlers/dialogue.py、infra.py |
 | 长文本与 Markdown 图片化 | AI 回复超过阈值或含富 Markdown | 渲染标题、代码、表格和公式，并额外保留可点击链接 | utils/md_to_image.py |
 | 长期记忆写入 | 模型输出一个或多个 `[memory: ... MEMORYCONTENTEND, keyman: ...]` 记忆卡 | 逐卡提取正文与可选关联 QQ，按当前群写入 SQLite 与 Milvus | graph/nodes.py、memory/engine.py |
 | 长期记忆检索 | 每轮自动检索或 find_memory | 只检索当前群；SQLite LIKE 优先，临时 BM25 与 Milvus/BGE-M3 补足 | graph/tools.py、memory/engine.py、memory/vector_store.py、memory/tokenizer.py |
 | 群内角色代理 | create_character_proxy、/proxy；群成员 @ 被代理用户或在对话中提到其昵称/外号 | 每群至多一个 RAM 代理；画像、外号和超时互不共享 | character_proxy.py、handlers/dialogue.py、graph/nodes.py |
 | 记忆协调与清理 | 显式协调命令、启动、每日 04:30 | 按当前 SQLite `group_id` 只读补齐 Milvus；同步清理 150 天前的 SQLite/Milvus 记录 | memory/engine.py、memory/vector_store.py、scripts/migrate_memory_vectors.py |
-| 学习进化 | 每日上海时间 00:00；管理员 `/learn-evolve [群号]` | 手动无参数读取全部群近 24 小时记忆，指定群号时只读取该群，并注入命令所在群 chat_agent；自动任务按已激活且有 Bot 路由的群分别读取和注入。chat_agent 从记忆中选择一个方向并加载 `self-evolution` Skill 实施，不创建独立进化 Agent | evolution.py、memory/engine.py、prompts.py、graph/nodes.py、handlers/tools.py、`__init__.py` |
 | 联网搜索 | web_search | Keenable 搜索（免 key 公共端点），失败或空结果时回退 DuckDuckGo，两者都失败返回提示 | graph/tools.py |
 | QQ 头像 | get_avatar | 返回指定 QQ 号的头像 URL | graph/tools.py、`utils/__init__.py` |
+| 股票报价查询 | query_stock_quote | 调用外部美股模拟盘 Tracker API 查询单股实时报价（价格、涨跌幅、成交量等） | graph/tools.py、config.py |
+| 股票代码搜索 | stock_search | 模糊搜索全部股票列表，按名称、代码或板块过滤，返回最多 10 条结果 | graph/tools.py、config.py |
 | 图片查看 | view_image | 使用 ZHTH 的 `GPT_5_6_LUNA` 专用客户端描述 HTTP/HTTPS 或沙盒 file:// 图片 | graph/tools.py、models.py、infra.py |
 | 随机 ACG 图片 | 白名单群戳一戳 | 从 macOS Photos 的 ACG 相册导出并直接发送；非白名单群静默返回 | handlers/tools.py |
 | 图片发送 | send_image | 支持 HTTP、base64 和沙盒 file:// 文件，每轮最多三张 | graph/tools.py |
@@ -53,7 +55,7 @@ flowchart LR
 | 视频生成 | generate_video | Seedance 1.0/1.5 文生视频或图生视频，并轮询任务结果；聊天工具返回 URL，由 send_video 发送 | graph/tools.py、models.py |
 | 高级模型切换 | 管理员 /model [模型名] | 查看或切换当前进程的高级模型名，不改变供应商、Base URL 或 API Key | handlers/tools.py、models.py、config.py |
 | ADMIN MODE | `ADMIN_QQ_ID` 本人发送含大写 `BYPASS` 的普通消息 | 程序校验顶层发送者和当前消息正文；本轮 chat_agent 保持当前高级模型、防御性移除历史 `image_url`/`img_url` 输入段并注入完整沙盒操作授权，下一轮恢复未过滤输入 | graph/nodes.py、models.py、prompts.py |
-| 本地 Shell | 管理员 /ccsh、/cc 或 shell_executor | 在当前 `hatsume-containerization` 的 `/work/hatsume` 执行；进程、计数和延迟逻辑停用按群隔离 | handlers/tools.py、graph/tools.py、infra.py |
+| 本地 Shell | 管理员 /ccsh、/cc 或 shell_executor | 在当前 `hatsume-containerization` 的 `/work` 执行，home 为 `/root`，源码位于 `/work/hatsume`；进程、计数和延迟逻辑停用按群隔离 | handlers/tools.py、graph/tools.py、infra.py |
 | 后台长任务 | agent_dispatch(background_shell, ...) | 后台运行长时间或交互式命令，周期判断继续、通知、输入、结束或终止 | graph/agents.py、infra.py |
 | 编码 Agent | agent_dispatch(coding_agent, ...) | 使用代码模型与 Shell、Skill、搜索、图像工具处理复杂开发任务 | graph/agents.py、prompts.py |
 | Agent 通知 | 后台 Agent 中间输出或完成 | 注入当前对话；无活跃对话时为目标群启动新图 | graph/tools.py、graph/nodes.py、handlers/dialogue.py |
@@ -61,16 +63,20 @@ flowchart LR
 | 定时任务创建 | daily、weekly、monthly、at 四个聊天工具 | 频率任务每周期最多 5 个 `HH:MM:SS` 时间点、正整数间隔且由结束时间限定；用户未指定结束时间时 Agent 按任务语义选择有限边界且创建后告知用户；指定时刻最多 10 个 | graph/tools.py、timer/schedule.py、timer/store.py |
 | 定时任务管理 | /timer 或聊天工具 | 按群显示完整频率规则或全部指定时刻，支持删除；命令更新兼容为最多 10 个指定时刻 | handlers/tools.py、graph/tools.py |
 | 定时任务恢复与清理 | Bot 连接完成、每日 03:00 | 恢复原生 point 作业、补偿五分钟内漏触发，并清理已完成普通任务 | `timer/__init__.py`、timer/executor.py |
-| 群聊待办 | create_todo、mark_todo、/todo、每轮自动检查 | 每群最多 15 条，当前聊天可触发主动创建；/todo 显示当前群全部活动项；48 小时过期，条件满足后删除并 @ 发起人 | handlers/tools.py、graph/tools.py、graph/nodes.py、prompts.py、todo/ |
+| 群聊待办 | create_todo、mark_todo、/todo、每轮自动检查 | 每群最多 15 条，当前聊天可触发主动创建；/todo 显示当前群全部活动项；72 小时过期，条件满足后删除并 @ 发起人 | handlers/tools.py、graph/tools.py、graph/nodes.py、prompts.py、todo/ |
 | 自动回复 | auto_response 记录或 /autoresponse | activated-group 集合中每个非黑名单群各自主动参与话题并独立排期；每 30 分钟至 2 小时续排，02:00 至 06:00 只推进不注入 | memory/、timer/、prompts.py |
+| Heartbeat Hook | create_heartbeat_hook / update_hook | Agent 编写按群增量脚本；APScheduler 至少每 300 秒运行，exit 10 + stdout 通过专属 Hook 标记注入目标群 chat_agent | hooks/、graph/tools.py、graph/nodes.py |
+| 消息匹配 Hook | create_message_hook / update_hook | 记录群号、触发人 QQ 与正则；每轮 user_chat 收到新消息且纯文本命中时，直接把 prompt 与命中消息注入目标群 chat_agent，并把触发者加入该群 chat_peers | hooks/、handlers/dialogue.py、graph/tools.py、graph/nodes.py |
 | 新成员欢迎 | activated group 的 OneBot `group_increase` 事件 | 激活新成员 peer，并向现有图注入欢迎任务或在无对话时启动新图 | memory/、handlers/dialogue.py |
 | Skill 加载 | /skills [群号]、skill_loader | 公共只读 Skill 加群本地 Skill；缓存按群隔离，每次调用返回完整内容 | skills/ |
 | Skill 增删 | skill_create、skill_download、skill_remove | 只修改 `SKILLS_DIR/groups/<group-id>`；公共同名 Skill 不可覆盖或删除 | graph/tools.py、skills/manager.py |
 | 群成员搜索 | /membersearch 或 membersearch | 昵称和群名片子串优先，再按字符重叠排序；缓存五分钟 | handlers/tools.py、`utils/__init__.py` |
-| 点赞与排行榜 | “赞我 / 互赞 / 点赞”、/likerank [群号] | 点赞计数和榜单按群隔离；跨群查看仅管理员 | handlers/social.py |
+| 点赞与排行榜 | “赞我 / 互赞 / 点赞”、/likerank [群号] | QQ 账号点赞计数和榜单按群隔离；跨群查看仅管理员 | handlers/social.py |
 | 凭证脱敏 | AI 文本回复与直接群发文本 | 遮盖常见 API Key 和 Token 形式 | utils/security.py、handlers/dialogue.py |
 | 运行时重置 | 管理员 /resetsandbox [群号] | 取消目标群 Agent/进程/stdin，并只移除该群逻辑进程状态，不停止 bot 容器 | handlers/tools.py、infra.py、graph/agents.py |
 | Agent 监控 | /agents [群号] | 列出目标群运行中的 Agent；跨群查看仅管理员 | handlers/tools.py、graph/agents.py |
+| Hook 查看 | /hooks [群号] | 列出目标群全部 Hook、触发方式、状态、脚本或匹配规则、调度与最近错误；跨群查看仅管理员 | handlers/tools.py、hooks/ |
+| APScheduler 查看 | 管理员 /aps | 列出当前进程注册的全部 APScheduler job、trigger 与下次运行时间 | handlers/tools.py |
 
 ## 2. 用户命令与消息触发
 
@@ -94,13 +100,14 @@ flowchart LR
 | /membersearch <关键词> | 所有人 | 模糊搜索当前群成员，最多返回五个 | handlers/tools.py |
 | /likerank [群号] | 所有人；跨群仅管理员 | 展示目标群累计点赞前十名 | handlers/social.py |
 | /agents [群号] | 所有人；跨群仅管理员 | 展示目标群正在运行的后台 Agent | handlers/tools.py |
+| /hooks [群号] | 所有人；跨群仅管理员 | 无参数列出当前群全部 Hook（触发方式、状态、脚本或匹配规则、下次运行/上次触发）；管理员可指定群号查看其他群 | handlers/tools.py |
+| /aps | 管理员 | 列出当前 APScheduler 注册的全部任务、触发器和下次运行时间 | handlers/tools.py |
 | /todo [群号] | 所有人；跨群仅管理员 | 无参数列出当前群全部活动待办；管理员可指定群号查看其他群 | handlers/tools.py |
 | /model [模型名] | 管理员 | 无参数查看高级模型；有参数时只切换当前进程使用的模型名 | handlers/tools.py |
-| /ccsh <命令>、/cc <命令> | 管理员 | 在 bot 容器 `/work/hatsume` 执行 Shell | handlers/tools.py |
+| /ccsh <命令>、/cc <命令> | 管理员 | 在 bot 容器 `/work` 执行 Shell，home 为 `/root` | handlers/tools.py |
 | /resetsandbox [群号] | 仅管理员 | 取消目标群已有 Agent、进程和 stdin；无参数为当前群 | handlers/tools.py |
 | /proxy create <QQ号> [分钟]、/proxy terminate、/proxy status | 所有人 | 创建、终止或查看当前群 RAM 角色代理、完整角色 Prompt 与自动结束时间 | handlers/tools.py、graph/tools.py |
-| /autoresponse [提示词] | 管理员 | 在命令所在群一次性调试自动回复，不写数据库 | handlers/tools.py |
-| /learn-evolve [群号] | 管理员 | 无参数读取全部群最近 24 小时记忆；指定正整数群号时只读取该群。记忆任务始终注入命令所在群 chat_agent，选择一个进化方向后按 `self-evolution` Skill 实施 | handlers/tools.py、evolution.py、graph/nodes.py |
+| /autoresponse | 管理员 | 查看各群自动回复定时任务的下次触发时间（上海时间），只读不改排期 | handlers/tools.py |
 | 赞我、互赞、点赞 | 所有人 | 尝试点赞至当日接口上限 | handlers/social.py |
 | 戳一戳机器人 | `POKE_GROUP_WHITELIST` 中的群 | 从 macOS Photos 的 ACG 相册发送随机图片；其他群静默忽略 | handlers/tools.py |
 | 新成员加入 activated group | 新成员 | 获取群名片与头像，要求机器人 at 欢迎、自我介绍并说明其他能力 | handlers/dialogue.py |
@@ -137,7 +144,7 @@ sequenceDiagram
 
 ### 3.2 消息标准化
 
-handlers/dialogue.py 的 get_human_message() 把 OneBot 事件转换为单个统一 JSON 文本块：
+handlers/dialogue.py 的 get_human_message() 把 OneBot 事件转换为统一 JSON 文本块，并为当前普通消息中的图片附加多模态内容块：
 
 1. 查询群名片或昵称，加入消息来源人员。
 2. 解析回复中的发送者、文本、图片、QQ 系统表情和合并转发摘要。
@@ -156,9 +163,9 @@ handlers/dialogue.py 的 get_human_message() 把 OneBot 事件转换为单个统
 ~~~
 
 5. `message_id` 只出现在真实收到的顶层普通消息或顶层合并转发中。合并转发内部节点、`reply_to`、AI 历史和系统合成消息不包含该字段；顶层合并转发仍可作为一个整体被回复。
-6. 普通消息、回复和合并转发中的 OneBot `face` 段按 QQ 系统表情 ID 转成 `[qqface: 描述]`；未知 ID 不写入模型文本。
+6. 普通消息、回复和合并转发中的 OneBot `face` 段按共享 QQ 系统表情 ID 映射转成 `[qqface: 描述]`；未知 ID 不写入模型文本。
 7. 合并转发生成 type=forward 和递归 messages 数组。
-8. 当前普通消息中的图片会同步下载，按实际格式校验 9 MiB 与 3600 万像素限制，再用事件的显式 `group_id` 保存到该群沙盒 `/tmp/hatsume-user-images/<message_id>-<从1开始的图片序号>.<实际扩展名>`；JSON 在原图片段位置写入 `![图片](<绝对路径>)`，不再附加 `image_url` 或 `img_url` 多模态块。
+8. 当前普通消息中的图片会同步下载，按实际格式校验 9 MiB 与 3600 万像素限制，再用事件的显式 `group_id` 保存到该群沙盒 `/tmp/hatsume-user-images/<message_id>-<从1开始的图片序号>.<实际扩展名>`；JSON 在原图片段位置写入 `![图片](<绝对路径>)`，并按图片段顺序附加使用同一份已校验字节生成的 `image_url` data URI 多模态块。顶层合并转发不附加这些块。
 9. Bot 成功发送图片后读取 OneBot 返回的消息 ID；Markdown 图片化、表情、图片工具等聊天输出从 base64 或 HTTP(S) 源取得字节，戳一戳图片复用本次宿主导出字节，并按同一实际格式、大小、像素与群隔离规则缓存到 `<发送消息ID>-<图片序号>.<实际扩展名>`。缓存失败不重发已经成功送达 QQ 的消息。
 10. 回复中的图片用同一显式 `group_id` 在目标群容器中按被回复消息的 `message_id` 与图片序号查找已有文件，未命中时从回复段的临时 URL 重新下载；任一保存流程失败时保留原临时 URL。合并转发中的图片不进入该流程，继续直接使用临时 URL。
 11. 普通文本最多保留 2000 字，被回复内容最多保留 200 字。
@@ -235,9 +242,10 @@ stateDiagram-v2
 - human_node 每 0.3 秒检查 human_queue，五分钟无输入时写入 __end__。
 - chat_end_detect_node 在早期轮次或最后消息包含“初芽”时直接继续；其他情况随机选择轻量或迷你模型判断，也保留随机直接继续分支。
 - 图历史超过 60 条 LangGraph 消息时，删除最早的一对 Human/AI 消息。
-- ai_node 自动检索记忆，注入 Skill 列表、运行中 Agent 状态、当前群定时任务概览、当前群待办、可选表情提示和调用时的本地日期时间，再用 CHAT_TOOLS 创建 LangChain Agent。进入节点时先删除所有已满 48 小时的待办；Todo 数据库不可用时只注入不可用状态，不中断普通回复。主调用异常最多重试五次；若结果只有工具调用、工具结果、空白或 `[xxx: xxx]` 类控制标记且未请求结束对话，则携带本次 Agent 消息状态额外调用一次。递归上限为 60。
+- ai_node 自动检索记忆，注入 Skill 列表、运行中 Agent 状态、当前群定时任务概览、当前群待办、可选表情图片提示和调用时的本地日期时间，再用 CHAT_TOOLS 创建 LangChain Agent。进入节点时先删除所有已满 72 小时的待办；Todo 数据库不可用时只注入不可用状态，不中断普通回复。主调用异常最多重试五次；若结果只有工具调用、工具结果、空白或 `[xxx: xxx]` 类控制标记且未请求结束对话，则携带本次 Agent 消息状态额外调用一次。递归上限为 60。
 - ai_node 每轮读取辅助队列的非破坏性快照，临时放在当前 Human 内容之前；同一辅助上下文会持续进入后续轮次，直到新写入触发压缩。发送前移除 reply、memory 与 face 标签；图历史会移除 reply 控制标记，但保留现有 face 与 memory 标签历史语义。
-- ai_node 只解析当前 HumanMessage 中顶层 `type=message` 的 JSON。发送者 QQ ID 等于非空 `ADMIN_QQ_ID` 且该消息的直接正文包含大小写敏感的 `BYPASS` 时，本轮本地 `sys_prompt` 追加 ADMIN MODE，chat_agent 保持当前高级模型，并在不修改 LangGraph 历史的前提下从全部模型输入消息复制过滤历史 `image_url` 与 `img_url` 内容段；回复引用、合并转发、辅助上下文和历史消息均不能触发，下一轮恢复未过滤输入与基础角色 Prompt。普通消息与回复图片在所有模式下均以沙盒 Markdown 路径输入。
+- ai_node 只解析当前 HumanMessage 中顶层 `type=message` 的 JSON。每轮先用 `get_intent_model()` 单独调用 chat_intend_judge；判断为 skip 时不创建或调用 chat_agent，判断为 respond 时打印回复类型与原因后继续。系统注入任务绕过判断以保证执行。发送者 QQ ID 等于非空 `ADMIN_QQ_ID` 且该消息的直接正文包含大小写敏感的 `BYPASS` 时，本地 `sys_prompt` 追加 ADMIN MODE，chat_agent 保持当前高级模型，并在不修改 LangGraph 历史的前提下从全部模型输入消息复制过滤历史 `image_url` 与 `img_url` 内容段；回复引用、合并转发、辅助上下文和历史消息均不能触发，下一轮恢复未过滤输入与基础角色 Prompt。当前普通消息图片同时以沙盒 Markdown 路径和 `image_url` data URI 输入，回复图片仍使用沙盒 Markdown 路径。
+- ai_node 在最终可见文本确定后，把本次被回复消息的发送者与可见文本中每个 `[CQ:at,qq=...]` 指向的成员加入本群 `chat_peers`，不依赖发送是否成功；非法目标、未知发送者和 Bot 自身不入列。被加入者后续消息因此进入 pending 主对话而不是辅助上下文。
 - chat_agent 调用 end_conversation 后，ConversationState 立即关闭聊天并清空 chat_peers；ai_node 抑制该轮文本和表情发送，human_node 随即路由到 finish。下一次主动提及通过 activate_chat() 解除结束标记。
 - finish_conversation_node 清理图运行标记和 Human 队列，重置 Skill 单轮去重，把 Human/AI/Tool 历史规范化后放回辅助队列，最后发送 [CONVERSATION END]。
 
@@ -248,6 +256,7 @@ stateDiagram-v2
 - chat_agent 可在回复开头输出一个 `[reply: <message_id>]`。ai_node 只接受本次实际传入 Agent 的 HumanMessage 顶层 JSON 中存在的 ID；未知、格式错误、重复或非开头标记会被移除并降级为普通消息。
 - 合法目标由发送层转换为首个 `MessageSegment.reply()`，并与文本、at 或渲染图片组成同一条 QQ 消息。若 OneBot 拒绝该引用，程序立即用相同正文重试一次普通发送，再进入原有重试策略。
 - AI 输出中的 `[CQ:at,qq=123456]` 占位符由发送层转换为 QQ at 消息段；图片化发送时先发送 at 段再发送图片，图片内显示为 @用户名。
+- 合法 reply 目标与被 @ 的成员同时会成为本群 chat_peers 成员；`peer_session_id()` 定义在 `state.py`，`hooks/message_trigger.py` 与 `graph/nodes.py` 共用同一实现，`graph/` 不反向导入 `hooks/`。
 - 普通对话启动时捕获显式 Bot 与目标群号，后续 LangGraph 回调通过 `send_group_msg` 定向发送，不依赖 NoneBot matcher 的 `current_bot/current_event` 临时上下文。
 - 发送失败最多尝试五次，每次间隔三秒。
 - ai_node 每次调用 chat_agent 都注入运行数据 faces/ 中可用的情绪名和 `[hatsumeface:情绪]` 标记说明，不再使用随机或冷却 gate；模型输出合法标记时选择同前缀图片并单独发送。
@@ -354,7 +363,6 @@ flowchart LR
 - 向量协调成功后，engine 用 SQLite distinct `group_id` 替换进程内 lock-protected activated-group 集合；读取方只取得排序快照或做成员判断，不保留记忆正文和索引。
 - `add_mem()` 在 SQLite 提交成功后激活所属群并通过同一 `(group_id, active)` callback 幂等同步 auto_response；向量失败不回滚 activation。callback 失败时 engine 保存最新待同步状态并在下次 activated-group 刷新时重试。Timer 执行后的同步通过 `synchronize_activated_group()` 在同一 activation lock 内读取当前状态并调用 callback，避免锁外旧快照覆盖较新的 activation。黑名单只影响 auto_response，不影响 activated 状态或欢迎。
 - 每天亚洲/上海时区 04:30 可跨群扫描并删除 150 天前记录，并按每行所属群删除 Milvus ID；若某群最后一条记忆被删除，则从 activated-group 集合移除并通过同一 callback 删除 auto_response。
-- 学习进化（evolution.py）使用有界只读查询 `query_recent_memories()`：按时间倒序读取最多 100 条最近 24 小时记忆，可选正整数群号过滤，不常驻内存、不写入。
 - 当前 schema 的跨库协调必须保持幂等，并使用已有数据库、部分失败和源文件哈希测试。
 
 ## 5. 定时任务
@@ -407,7 +415,6 @@ Bot 连接并完成当前 OneBot 群路由发现后 init_scheduler()：
 4. refresh_auto_responses() 为每个非黑名单 activated group 保留或创建一个 30 分钟至 2 小时后的持久任务；只有当前可路由群注册 APScheduler 作业，并取消未路由群残留的运行时 job 而不删除 point。后续 Bot connect 复用同一流程补注册其他群。
 5. reconcile_auto_responses() 对当前 activated groups 和持久 auto_response owners 的并集逐群调用 `synchronize_activated_group()`，以锁内当前状态覆盖前面异步恢复使用的旧快照。
 6. 注册 UTC+08:00 每日 03:00:00 的稳定 cron 作业。清理 coroutine 留在事件循环线程，先防御性取消已完成 normal 任务的 point 作业，再删除任务；活动任务和 auto_response 不受影响。
-7. 学习进化独立注册上海时区每日 00:00:00 cron 作业，对 activated-group 与当前可路由群号的交集逐群读取近 24 小时记忆并注入对应 chat_agent；Timer 的 03:00 清理保持不变。
 
 ### 5.4 触发与图注入
 
@@ -440,7 +447,7 @@ flowchart LR
 
 - auto_response 只属于 activated-group 集合中且不在 `AUTO_RESPONSE_GROUP_BLACKLIST` 中的正整数群；任务记录保存其显式 group_id。触发时若本群没有尚未结束的对话，则向该群注入主动参与群聊的 Prompt 且不 @ 用户；若对话仍在进行，则跳过注入。两种情况都会只为同群在 30 分钟至 2 小时后重新排期。
 - 计划触发时间位于上海时区 02:00（含）至 06:00（不含）时，只推进当前 point 并为同群排期下一条任务，不注入回复。启动会在恢复前删除不再 activated 或进入黑名单的内部任务；运行时 activation/deactivation 使用同一 callback 补建或删除任务。合格群暂时没有 Bot 路由时只保留持久任务，不消费触发次数。
-- `/autoresponse [提示词]` 只在命令所在群执行一次性调试，不读取固定生产群配置。
+- `/autoresponse` 只读列出 timer store 中各群自动回复任务的下次触发时间，不注入对话且不修改排期。
 
 ## 6. 聊天工具、后台 Agent 与 Skill
 
@@ -464,7 +471,7 @@ flowchart LR
 | create_weekly_timer | 创建含 weekday/time 周期点和周间隔的任务；未指定结束时间时由 Agent 推断并在创建后告知用户 |
 | create_monthly_timer | 创建含 day/time 周期点和月间隔的任务；未指定结束时间时由 Agent 推断并在创建后告知用户 |
 | create_at_timer | 创建含 1..10 个指定时间戳的任务 |
-| create_todo | 为当前群创建最长保留 48 小时的待办，保存发起人群名片与严格完成条件 |
+| create_todo | 为当前群创建最长保留 72 小时的待办，保存发起人群名片与严格完成条件 |
 | mark_todo | 完成并删除当前群待办，返回必须 @ 发起人的完成通知信息 |
 | list_timers | 按完成状态显示完整频率规则或全部指定时刻 |
 | delete_timer | 删除当前群任务 |
@@ -472,25 +479,48 @@ flowchart LR
 | skill_remove | 删除 Skill |
 | skill_download | 从 raw URL 下载 Skill |
 | skill_create | 从完整 Markdown 创建 Skill |
+| create_heartbeat_hook | 验证并注册当前群已有心跳脚本；默认 900 秒间隔、15 秒超时 |
+| create_message_hook | 注册消息匹配 Hook：当前群 + 触发人 QQ + 正则，命中消息即注入 |
+| list_hooks | 列出当前群 Hook、触发方式、下次运行/上次触发与最近失败 |
+| update_hook | 更新当前群 Hook；heartbeat 只改脚本相关字段，message_match 只改 prompt、匹配规则与启用状态 |
+| delete_hook | 删除当前群 Hook 记录并保留脚本与游标 |
 | membersearch | 模糊搜索当前群成员 |
+| query_stock_quote | 查询美股单只股票实时报价（名称、价格、涨跌幅、成交量等） |
+| stock_search | 搜索股票代码列表，按名/码/板块模糊匹配，最多返回 10 条 |
 | agent_dispatch | 派发后台 Agent |
 | respond_to_shell_prompt | 回复后台进程 stdin 请求 |
 | end_conversation | 用户要求不再回复时立即结束当前对话，直到再次被主动提及 |
 | create_character_proxy(proxied_user_id, during_time=180) / terminate_character_proxy | 根据 RAM 代理开关互斥提供；持续时间以分钟计，默认 180，范围 1 至 1440，超时自动终止 |
 
-configure_tool_callbacks() 在每次新图启动时把发送回调、当前用户、媒体限流和结束回调写入目标 `GroupRuntime`。节点和工具通过 task-local binding 读取当前群；缺少绑定时失败关闭。媒体次数、代理、Skill manager 和 Agent task 引用按群保存；Shell 工具次数另用 ContextVar 区分普通聊天与 coding_agent。`get_chat_tools()` 根据当前群代理状态过滤生命周期工具：关闭时只有 create_character_proxy，开启时只有 terminate_character_proxy。
+configure_tool_callbacks() 在每次新图启动时把发送回调、当前用户、媒体限流和结束回调写入目标 `GroupRuntime`。节点和工具通过 task-local binding 读取当前群；缺少绑定时失败关闭。媒体次数、代理、Skill manager 和 Agent task 引用按群保存；Hook 工具同样只读取 task-local 群且不接受任意 group_id，消息匹配 Hook 的触发群号即其所属群。Shell 工具次数另用 ContextVar 区分普通聊天与 coding_agent。`get_chat_tools()` 根据当前群代理状态过滤生命周期工具：关闭时只有 create_character_proxy，开启时只有 terminate_character_proxy。
 
-### 6.2 群聊待办
+### 6.2 Hooks（heartbeat 与消息匹配）
+
+`hooks/store.py` 通过 localstore 定位 `hooks/hooks.db`，以 WAL 和 reentrant operation lock 保存按正整数 group_id 隔离的 Hook。每群最多五个 enabled 记录；名称在群内唯一，interval_seconds 至少 300，timeout_seconds 为 1..60。Hook 记录带 `trigger_type`：`heartbeat`（默认，脚本轮询）或 `message_match`（用户消息匹配）。message_match 记录必须提供 `match_pattern`（Python 正则，最长 200 字符，入库前编译校验）与 `match_user_id`（0 表示不限触发人），不使用 script_path、间隔或超时；老库通过 `ALTER TABLE ADD COLUMN` 幂等补齐新列，不重建表。脚本、游标与受保护配置固定放在共享目录 `data/hatsume-plugin/hooks/`，不要求按群创建子目录；路径解析拒绝目录外路径、穿越和 symlink 逃逸。
+
+`hooks/executor.py` 只为 trigger_type=heartbeat 且 enabled、有显式 Bot 路由的 Hook 注册一个 coalesced APScheduler interval job，`max_instances=1` 并额外以每 Hook lock 防止验证与正式运行重入。首次恢复等待一个完整 interval；漏检只立即补一次，不重放多次。每次 heartbeat 会向控制台打印 Hook ID、群号、名称、脚本、超时、耗时、退出码、输出字节数、触发注入和脱敏失败阶段，但不打印事件正文。断线取消相应 job 但保留数据库与脚本，重连恢复，shutdown 终止并回收全部运行中进程。
+
+脚本必须带 shebang 且可执行，由 `asyncio.create_subprocess_exec` 在当前容器 `/work` 下直接启动。exit 0 表示无变化；exit 10 且非空 stdout 表示事件；其他退出码、空 exit-10、超过 8 KiB stdout、超时或启动失败只更新失败状态。创建和换脚本设置 `HATSUME_HOOK_VALIDATION=1` 试跑，不注入、不更新运行状态，脚本必须在此模式下不推进游标。Heartbeat Hook 可持久化 `notified_user_ids` QQ 号列表；触发注入时若列表非空，系统提示 Agent @ 相关用户，并根据事件是否一次性或需持续更新决定调用 `delete_hook` 或 `update_hook`。
+
+`inject_hook()` 是独立公开注入函数。活动群图将 `hook` 标记消息追加到本群 human_queue；空闲群用已有 graph-start lock 和 direct-conversation 路径启动新图。内部标记绕过结束检测并在模型输入前移除，不创建 Hook 专属 Agent 或第二张图。
+
+`hooks/message_trigger.py` 负责消息匹配触发：`user_chat_handle` 在每次收到群消息时先取该群 enabled 的 message_match Hook（机器人自己发送的消息被忽略，避免自触发循环），用消息纯文本（最多扫描 2000 字符）做 `re.search`。命中的 Hook 直接注入，事件正文包含时间、群号、发送者、命中正则、命中片段与消息原文，不运行脚本、不污染其他 Hook；注入成功更新 `last_run_at` 并清零失败计数，注入异常写入 `last_error` 与 `consecutive_failures`，单个 Hook 失败不影响同批其他 Hook，也不影响正常聊天流程。注入成功后把触发者加入本群 `chat_peers`（`activate_chat("group_<群号>_<QQ>")`），该会话立即视为活跃，触发者后续消息继续进入对话；注入失败或没有 Hook 命中时不动会话状态。触发后 Hook 保留，只有 `delete_hook` 才会删除。
+
+只读 `/hooks [group_id]` 命令默认列出当前群的全部 Hook，并显示触发方式、启用状态、heartbeat 的间隔/超时/脚本/下次运行/最近退出码或 message_match 的触发人/正则/上次触发、连续失败和最近错误；只有管理员可以指定其他群号。
+
+公共只读 `data/hatsume-plugin/skills/hook-authoring.md` 指导 LLM 判断 Hook/Timer 边界、编写幂等增量游标、保护凭证、验证 0/10 协议并选择保守间隔。Skill 合并顺序继续为公共默认 Skill、群本地 Skill；公共名称不可被群本地覆盖或删除。
+
+### 6.3 群聊待办
 
 todo/store.py 通过 nonebot_plugin_localstore 定位 `todo-db/todo.db`，只保存 `todo_items` 表。每条记录包含 ID、群号、发起人 QQ ID、创建时解析得到的群名片、待办内容、创建时间和完成条件。完成条件固定由 `Permitted finisher` 与 `Completion event` 两个自由文本子句组成；内容和每个子句均不能为空且最多 500 字符。
 
 容量、可见性和完成操作均按群隔离。create_todo 在 `BEGIN IMMEDIATE` 事务内先清理过期行，再检查相同群、发起人、内容和条件的精确重复，最后检查该群是否已有 15 条；重复时返回已有 ID，满额时拒绝且不驱逐旧项。mark_todo 同样在事务内重做过期清理，只按当前群与 ID 查询，成功后立即硬删除，不保留历史。
 
-ai_node 每次进入时全局删除 `created_at <= now - 48h` 的记录，再按 `created_at, id` 读取当前群。prompts.py 把活动记录以结构化数据注入 role system prompt，并明确规定：可从当前聊天主动创建、不得仅从背景聊天创建、避免语义重复、允许结合近期上下文判断完成、必须同时满足允许完成人与完成事件。mark_todo 成功结果要求 chat_agent 在同一自然回复中使用 `[CQ:at,qq=...]` 提及发起人，并说明完成来自条件满足而非过期。过期只删除，不发送通知。
+ai_node 每次进入时全局删除 `created_at <= now - 72h` 的记录，再按 `created_at, id` 读取当前群。prompts.py 把活动记录以结构化数据注入 role system prompt，并明确规定：可从当前聊天主动创建、不得仅从背景聊天创建、避免语义重复、允许结合近期上下文判断完成、必须同时满足允许完成人与完成事件。mark_todo 成功结果要求 chat_agent 在同一自然回复中使用 `[CQ:at,qq=...]` 提及发起人，并说明完成来自条件满足而非过期。过期只删除，不发送通知。
 
 TodoStore 使用进程级惰性单例、WAL、参数化 SQL、显式 commit 和 busy timeout。初始化失败会关闭候选连接并允许下次重试；ai_node 捕获读取失败并继续聊天。只读 `/todo` 命令会先清理全局过期项，再按创建顺序显示当前群的全部活动项；管理员可通过 `/todo <群号>` 查看其他群，普通成员不得跨群读取。数据库失败时返回不可用提示。运行时没有 Todo 调度器、编辑/手动删除工具或完成历史表。
 
-### 6.3 角色代理
+### 6.4 角色代理
 
 每个 `GroupRuntime` 至多保存一个 CharacterProxy 和一个自动终止 TimerHandle。对象包含被代理用户 ID、昵称、外号、一次生成的行为 Prompt 和带时区的自动结束时间，不写入 SQLite，进程重启即丢失。创建时只读取当前群中该用户最新最多 100 条关联记忆，再用一次轻量模型生成行为 Prompt 和外号；持续时间默认 180 分钟且不得超过 1440 分钟。不同群可同时代理不同用户，创建、匹配、Prompt 和超时互不影响。
 
@@ -500,7 +530,7 @@ chat_end_detect_node 在调用结束检测模型前解析最新规范化消息�
 
 ai_node 在代理开启时把行为画像和带时区的自动结束时间附加到 role system prompt。该 Prompt 规定只有当前消息明确 @ 被代理用户时才模仿；与初芽的普通对话、Agent 通知和 Timer 通知继续使用初芽身份。终止工具执行后，下一次 ai_node 不再注入该 Prompt。
 
-### 6.4 Agent 注册与通知
+### 6.5 Agent 注册与通知
 
 graph/agents.py 维护 AGENT_REGISTRY 和 _AGENT_STATES。
 
@@ -531,7 +561,7 @@ sequenceDiagram
 - 取消、超时、`/resetsandbox` 与关机只终止所属群 Agent、进程和 stdin waiter；后台 Agent 取消会向外传播，避免误标为完成或继续通知。
 - Agent 状态只保存在内存中，进程重启后不会恢复；`AGENT_REGISTRY` 定义保持公共只读。
 
-### 6.5 Skill
+### 6.6 Skill
 
 - `COMMON_SKILLS_DIR`（现有 `SKILLS_DIR` 内容）是所有群共享的只读 Markdown Skill 集；群本地文件位于 `GROUP_SKILLS_DIR/<group-id>/*.md`。
 - 有效 Skill 至少需要名称、描述和正文。
@@ -540,13 +570,13 @@ sequenceDiagram
 - Skill 名称必须是单个安全文件名，拒绝空名称、`.`、`..`、斜杠、反斜杠和 NUL，任何群本地操作都不能通过路径穿越触达公共目录或其他群目录。
 - 公共内容缓存可共享；本地缓存和已加载名称集合属于目标群，finish 只重置该群集合。`/skills <群号>` 的只读查看不会创建目录或 runtime。
 
-### 6.6 点赞
+### 6.7 点赞
 
 - `likes.json` 使用 `{group_id: {user_id: count}}`，群号和计数必须为正整数群号与非负整数；写入使用同目录临时文件、fsync 和原子替换。
 - 非 group-scoped 的扁平 `{user_id: count}` 数据不再迁移；读取会显式失败且不替换原文件。
 - 点赞累计只更新事件所属群；`/likerank [群号]` 默认当前群，跨群仅管理员，并使用目标群成员信息解析榜单名称。
 
-### 6.7 高级模型运行时切换
+### 6.8 高级模型运行时切换
 
 - config.py 的 ADVANCE_MODEL_NAME 保存当前进程使用的高级模型名，初始值由源码配置决定。
 - 管理员发送 /model 可查看当前值；/model <模型名> 会原样保留模型标识的大小写和标点，只去除首尾空白。
@@ -566,14 +596,13 @@ sequenceDiagram
 - 每群独立引用计数。该群最后一个进程释放后等待五分钟再把逻辑 runtime 标记为 inactive；同群新任务只取消该群延迟任务。
 - 前台命令和本地文件复制被取消或超时时都会 kill 并 await 对应子进程后再解除跟踪；reset 先取消并等待目标群 owner task，再移除该群状态，不会留下失联子进程，也不会停止或删除 `hatsume-containerization`。
 - `.container/supervise.sh` 作为 PID 1 直接启动 `.container/run_bot.py`，写入当前 Bot PID；`hatsume-restart` 创建显式重启请求并延迟发送 TERM，supervisor 仅在存在该请求时重新启动 Bot。
-- 学习进化只负责把记忆驱动的系统任务注入 chat_agent；源码修改、检查、未完成 Agent 等待和 `hatsume-restart` 完全由运行时 `self-evolution` Skill 负责。
 - `data/hatsume-plugin/skills/self-evolution.md` 告诉运行时 Agent `/work/hatsume` 的边界、测试要求与重启命令；检查失败时如实报告失败并评估是否为本任务相关，与本任务无关的既有基线失败不自动阻止重启。
 
 ### 7.2 图片与视频
 
 - 输入图片使用 requests 同步下载，限制为 9 MiB 和 3600 万像素。
 - 普通消息、Bot 成功发送的图片与回复图片使用 Pillow 检测实际格式，并把显式 `group_id` 传到 infra.py 的查找、目录创建和本地 copy 边界；文件进入 `/tmp/hatsume-user-images/<group-id>`。路径由群号、QQ 消息 ID 与消息内图片序号确定，避免共享容器内跨群碰撞。
-- 回复图片优先复用沙盒中的确定性路径，缺失时从 OneBot 临时 URL 恢复；合并转发图片保持临时 URL。主聊天模型只接收包含 Markdown 路径的 JSON 文本块，需要理解图片时通过 `view_image(file://...)` 读取。
+- 当前普通消息图片使用同一份已校验字节同时生成沙盒 Markdown 路径和 `image_url` data URI，因此模型可以直接理解图片，也可以通过 `view_image(file://...)` 读取沙盒文件。回复图片优先复用沙盒中的确定性路径，缺失时从 OneBot 临时 URL 恢复；合并转发图片保持临时 URL 且不附加顶层多模态块。
 - search_image 使用固定的 Pexels Search API，通过 PIXELS_API_KEY 鉴权；网络请求在线程中执行，最多返回十条带来源信息的候选结果，再由聊天 Agent 复用 send_image 发送。
 - view_image 将 HTTP/HTTPS 图片 URL 直接交给轻量模型；沙盒 file:// 绝对路径通过 infra.py 的统一读取边界传入当前 runtime 的显式群号，在当前容器读取 base64 后由 Pillow 校验实际图片格式并生成 data URI，再返回模型生成的文字描述。该流程不依赖 `file` 命令或文件扩展名。
 - generate_image 在 Seedream 和兼容图像接口之间选择；有参考图时使用支持参考图的路径，沙盒 `file://` 参考图复用同一个按群读取和字节校验边界，再以 base64 data URI 交给 Ark SDK。
@@ -586,7 +615,7 @@ sequenceDiagram
 utils/md_to_image.py 在文本超过 500 字或包含富 Markdown 时：
 
 - 使用 Python Markdown、Pymdown 扩展和代码高亮生成 HTML。
-- 支持表格、任务列表、KaTeX 公式、明暗主题和随机角色印章。
+- 支持表格、任务列表、KaTeX 公式和明暗主题，并使用低干扰的猫娘风格配色。
 - 使用 nonebot-plugin-htmlrender 截图。
 - 把原文 URL 作为额外文本段保留，使图片中的链接仍可点击。
 - 渲染失败时回退为纯文本。
@@ -605,6 +634,7 @@ hatsume/plugins/hatsume-plugin/
 ├── group_runtime.py
 ├── models.py
 ├── prompts.py
+├── qq_emoji.py
 ├── state.py
 ├── graph/
 ├── handlers/
@@ -652,37 +682,40 @@ graph/tools.py、graph/agents.py、graph/nodes.py 与 handlers/dialogue.py 之�
 | `hatsume/plugins/hatsume-plugin/__init__.py` | 唯一插件入口；初始化记忆与 activated-group 快照并连接 activation callback 和 auto-response；Bot 连接时发现目标群路由后按 activated group 恢复 Timer，断开时移除路由；修补 @ 检测；注册命令、聊天 matcher、戳一戳与新成员事件。 |
 | hatsume/plugins/hatsume-plugin/config.py | 加载 .env.prod；定义机器人身份、模型和供应商配置读取器，以及队列、限流、图片、记忆、Todo、Timer 与 Skill 常量。文档只记录变量名，不记录真实值。 |
 | hatsume/plugins/hatsume-plugin/group_runtime.py | 校验正整数群号；提供稳定 GroupRuntimeRegistry、目标群 Bot 发现/绑定、当前可路由群快照、task-local 绑定、每群图锁和全部群关机清理。 |
-| hatsume/plugins/hatsume-plugin/state.py | 定义带必需 group_id 的 ConversationState；每个 runtime 各自拥有 chat_peers、idle/pending/human 队列、图任务、限流时间、回复回调和记录上下文。 |
+| hatsume/plugins/hatsume-plugin/state.py | 定义带必需 group_id 的 ConversationState；每个 runtime 各自拥有 chat_peers、idle/pending/human 队列、图任务、限流时间、回复回调和记录上下文；并持有 chat_peers 键格式的唯一实现 peer_session_id()。 |
 | hatsume/plugins/hatsume-plugin/models.py | 修补 LangChain OpenAI 消息转换以保留 reasoning_content 与 thought_signature；按运行时 ADVANCE_MODEL_NAME 创建高级模型，并创建轻量、迷你、代码模型和 Embedding；封装图片与视频供应商。 |
 | hatsume/plugins/hatsume-plugin/prompts.py | 保存角色、Skill、Agent 状态、辅助上下文压缩、表情、结束检测、记忆、Todo、角色代理、编码 Agent、自动任务和后台 Shell Prompt。 |
 | hatsume/plugins/hatsume-plugin/character_proxy.py | 解析当前 runtime 的 RAM 代理和超时；生成群内记忆画像、匹配正文称呼，并通过该群 ConversationState 激活 peer。 |
-| hatsume/plugins/hatsume-plugin/evolution.py | 学习进化最小编排：读取最近 24 小时记忆（最多 100 条、群过滤可选）、构建单方向 `self-evolution` 系统任务、注入目标 chat_agent，并注册上海时间每日 00:00 自动处理已激活且可路由的群。 |
-| hatsume/plugins/hatsume-plugin/infra.py | 在当前容器 `/work/hatsume` 执行 Shell 和本地文件复制；按群管理前后台进程、日志、stdin、超时、引用计数与延迟逻辑停用。 |
+| hatsume/plugins/hatsume-plugin/infra.py | 在当前容器以 `/work` 为工作目录、`/root` 为 home 执行 Shell 和本地文件复制；按群管理前后台进程、日志、stdin、超时、引用计数与延迟逻辑停用。 |
 | `hatsume/plugins/hatsume-plugin/handlers/__init__.py` | handlers 包说明。 |
 | hatsume/plugins/hatsume-plugin/handlers/dialogue.py | 按事件群绑定 runtime；标准化消息；路由该群 auxiliary/pending/human 队列；用图锁启动单图；捕获目标群回复；路由 Agent、Timer 与欢迎触发。 |
 | hatsume/plugins/hatsume-plugin/handlers/forward.py | 规范化 get_forward_msg 的标准与厂商返回结构；递归解析 forward/node；渲染消息段并收集用户。 |
-| hatsume/plugins/hatsume-plugin/handlers/qqface.py | 把已知 OneBot QQ 系统表情 ID 转为 `[qqface: 描述]` 文本，并忽略未知 ID。 |
 | hatsume/plugins/hatsume-plugin/handlers/social.py | 执行 QQ 点赞并按群保存严格 group-scoped likes.json；实现带授权的 `/likerank [群号]`。 |
 | hatsume/plugins/hatsume-plugin/handlers/tools.py | 实现戳一戳、Shell、Timer、Todo、Skill、成员、/model、代理、沙盒重置、Agent 查询和自动任务调试；群相关入口显式绑定或选择目标群。 |
 | `hatsume/plugins/hatsume-plugin/graph/__init__.py` | graph 包说明。 |
 | hatsume/plugins/hatsume-plugin/graph/builder.py | 构建公共 compiled graph；条件边从当前 runtime 读取群内节点标记。 |
-| hatsume/plugins/hatsume-plugin/graph/nodes.py | 实现 Human、Detect、AI、Finish；从当前 runtime 读取辅助队列、表情、回调、代理和 Skill 状态；处理群内记忆、通知与结束；提供 Timer（`inject_timer`）、Agent 通知（`inject_agent_notification`）与学习进化（`inject_learn_evolve`）的系统触发注入。 |
-| hatsume/plugins/hatsume-plugin/graph/tools.py | 定义并唯一注册 CHAT_TOOLS；从当前 runtime 读取回调、群号与媒体计数；执行群内记忆、Skill、Todo、Agent、stdin 和沙盒操作。 |
+| hatsume/plugins/hatsume-plugin/graph/nodes.py | 实现 Human、Detect、AI、Finish；从当前 runtime 读取辅助队列、表情、回调、代理和 Skill 状态；处理群内记忆、通知与结束；提供 Timer（`inject_timer`）与 Agent 通知（`inject_agent_notification`）的系统触发注入。 |
+| hatsume/plugins/hatsume-plugin/graph/tools.py | 定义并唯一注册 CHAT_TOOLS；从当前 runtime 读取回调、群号与媒体计数；执行群内记忆、Skill、Todo、Agent、stdin、沙盒操作和股票行情查询。 |
 | hatsume/plugins/hatsume-plugin/graph/agents.py | 维护公共 AGENT_REGISTRY；实例、task、stdin 与后台进程记录必需群号并按群查询/取消。 |
 | `hatsume/plugins/hatsume-plugin/memory/__init__.py` | 统一导出记忆数据库、activated-group、规范化、检索和分词 API。 |
 | hatsume/plugins/hatsume-plugin/memory/engine.py | 管理带 group_id 的 current-schema memories SQLite、lock-protected activated-group 集合、群内 LIKE/BM25/显式写入、Milvus 群内融合和每日清理。 |
 | hatsume/plugins/hatsume-plugin/memory/vector_store.py | 封装带 group_id 的 Milvus CRUD 与 cosine 搜索，并按当前 SQLite 显式所有权只读协调向量。 |
 | hatsume/plugins/hatsume-plugin/memory/tokenizer.py | 使用 Jieba 词性标注过滤并保留有意义的中文词，供临时 BM25 查询使用。 |
 | `hatsume/plugins/hatsume-plugin/todo/__init__.py` | 暴露 TodoStore 类型和可失败重试的进程级惰性单例。 |
-| hatsume/plugins/hatsume-plugin/todo/store.py | 通过 localstore 定位 Todo SQLite，管理严格单表 schema、48 小时过期、每群 15 条容量、精确去重和按群完成删除。 |
+| hatsume/plugins/hatsume-plugin/todo/store.py | 通过 localstore 定位 Todo SQLite，管理严格单表 schema、72 小时过期、每群 15 条容量、精确去重和按群完成删除。 |
 | `hatsume/plugins/hatsume-plugin/skills/__init__.py` | 提供公共只读 SkillManager 和按群缓存的 GroupSkillManager overlay；支持不创建目录的跨群查看。 |
 | hatsume/plugins/hatsume-plugin/skills/manager.py | 扫描 Markdown、解析 frontmatter；组合公共与群本地 Skill，拒绝公共名称修改，并隔离本地缓存与单轮去重。 |
 | `hatsume/plugins/hatsume-plugin/timer/__init__.py` | 提供 TimerStore 单例和 activated-group active/inactive 同步入口，并按 recovery -> activated-group auto_response -> cleanup 顺序启动。 |
 | hatsume/plugins/hatsume-plugin/timer/schedule.py | 严格解析四类 schedule、生成 occurrence，并按下标推导触发时间。 |
 | hatsume/plugins/hatsume-plugin/timer/store.py | 通过 localstore 定位数据库，以 reentrant operation lock 串行化共享 connection，严格校验 timer_tasks 与 timer_schedule_points，并执行任务 CRUD、原子进度、exact replacement、完成清理和 auto_response。 |
 | hatsume/plugins/hatsume-plugin/timer/executor.py | 构建和管理原生 APScheduler triggers，执行/恢复 point、注入图、维护 auto_response，并注册每日 03:00 清理。 |
+| hatsume/plugins/hatsume-plugin/hooks/__init__.py | HookStore 单例，以及路由恢复、断线暂停和 shutdown 生命周期。 |
+| hatsume/plugins/hatsume-plugin/hooks/store.py | Hook SQLite schema 与幂等迁移、群隔离 CRUD、触发方式校验、启用上限与执行状态。 |
+| hatsume/plugins/hatsume-plugin/hooks/executor.py | 脚本路径/协议验证、bounded subprocess、heartbeat 作业、恢复与清理。 |
+| hatsume/plugins/hatsume-plugin/hooks/message_trigger.py | 用户消息匹配选择、Hook 事件正文组装与直接注入。 |
 | `hatsume/plugins/hatsume-plugin/utils/__init__.py` | QQ 昵称查询、时间、头像 URL、统一消息 JSON、forward JSON 和带五分钟缓存的成员模糊搜索。 |
-| hatsume/plugins/hatsume-plugin/utils/md_to_image.py | Markdown、代码、公式和表格到 HTML 与图片的转换，包含主题、角色印章、链接提取和纯文本回退。 |
+| hatsume/plugins/hatsume-plugin/qq_emoji.py | 共享 QQ 表情 ID 映射，并把 OneBot face 段转为文本。 |
+| hatsume/plugins/hatsume-plugin/utils/md_to_image.py | Markdown、代码、公式和表格到 HTML 与图片的转换，包含猫娘风格主题、链接提取和纯文本回退。 |
 | hatsume/plugins/hatsume-plugin/utils/security.py | 无框架依赖的敏感凭证正则识别与脱敏。 |
 
 ### 8.3 隔离模块与公共模块
@@ -707,6 +740,7 @@ graph/tools.py、graph/agents.py、graph/nodes.py 与 handlers/dialogue.py 之�
 | `prompts.py` | 运行中 Agent Prompt 只读取当前群实例 |
 | `skills/__init__.py` | 公共 manager 加群本地 overlay 的解析与缓存 |
 | `skills/manager.py` | 公共只读、本地写入、同名拒绝、群内 cache/dedup |
+| `hooks/__init__.py`、`hooks/store.py`、`hooks/executor.py`、`hooks/message_trigger.py` | 持久 Hook、脚本、APScheduler 作业与消息匹配触发按正整数群号隔离 |
 | `memory/engine.py` | SQLite group_id、activated-group 集合、群内写入/检索与向量协调 |
 | `memory/vector_store.py` | Milvus group_id、过滤 CRUD/搜索与向量协调 |
 | `.container/run_bot.py`、`.container/supervise.sh` | 对 Docker 网络监听并以 PID 1 监督 Bot 进程 |
@@ -728,7 +762,7 @@ graph/tools.py、graph/agents.py、graph/nodes.py 与 handlers/dialogue.py 之�
 | `utils/md_to_image.py`、`utils/security.py` | 无群可变状态的渲染与纯文本脱敏 |
 | `virtual/image/Dockerfile`、`virtual/image_pack.sh` | 构建所有群共享的 Ubuntu 26.04 LTS 镜像；Dockerfile 安装 ubuntu-standard、开发/网络工具、Python、Node.js、GitHub CLI、Claude Code 与 Agent 工具依赖 |
 
-现有 `COMMON_SKILLS_DIR` 中全部 Markdown Skill 也是公共只读资产；不会复制进群目录，Agent 只能通过工具修改所属群的本地 overlay。
+`COMMON_SKILLS_DIR` 中的运行时 Markdown Skill 是统一的默认公共只读资产；不会复制进群目录，Agent 只能通过工具修改所属群的本地 overlay，群本地层不能覆盖公共名称。
 
 `virtual/` 保留原镜像构建与历史启动脚本，但当前 bot 运行时不会调用它们。
 ## 9. 测试模块索引
@@ -750,14 +784,16 @@ graph/tools.py、graph/agents.py、graph/nodes.py 与 handlers/dialogue.py 之�
 | tests/test_background_shell_stdin_integration.py | stdin 请求、用户回复、模型转换与进程输入集成链路。 |
 | tests/test_chat_send.py | AI 文本、图片、视频发送、@、重试、分段与边界行为。 |
 | tests/test_character_proxy.py | 每群 RAM 状态、并行代理、终止销毁、@ peer、画像与身份作用域。 |
-| tests/test_command_registration.py | `/clear`、`/video` 缺席及四个群参数命令注册。 |
+| tests/test_command_registration.py | `/clear`、`/video` 缺席及群参数命令注册。 |
 | tests/test_container_lifecycle.py | 本地 runtime 独立锁/引用计数/停用任务/进程、取消时 kill/await、超时输出、群路径图片缓存和 reset 定向清理。 |
 | tests/test_local_execution.py | `/work/hatsume` 前后台执行、本地文件复制、无 Docker 清理与群隔离图片路径。 |
 | tests/test_self_evolution_runtime.py | supervisor、直接 NoneBot runner、重启 helper 与 self-evolution Skill 契约。 |
 | tests/test_conversation.py | runtime/binding、同群单图竞争、跨群图并行、队列、QQ 表情正文与回复标准化、Bot base64/HTTP 图片消息 ID 缓存、回复图片复用、结束、关机和欢迎。 |
 | tests/test_forward.py | OneBot 标准与厂商变体、QQ 表情描述、嵌套 forward、异常占位和用户收集。 |
 | tests/test_graph_nodes.py | Human、AI、Detect、Finish、辅助上下文、记忆标签、ADMIN MODE、通知与清理。 |
-| tests/test_learn_evolve.py | 学习进化的全局/按群 24 小时记忆读取、单方向 Prompt、chat_agent 注入、每日 00:00 作业及 `/learn-evolve [群号]` 路由。 |
+| tests/test_hook_store.py | Hook SQLite schema、群隔离 CRUD、输入边界、同名拒绝、并发五个启用上限与运行状态。 |
+| tests/test_hook_executor.py | 群路径、shebang/可执行校验、0/10 协议、验证模式、超时/输出清理、非重入与路由恢复。 |
+| tests/test_hook_message_trigger.py | 消息匹配 Hook schema/迁移/更新边界、触发人与正则选择、直接注入、失败记录与 heartbeat 作业隔离。 |
 | tests/test_md_to_image.py | Markdown 特征检测、链接保留、渲染与纯文本回退。 |
 | tests/test_membersearch.py | 成员缓存、子串匹配、字符重叠排序、命令与工具结果。 |
 | tests/test_memory_db.py | 记忆 current group_id schema、activated-group 并发快照与失败回调重试、群内 LIKE/BM25/写入与生命周期。 |
@@ -769,18 +805,18 @@ graph/tools.py、graph/agents.py、graph/nodes.py 与 handlers/dialogue.py 之�
 | tests/test_reasoning_content.py | reasoning_content 在 LangChain 消息转换中的往返保留。 |
 | tests/test_secret_gate.py | 多类 API Key 脱敏与误报边界。 |
 | tests/test_skill_create.py | Skill 保存、覆盖、缓存失效与 frontmatter 校验。 |
-| tests/test_skill_manager.py | Skill 扫描及公共只读/群本地 overlay、冲突、安全文件名、路径穿越、缓存、去重和无副作用查看。 |
+| tests/test_skill_manager.py | Skill 扫描、公共只读/群本地 overlay、冲突、安全文件名、路径穿越、缓存、去重和无副作用查看。 |
 | tests/test_social.py | likes 扁平格式拒绝、整数校验、原文件保留、群隔离、likerank 参数与授权。 |
 | tests/test_thought_signature.py | thought_signature 修补、捕获、恢复、缺失兼容，以及高级模型名向标准工厂的动态转发。 |
 | tests/test_todo_prompt.py | Todo role prompt 的字段格式、创建/完成规则、低信任数据边界和不可用状态。 |
 | tests/test_todo_startup.py | TodoStore 单例初始化失败关闭、重试恢复和复用。 |
-| tests/test_todo_store.py | Todo localstore 路径、单表 schema、群隔离、48 小时边界、容量、去重、并发和硬删除。 |
+| tests/test_todo_store.py | Todo localstore 路径、单表 schema、群隔离、72 小时边界、容量、去重、并发和硬删除。 |
 | tests/test_timer_injection.py | Timer/Agent 标记、显式目标群 runtime、活跃或非活跃会话注入。 |
 | tests/test_timer_schedule.py | 四种规则解析、严格时间格式、锚定间隔、超大正整数 step、无效月份跳过、5/10 限制和无频率总次数上限。 |
 | tests/test_timer_store.py | localstore 路径、严格 v2 schema、任务/point CRUD、幂等进度、跨线程事务串行化、exact replacement、级联删除和完成清理。 |
 | tests/test_timer_executor.py | 原生 trigger、最终 occurrence 降级、注册/取消、实际 scheduled_at 漏触发核对、执行后进度、启动恢复和 03:00 清理。 |
 | tests/test_timer_startup.py | TimerStore 单例初始化失败重试及 eligibility sync/routed recovery/activated-group auto_response/cleanup 启动顺序。 |
-| tests/test_tools.py | 群内媒体限流、Skill/重置参数与授权、Agent dispatch 上下文和群内去重、图片视频、Todo/Timer、模型、代理和 stdin。 |
+| tests/test_tools.py | 群内媒体限流、Skill/重置参数与授权、Agent dispatch 上下文和群内去重、图片视频、Todo/Timer/Hook（含消息匹配 Hook 与触发方式字段隔离）、模型、代理、stdin 和股票行情查询工具。 |
 
 常用验证：
 
@@ -814,6 +850,8 @@ data/ 是运行时目录，常见内容包括：
 - data/hatsume-plugin/memory-db/memory_vectors.db/：Milvus Lite 记忆向量数据库目录。
 - data/hatsume-plugin/timer-v2-db/timer.db*：当前定时任务数据库及 WAL/SHM。
 - data/hatsume-plugin/todo-db/todo.db*：每群对话待办数据库及 WAL/SHM。
+- data/hatsume-plugin/hooks/hooks.db*：每群 Hook 元数据（heartbeat 与消息匹配两种触发方式）及 WAL/SHM。
+- data/hatsume-plugin/hooks/：AI 编写的 Hook 脚本、游标和本地受保护配置（不按群拆分子目录）。
 - data/hatsume-plugin/likes.json：按群保存的累计点赞数据；只接受 `{group_id: {user_id: count}}`。
 - data/hatsume-plugin/skills/*.md：所有群可见且 Agent 不可修改的公共 Skill。
 - data/hatsume-plugin/skills/groups/<group-id>/*.md：目标群可修改的本地 Skill。
