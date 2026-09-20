@@ -222,7 +222,7 @@ class SkillManager:
 
 
 class GroupSkillManager:
-    """Read-only common Skills overlaid with group-local Skills."""
+    """Read-only common Skills overlaid with one group's writable Skills."""
 
     def __init__(
         self,
@@ -239,11 +239,11 @@ class GroupSkillManager:
 
     def list_skills(self) -> list[dict[str, str]]:
         common = self._common_manager.list_skills()
-        readonly_names = {skill["name"] for skill in common}
+        common_names = {skill["name"] for skill in common}
         local = [
             skill
             for skill in self._local_manager.list_skills()
-            if skill["name"] not in readonly_names
+            if skill["name"] not in common_names
         ]
         return common + local
 

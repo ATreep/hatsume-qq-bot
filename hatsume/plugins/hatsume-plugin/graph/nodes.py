@@ -17,7 +17,7 @@ import random
 import re
 import time
 import traceback
-from collections.abc import Iterator, Mapping
+from collections.abc import Mapping
 from typing import Any
 
 import nonebot_plugin_localstore as store
@@ -28,7 +28,7 @@ from langgraph.graph import MessagesState
 from nonebot.adapters.onebot.v11 import MessageSegment
 from pydantic import BaseModel
 
-from ..config import ADMIN_QQ_ID, BOT_QQ_ID, CONTEXT_QUEUE_LEN, LIVELY_TONE_ENABLED
+from ..config import ADMIN_QQ_ID, CONTEXT_QUEUE_LEN, LIVELY_TONE_ENABLED
 from ..errors import (
     LLMAuthError,
     LLMBaseError,
@@ -38,12 +38,7 @@ from ..group_runtime import (
     get_current_group_runtime,
     group_runtime_registry,
 )
-from ..models import get_advance_model, get_intent_model, get_lite_model, get_mini_model
-from ..provider_switch import (
-    SLOW_THRESHOLD_SECONDS,
-    get_model_provider,
-    report_chat_elapsed,
-)
+from ..models import get_advance_model, get_code_model, get_lite_model, get_mini_model
 from ..prompts import (
     AUXILIARY_COMPACTION_PROMPT,
     CHAT_END_DETECT_PROMPT,
@@ -52,13 +47,11 @@ from ..prompts import (
     build_agent_state_prompt,
     build_face_injection_prompt,
     build_lively_tone_prompt,
-    build_mcp_server_prompt,
     build_memory_context_prompt,
     build_skill_prompt,
     role_sys_prompt,
 )
 from ..skills import get_skill_manager
-from ..state import peer_session_id
 from ..utils import (
     CQ_AT_PATTERN,
     get_date,
@@ -66,6 +59,7 @@ from ..utils import (
     message_to_json,
     strip_thinking_tags,
 )
+from ..utils.md_to_image import auto_convert_text
 from .tools import (
     get_chat_tools,
     get_current_group_id,
@@ -101,7 +95,7 @@ CHAT_INTENT_MAX_ATTEMPTS = 3
 
 
 class ChatIntentJudgeResult(BaseModel):
-    """Structured response decision returned by the intent model."""
+    """Structured decision returned before constructing ``chat_agent``."""
 
     is_response: bool
     urgency_type: str = ""
@@ -128,7 +122,7 @@ def _get_chat_intend_judge_prompt() -> str:
     return str(
         _prompt_module_attr(
             "CHAT_INTEND_JUDGE_PROMPT",
-            "判断当前对话是否需要回复，只输出结构化 JSON 判断结果。",
+            "判断当前对话是否需要回复，只输出结构化判断结果。",
         )
     ).strip()
 
@@ -228,10 +222,7 @@ async def chat_intend_judge(
     back-to-back hits so that retries don't just burn API quota on a hard
     limit.
     """
-    judge_messages = [
-        SystemMessage(_get_chat_intend_judge_prompt()),
-        *_without_image_url_parts(messages),
-    ]
+    judge_messages = [SystemMessage(_get_chat_intend_judge_prompt()), *messages]
     consecutive_limit_errors = 0
     for attempt in range(1, CHAT_INTENT_MAX_ATTEMPTS + 1):
         try:
@@ -427,27 +418,9 @@ def _without_bootstrap_role_prompt(messages: list[Any]) -> list[Any]:
     return messages
 
 
-def _normalized_message_sender_id(normalized: Mapping[str, Any]) -> int | None:
-    """Return the sender QQ of one normalized top-level message when usable."""
-    user = normalized.get("user")
-    if not isinstance(user, Mapping):
-        return None
-    raw_id = user.get("id")
-    if isinstance(raw_id, bool) or not isinstance(raw_id, int) or raw_id <= 0:
-        return None
-    return raw_id
-
-
-def _iter_replyable_top_level_messages(
-    messages: list[Any],
-) -> Iterator[tuple[int, int | None]]:
-    """Yield ``(message_id, sender_qq_id)`` for each replyable top-level JSON.
-
-    Only ``HumanMessage`` content is inspected, and only text parts whose
-    complete text parses as one normalized JSON object. Nested objects such as
-    ``reply_to`` and forward children are never recursed into, so a user cannot
-    smuggle a foreign ID through embedded JSON.
-    """
+def _extract_replyable_message_ids(messages: list[Any]) -> set[int]:
+    """Collect top-level OneBot message IDs from human JSON shown to chat_agent."""
+    replyable_ids: set[int] = set()
     for message in messages:
         if getattr(message, "type", None) != "human":
             continue
@@ -473,80 +446,9 @@ def _iter_replyable_top_level_messages(
             if normalized.get("type") not in {"message", "forward"}:
                 continue
             message_id = normalized.get("message_id")
-            if not isinstance(message_id, int) or isinstance(message_id, bool):
-                continue
-            yield message_id, _normalized_message_sender_id(normalized)
-
-
-def _extract_replyable_message_ids(messages: list[Any]) -> set[int]:
-    """Collect top-level OneBot message IDs from human JSON shown to chat_agent."""
-    return {
-        message_id
-        for message_id, _sender_id in _iter_replyable_top_level_messages(messages)
-    }
-
-
-def _extract_replyable_senders(messages: list[Any]) -> dict[int, int]:
-    """Map each replyable top-level message ID to its sender QQ.
-
-    IDs without a usable sender are omitted: they stay replyable but cannot
-    promote anyone into ``chat_peers``.
-    """
-    senders: dict[int, int] = {}
-    for message_id, sender_id in _iter_replyable_top_level_messages(messages):
-        if sender_id is not None:
-            senders.setdefault(message_id, sender_id)
-    return senders
-
-
-def _register_chat_peer(conversation_state: Any, user_id: int) -> str | None:
-    """Add one group member to the owning conversation's chat peers.
-
-    Returns the session id when the member is a valid peer, or ``None`` when the
-    id is unusable or belongs to the bot itself.
-    """
-    group_id = getattr(conversation_state, "group_id", None)
-    if (
-        isinstance(group_id, bool)
-        or not isinstance(group_id, int)
-        or group_id <= 0
-        or isinstance(user_id, bool)
-        or not isinstance(user_id, int)
-        or user_id <= 0
-        or user_id == BOT_QQ_ID
-    ):
-        return None
-
-    session_id = peer_session_id(group_id, user_id)
-    peers = conversation_state.chat_peers
-    if session_id not in peers:
-        peers.add(session_id)
-        print(f"[chat_agent] Registered chat peer: {session_id}")
-    return session_id
-
-
-def _register_addressed_chat_peers(
-    conversation_state: Any,
-    *,
-    reply_to_message_id: int | None,
-    replyable_senders: Mapping[int, int],
-    visible_text: str,
-) -> None:
-    """Register everyone this Agent response addresses as a chat peer.
-
-    A native reply or an ``@`` mention means the Agent is talking to that
-    member, so their later messages belong to the active conversation instead of
-    the auxiliary context. Registration happens as soon as the directive and the
-    visible text are known, so a failed or suppressed send cannot silently drop
-    the relationship.
-    """
-    if reply_to_message_id is not None:
-        sender_id = replyable_senders.get(reply_to_message_id)
-        if sender_id is not None:
-            _register_chat_peer(conversation_state, sender_id)
-
-    for match in CQ_AT_PATTERN.finditer(visible_text):
-        _register_chat_peer(conversation_state, int(match.group(1)))
+            if isinstance(message_id, int) and not isinstance(message_id, bool):
+                replyable_ids.add(message_id)
+    return replyable_ids
 
 
 def _parse_reply_directive(
@@ -614,24 +516,6 @@ def _new_agent_messages(
     return response_messages
 
 
-def _contains_tool_calls(messages: list[Any]) -> bool:
-    """Return whether an agent response contains any tool invocation.
-
-    A retry after a tool-only response is allowed to turn the tool result into
-    user-facing text, but must not replay side-effecting tools such as agent
-    dispatch or direct media sends.
-    """
-    for message in messages:
-        tool_calls = (
-            message.get("tool_calls")
-            if isinstance(message, Mapping)
-            else getattr(message, "tool_calls", None)
-        )
-        if tool_calls:
-            return True
-    return False
-
-
 # ---------------------------------------------------------------------------
 # Notification injection (agent & timer)
 # ---------------------------------------------------------------------------
@@ -687,17 +571,8 @@ def inject_agent_notification(
 
     runtime = group_runtime_registry.get_or_create(group_id)
     state = runtime.conversation
-    queued_message = make_system_trigger_message(notify_msg, "agent")
-    # A graph can still be draining its final turn after ``is_chatting`` has
-    # been cleared. Keep the notification on that graph's queue so a second
-    # graph is not started for the same completion event.
-    if state.is_chatting or getattr(state, "is_graph_running", False):
-        if queued_message not in state.human_queue:
-            state.human_queue.append(queued_message)
-        else:
-            print(
-                f"🧩 [inject_agent_notification] Ignored duplicate result for {agent_name}"
-            )
+    if state.is_chatting:
+        state.human_queue.append(make_system_trigger_message(notify_msg, "agent"))
         print(f"🧩 [inject_agent_notification] Injected {agent_name} result into human_queue")
     else:
         if start_conversation_cb is not None:
@@ -746,46 +621,34 @@ def inject_timer(
             _start_direct_conv(user_id, group_id, timer_msg)
 
 
-def inject_hook(
-    *,
+def inject_learn_evolve(
+    user_id: int,
     group_id: int,
-    hook_name: str,
-    prompt: str,
-    event_text: str,
+    learn_prompt: str,
     start_conversation_cb: Any = None,
 ) -> None:
-    """Inject one Hook event into the owning group's conversation flow."""
-    normalized_name = str(hook_name).strip() or "unnamed"
-    normalized_prompt = str(prompt).strip()
-    normalized_event = str(event_text).strip()
-    if not normalized_event:
-        raise ValueError("Hook event text must not be empty")
-    hook_msg = (
-        f"(SYSTEM) Hook '{normalized_name}' detected a new event.\n\n"
-        "## Hook instructions\n"
-        f"{normalized_prompt}\n\n"
-        "## Hook event\n"
-        f"{normalized_event}"
-    )
+    """Inject a learning-evolution request into the conversation flow.
+
+    Mirrors ``inject_timer``: the structured request is queued as a
+    system-triggered task so the group's chat_agent handles it through the
+    normal graph. No independent evolution agent is spawned.
+    """
+    learn_msg = f"(SYSTEM) 学习进化请求已触发。\n{learn_prompt}"
+    print(f"🧬 [inject_learn_evolve] Injecting learn-evolve request into group {group_id}")
+
     runtime = group_runtime_registry.get_or_create(group_id)
     state = runtime.conversation
     if state.is_chatting:
-        state.human_queue.append(make_system_trigger_message(hook_msg, "hook"))
-        print(f"🪝 [inject_hook] Injected Hook {normalized_name} into human_queue")
-        return
-    if start_conversation_cb is not None:
-        start_conversation_cb(0, group_id, hook_msg)
+        state.human_queue.append(make_system_trigger_message(learn_msg, "learn_evolve"))
+        print("🧬 [inject_learn_evolve] Injected learn-evolve request into human_queue")
+    elif start_conversation_cb is not None:
+        print("🧬 [inject_learn_evolve] Starting new conversation for learn-evolve request")
+        start_conversation_cb(user_id, group_id, learn_msg)
     else:
-        _start_direct_conv(0, group_id, hook_msg, trigger_type="hook")
+        _start_direct_conv(user_id, group_id, learn_msg)
 
 
-def _start_direct_conv(
-    user_id: int,
-    group_id: int,
-    notify_msg: str,
-    *,
-    trigger_type: str = "timer",
-) -> None:
+def _start_direct_conv(user_id: int, group_id: int, notify_msg: str) -> None:
     """Start a new graph conversation targeting a specific group directly.
 
     Used when no callback is registered (e.g., /autoresponse debug command).
@@ -797,7 +660,7 @@ def _start_direct_conv(
         user_id,
         group_id,
         notify_msg,
-        trigger_type=trigger_type,
+        trigger_type="timer",
     )
 
 
@@ -808,155 +671,45 @@ def get_role_sys_prompt() -> str:
     return role_sys_prompt
 
 
-def _select_compaction_model() -> Any:
-    model_chosen = get_mini_model()
-    if random.randint(0, 2) == 0:
-        model_chosen = get_lite_model()
-        print("Using lite model for compaction...")
-    else:
-        print("Using mini model for compaction...")
-    return model_chosen
-
-
-AUXILIARY_IMAGE_PLACEHOLDER = "[图片]"
-
-
-def _image_part_url(part: Any) -> str:
-    """Return the URL of an ``image_url`` / ``img_url`` content part."""
-    if not isinstance(part, dict):
-        return ""
-    if part.get("type") not in {"image_url", "img_url"}:
-        return ""
-    value = part.get("image_url", part.get("img_url"))
-    if isinstance(value, dict):
-        value = value.get("url")
-    return value if isinstance(value, str) else ""
-
-
-def _without_auxiliary_image_payloads(messages: list[dict]) -> list[dict]:
-    """Replace inline ``data:`` image parts with a short text placeholder.
-
-    Auxiliary context identifies an image by its sandbox path, which already
-    appears in the entry's text (``![图片](/tmp/...)``).  Carrying the base64
-    payload as well only inflates every later request that consumes the queue
-    -- most importantly the compaction call -- without adding information, so
-    inline payloads are dropped at the queue boundary.  Small network image
-    URLs are kept as-is.
-    """
-    cleaned: list[dict] = []
-    for message in messages:
-        if _image_part_url(message).startswith("data:"):
-            cleaned.append({"type": "text", "text": AUXILIARY_IMAGE_PLACEHOLDER})
-        else:
-            cleaned.append(message)
-    return cleaned
-
-
-def _summarize_auxiliary_messages(model: Any, queue: list[dict]) -> str:
-    result = model.invoke(
-        [
-            SystemMessage(AUXILIARY_COMPACTION_PROMPT),
-            HumanMessage(_without_auxiliary_image_payloads(queue)),  # type: ignore
-        ]
-    )
-    return result.content.__str__()
-
-
-async def _summarize_auxiliary_messages_async(
-    model: Any, queue: list[dict]
-) -> str:
-    result = await _invoke_model(
-        model,
-        [
-            SystemMessage(AUXILIARY_COMPACTION_PROMPT),
-            HumanMessage(_without_auxiliary_image_payloads(queue)),  # type: ignore
-        ],
-    )
-    return result.content.__str__()
-
-
-def _trim_auxiliary_queue(runtime: Any) -> None:
-    queue = runtime.auxiliary_messages_queue
-    overflow = len(queue) - CONTEXT_QUEUE_LEN
-    if overflow > 0:
-        del queue[:overflow]
-    runtime.auxiliary_source_queue.clear()
-
-
-def _compact_auxiliary_messages_sync(runtime: Any) -> None:
-    if len(runtime.auxiliary_messages_queue) <= CONTEXT_QUEUE_LEN:
-        return
-    try:
-        summary = _summarize_auxiliary_messages(
-            _select_compaction_model(),
-            list(runtime.auxiliary_messages_queue),
-        )
-        runtime.auxiliary_messages_queue.clear()
-        runtime.auxiliary_messages_queue.append(
-            {"type": "text", "text": "### 历史聊天记录总结：" + summary}
-        )
-        runtime.auxiliary_source_queue.clear()
-    except Exception:
-        print("❌ Failed to summarize auxiliary messages")
-        traceback.print_exc()
-        _trim_auxiliary_queue(runtime)
-
-
 def append_auxiliary_message(
     messages: list[dict], source_entries: list[dict] | None = None
 ) -> None:
-    """Append auxiliary context for synchronous callers and tests.
-
-    Async handlers should use :func:`append_auxiliary_message_async` so a slow
-    compaction call cannot block the NoneBot event loop.
-    """
-    if not messages:
+    if len(messages) == 0:
         return
     runtime = _runtime()
-    runtime.auxiliary_messages_queue.extend(
-        _without_auxiliary_image_payloads(messages)
-    )
-    runtime.auxiliary_source_queue.extend(source_entries or [])
-    _compact_auxiliary_messages_sync(runtime)
+    queue = runtime.auxiliary_messages_queue
+    source_queue = runtime.auxiliary_source_queue
+    queue.extend(messages)
+    source_queue.extend(source_entries or [])
 
-
-async def append_auxiliary_message_async(
-    messages: list[dict], source_entries: list[dict] | None = None
-) -> None:
-    """Append auxiliary context without blocking the event loop on compaction.
-
-    Compaction has no wall-clock cap: the provider can legitimately need longer
-    than a minute for a full queue, and aborting the call would discard the
-    summary and leave the queue to be trimmed instead.
-    """
-    if not messages:
-        return
-    runtime = _runtime()
-    runtime.auxiliary_messages_queue.extend(
-        _without_auxiliary_image_payloads(messages)
-    )
-    runtime.auxiliary_source_queue.extend(source_entries or [])
-    if len(runtime.auxiliary_messages_queue) <= CONTEXT_QUEUE_LEN:
-        return
-
-    async with runtime.auxiliary_compaction_lock:
-        if len(runtime.auxiliary_messages_queue) <= CONTEXT_QUEUE_LEN:
-            return
-        queue_snapshot = list(runtime.auxiliary_messages_queue)
-        source_count = len(runtime.auxiliary_source_queue)
+    if len(queue) > CONTEXT_QUEUE_LEN:
         try:
-            summary = await _summarize_auxiliary_messages_async(
-                _select_compaction_model(),
-                queue_snapshot,
-            )
-            runtime.auxiliary_messages_queue[:len(queue_snapshot)] = [
+            model_chosen = get_mini_model()
+
+            if random.randint(0, 2) == 0:
+                model_chosen = get_lite_model()
+                print("Using lite model for compaction...")
+            else:
+                print("Using mini model for compaction...")
+
+            summary = model_chosen.invoke(
+                [
+                    SystemMessage(AUXILIARY_COMPACTION_PROMPT),
+                    HumanMessage(queue),  # type: ignore
+                ]
+            ).content.__str__()
+            queue.clear()
+            queue.append(
                 {"type": "text", "text": "### 历史聊天记录总结：" + summary}
-            ]
-            del runtime.auxiliary_source_queue[:source_count]
+            )
+            source_queue.clear()
         except Exception:
             print("❌ Failed to summarize auxiliary messages")
             traceback.print_exc()
-            _trim_auxiliary_queue(runtime)
+            overflow = len(queue) - CONTEXT_QUEUE_LEN
+            if overflow > 0:
+                del queue[:overflow]
+            source_queue.clear()
 
 
 def _snapshot_auxiliary_queue() -> tuple[list[dict], list[dict]]:
@@ -1057,22 +810,23 @@ async def ai_node(state: MessagesState) -> dict:
 
     print("Start chat intent judge...")
     t_judge_start = time.time()
-    if _has_injected_human_message(state):
-        print("[chat_intend_judge] Bypassed for injected system message")
+    if _has_injected_human_message(state) or admin_mode_enabled:
+        bypass_reason = "ADMIN MODE" if admin_mode_enabled else "injected system message"
+        print(f"[chat_intend_judge] Bypassed for {bypass_reason}")
     else:
         try:
             intent_result = await chat_intend_judge(
-                model=get_intent_model("low"),
+                model=get_code_model("low"),
                 messages=[last_human_msg],
             )
         except Exception as exc:
             reason = _result_reason(None, exc)
-            print(f"[chat_intend_judge] Response skipped: {reason}")
+            print(f"[chat_intend_judge] {reason}")
             return {"messages": []}
 
         if not _chat_intent_is_eligible(intent_result):
             reason = _result_reason(intent_result)
-            print(f"[chat_intend_judge] Response skipped: {reason}")
+            print(f"[chat_intend_judge] {reason}")
             return {"messages": []}
 
         print(
@@ -1106,7 +860,6 @@ async def ai_node(state: MessagesState) -> dict:
 
     print("Memory retrieved: \n" + memory_summary)
 
-    chat_provider_used = get_model_provider()
     model_chosen = get_advance_model(thinking=True)
     sys_prompt = _combined_system_prompt()
     sys_prompt += build_lively_tone_prompt(LIVELY_TONE_ENABLED)
@@ -1133,17 +886,6 @@ async def ai_node(state: MessagesState) -> dict:
         sys_prompt += skill_prompt
         print(f"[skills] Injected {len(skill_list)} skill(s) into system prompt")
 
-    from ..mcp.manager import get_mcp_manager
-
-    mcp_servers = [item for item in get_mcp_manager().list_servers() if item.enabled]
-    mcp_prompt = build_mcp_server_prompt([
-        {"name": item.name, "description": item.description}
-        for item in mcp_servers
-    ])
-    if mcp_prompt:
-        sys_prompt += mcp_prompt
-        print(f"[mcp] Injected {len(mcp_servers)} server description(s) into system prompt")
-
     # Inject running agent states into system prompt
     agent_prompt = build_agent_state_prompt()
     if agent_prompt:
@@ -1169,17 +911,17 @@ async def ai_node(state: MessagesState) -> dict:
         _face_dict.setdefault(emotion, []).append(fname)
     emotions = list(_face_dict.keys())
     face_prompt = build_face_injection_prompt(emotions)
-
     if face_prompt:
         sys_prompt += face_prompt
         print(f"[face] Injected face prompt with {len(emotions)} emotions")
 
     sys_prompt += f"\n\n# 当前日期与时间\n{get_date()}"
 
+    print("Start building historical recording from auxiliary queue...")
+
     ai_text: str = ""
     llm_error_type: str | None = None  # Track specific error type for user-facing messages
     replyable_message_ids: set[int] = set()  # Init to satisfy static analysis; always set in try block
-    replyable_senders: dict[int, int] = {}  # Same: message_id -> sender QQ
     try:
         mem_msg = (
             []
@@ -1195,86 +937,22 @@ async def ai_node(state: MessagesState) -> dict:
         if admin_mode_enabled:
             agent_messages = _without_image_url_parts(agent_messages)
         replyable_message_ids = _extract_replyable_message_ids(agent_messages)
-        replyable_senders = _extract_replyable_senders(agent_messages)
 
-        print("Start chat_agent invocation.")
-
-        t_invocation_start = time.monotonic()
-
+        chat_agent = create_agent(
+            model_chosen,
+            tools=get_chat_tools(),
+            system_prompt=sys_prompt,
+        )
         set_shell_executor_limit(3)  # chat_agent: max 3 shell_executor calls per round
+        retrying_agent = chat_agent.with_retry(stop_after_attempt=5)
         invocation_messages = agent_messages
         response_texts: list[str] = []
-        active_mcp_tools: list[Any] = []
-        retry_without_tools = False
         for attempt in range(2):
-            t_pass_start = time.monotonic()
-            tools_for_attempt = (
-                []
-                if retry_without_tools
-                else get_chat_tools() + active_mcp_tools
+            response = await retrying_agent.ainvoke(
+                {"messages": invocation_messages},  # type: ignore
+                {"recursion_limit": 20},
             )
-            chat_agent = create_agent(
-                model_chosen,
-                tools=tools_for_attempt,
-                system_prompt=sys_prompt,
-            )
-            retrying_agent = chat_agent.with_retry(stop_after_attempt=5)
-            try:
-                response = await retrying_agent.ainvoke(
-                    {"messages": invocation_messages},  # type: ignore
-                    {"recursion_limit": 20},
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                failed_elapsed = time.monotonic() - t_invocation_start
-                switched_to = report_chat_elapsed(
-                    failed_elapsed,
-                    provider=chat_provider_used,
-                    started_at=t_invocation_start,
-                )
-                print(
-                    f"[chat_agent] pass={attempt + 1} failed "
-                    f"elapsed={time.monotonic() - t_pass_start:.3f}s",
-                    flush=True,
-                )
-                if switched_to is not None:
-                    print(
-                        f"[provider-switch] failed chat_agent took "
-                        f"{failed_elapsed:.1f}s; switching provider "
-                        f"'{chat_provider_used}' -> '{switched_to}'",
-                        flush=True,
-                    )
-                raise
             response_messages = response.get("messages", [])
-            from ..mcp.tools import consume_requested_tools, make_dynamic_tools
-
-            requested = consume_requested_tools()
-            print(
-                f"[chat_agent] pass={attempt + 1} completed "
-                f"elapsed={time.monotonic() - t_pass_start:.3f}s "
-                f"requested_mcp={requested!r} active_mcp_tools={len(active_mcp_tools)}",
-                flush=True,
-            )
-            if requested and attempt == 0:
-                grouped: dict[str, list[str]] = {}
-                for server_name, tool_name in requested:
-                    grouped.setdefault(server_name, []).append(tool_name)
-                for server_name, names in grouped.items():
-                    try:
-                        infos = await get_mcp_manager().discover_tools(server_name)
-                    except Exception as exc:
-                        print(
-                            f"⚠️ [mcp] Skipping unavailable server "
-                            f"{server_name!r}: {type(exc).__name__}: {exc}"
-                        )
-                        continue
-                    active_mcp_tools.extend(make_dynamic_tools(
-                        server_name,
-                        [item for item in infos if item.name in names],
-                    ))
-                invocation_messages = response_messages
-                continue
             new_messages = _new_agent_messages(
                 invocation_messages, response_messages
             )
@@ -1296,46 +974,8 @@ async def ai_node(state: MessagesState) -> dict:
             print("No visible AI text returned; invoking chat_agent again...")
             if response_messages:
                 invocation_messages = response_messages
-            # The first pass may have already performed an irreversible tool
-            # action.  The follow-up pass only needs to phrase its result; it
-            # must not be able to invoke the same tool a second time.
-            retry_without_tools = _contains_tool_calls(new_messages)
 
         ai_text = "\n".join(response_texts)
-
-        t_invocation_end = time.monotonic()
-
-        elapsed_invocation = t_invocation_end - t_invocation_start
-        print(f"Elapsed time of chat_agent invocation: {elapsed_invocation}s")
-
-        # Provider auto-switching: a slow (>150s) chat_agent invocation marks
-        # the current provider slow (3h cooldown) and switches the standard
-        # model to the next healthy candidate (ruoli <-> waw).
-        switched_to = report_chat_elapsed(
-            elapsed_invocation,
-            provider=chat_provider_used,
-            started_at=t_invocation_start,
-        )
-        if switched_to is not None:
-            print(
-                f"[provider-switch] chat_agent took {elapsed_invocation:.1f}s "
-                f"(> {SLOW_THRESHOLD_SECONDS:.0f}s); switching provider "
-                f"'{chat_provider_used}' -> '{switched_to}'"
-            )
-        elif elapsed_invocation > SLOW_THRESHOLD_SECONDS:
-            current_provider = get_model_provider()
-            if current_provider == chat_provider_used:
-                print(
-                    f"[provider-switch] chat_agent took {elapsed_invocation:.1f}s "
-                    f"(> {SLOW_THRESHOLD_SECONDS:.0f}s) but all candidate "
-                    f"providers are in cooldown; staying on '{chat_provider_used}'"
-                )
-            else:
-                print(
-                    f"[provider-switch] chat_agent took {elapsed_invocation:.1f}s "
-                    f"(> {SLOW_THRESHOLD_SECONDS:.0f}s); provider is already "
-                    f"'{current_provider}' after another invocation"
-                )
 
         # LLM outputs plain text directly
         print(f"Raw AI response: {ai_text}")
@@ -1363,17 +1003,18 @@ async def ai_node(state: MessagesState) -> dict:
             await _err_answer("❌ 模型认证失败，请检查配置。")
         return {"messages": []}
 
-    ai_text_clean, reply_to_message_id = _parse_reply_directive(
+    ai_text_history, reply_to_message_id = _parse_reply_directive(
         str(ai_text),
         replyable_message_ids,
     )
 
     # ── Extract face tag from ai_text ──
     face_emotion: str | None = None
-    match = FACE_TAG_PATTERN.search(ai_text_clean)
+    ai_text_clean = ai_text_history
+    match = FACE_TAG_PATTERN.search(ai_text_history)
     if match:
         face_emotion = match.group(1).strip()
-        ai_text_clean = FACE_TAG_PATTERN.sub("", ai_text_clean).strip()
+        ai_text_clean = FACE_TAG_PATTERN.sub("", ai_text_history).strip()
         print(f"[face] Detected face tag: {face_emotion}")
 
     # ── Extract memory record from ai_text ──
@@ -1382,34 +1023,22 @@ async def ai_node(state: MessagesState) -> dict:
         print(f"[memory] Extracted {len(mem_records)} memory record(s)")
 
     ai_text_clean = ai_text_clean.strip()
-
-    # The Agent just addressed specific members: the native reply target and
-    # every @ mention. Promote them into chat_peers so their following messages
-    # keep joining this conversation instead of the auxiliary context.
-    _register_addressed_chat_peers(
-        conversation_state,
-        reply_to_message_id=reply_to_message_id,
-        replyable_senders=replyable_senders,
-        visible_text=ai_text_clean,
-    )
-
-    # Keep the model response unchanged in graph history. Control tags are
-    # parsed and removed only from the user-facing text above.
-    ai_text_history = str(ai_text)
     end_requested = conversation_state.end_requested
     if end_requested:
         print("[end_conversation] Suppressed the final AI reply.")
-    else:
-        if ai_text_clean:
-            _ai_answer = _get_ai_answer()
-            if _ai_answer:
-                if reply_to_message_id is not None:
-                    await _ai_answer(
-                        ai_text_clean,
-                        reply_to_message_id=reply_to_message_id,
-                    )
-                else:
-                    await _ai_answer(ai_text_clean)
+    elif ai_text_clean:
+        _ai_answer = _get_ai_answer()
+        if _ai_answer:
+            if reply_to_message_id is not None:
+                await _ai_answer(
+                    ai_text_clean,
+                    reply_to_message_id=reply_to_message_id,
+                )
+            elif CQ_AT_PATTERN.search(ai_text_clean):
+                await _ai_answer(ai_text_clean)
+            else:
+                for seg in await auto_convert_text(ai_text_clean):
+                    await _ai_answer(seg)
 
     t_mem_start = time.time()
 
@@ -1449,15 +1078,10 @@ async def ai_node(state: MessagesState) -> dict:
         with open(face_path, "rb") as f:
             base64_str = base64.b64encode(f.read()).decode("utf-8")
         face_msg = MessageSegment.image("base64://" + base64_str, cache=False)
-        try:
-            await _ai_answer_cb(face_msg)
-        except Exception:
-            print("❌ Failed to send face image")
-            traceback.print_exc()
+        await _ai_answer_cb(face_msg)
 
     print(f"Elapsed time of ai_node: t_writing_mem={t_mem_end - t_mem_start}s, t_chat_agent={t_mem_start - t_start}s")
-    messages = [AIMessage(ai_text_history)]
-    return {"messages": messages}
+    return {"messages": [AIMessage(ai_text_history)]}
 
 
 # ---------------------------------------------------------------------------
@@ -1548,12 +1172,11 @@ async def chat_end_detect_node(state: MessagesState) -> dict:
                     print("Directly continue chat.")
                     raise InterruptedError("Directly continue chat without detection.")
 
-            detect_result = await asyncio.wait_for(
-                _invoke_model(
-                    detect_model,
-                    state["messages"][-6:]
-                    + [SystemMessage(CHAT_END_DETECT_PROMPT)],
-                ),
+            detect_result = detect_model.invoke(
+                state["messages"][-6:]
+                + [
+                    SystemMessage(CHAT_END_DETECT_PROMPT)
+                ],
                 timeout=10,
             )
             response = str(
@@ -1679,7 +1302,7 @@ async def finish_conversation_node(state: MessagesState) -> dict:
             })
 
     if conv_messages:
-        await append_auxiliary_message_async(conv_messages)
+        append_auxiliary_message(conv_messages)
 
     _ai_answer = _get_ai_answer()
     if _ai_answer:

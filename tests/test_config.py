@@ -41,26 +41,3 @@ def test_advanced_model_defaults_to_deepseek_v4_flash(monkeypatch):
     config = _load_config(monkeypatch)
 
     assert config.ADVANCE_MODEL_NAME == config.DEEPSEEK_V4_FLASH
-
-
-def test_code_model_name_is_deepseek_v4_flash(monkeypatch):
-    """The code model name (models.get_code_model) must come from
-    config.DEEPSEEK_V4_FLASH — the single source used by coding_agent
-    and background_shell parsing."""
-    config = _load_config(monkeypatch)
-
-    assert config.DEEPSEEK_V4_FLASH == "deepseek-v4-flash-free"
-
-
-def test_hook_runtime_limits_and_paths(monkeypatch):
-    config = _load_config(monkeypatch)
-
-    assert config.HOOKS_DIR == ROOT / "data/hatsume-plugin/hooks"
-    assert config.BUILTIN_SKILLS_DIR == (
-        ROOT / "hatsume/plugins/hatsume-plugin/skills/builtin"
-    )
-    assert config.HOOK_MAX_ACTIVE_PER_GROUP == 5
-    assert config.HOOK_MIN_INTERVAL_SECONDS == 300
-    assert config.HOOK_DEFAULT_INTERVAL_SECONDS == 900
-    assert config.HOOK_DEFAULT_TIMEOUT_SECONDS == 15
-    assert config.HOOK_MAX_TIMEOUT_SECONDS == 60

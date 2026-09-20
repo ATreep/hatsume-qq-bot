@@ -8,25 +8,14 @@ import os
 import random
 import tempfile
 import time
-from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any, Literal, Optional
+from typing import Any, Literal, Optional
 
-# Preserve provider-specific response fields across LangChain message
-# conversions. Both DeepSeek-compatible reasoning and Gemini-compatible tool
-# calls require these fields to be sent back on later turns.
-import langchain_core.messages as _lc_messages
-import langchain_openai.chat_models.base as _openai_base
 from langchain_core.language_models import BaseChatModel
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from openai import OpenAI
-from volcenginesdkarkruntime import Ark
 
 from . import config as _config
 from .config import (
-    ALI_BASE_URL,
-    QWEN_3_7_FLASH,
-    ALI_API_KEY,
+    DEEPSEEK_V4_FLASH,
     EMBEDDING_MODEL,
     GROK_IMAGINE_IMAGE,
     KEGEAI_API_KEY,
@@ -35,16 +24,24 @@ from .config import (
     SEEDANCE_1_0,
     SEEDANCE_1_5,
     SEEDREAM_4_0,
+    SEEDREAM_5_0_LITE,
     VOLCENGINE_BASE_URL,
-    WAWAPI_IMAGE_API_KEY,
-    _get_int_env,
+    DS_BASE_URL,
+    DS_API_KEY,
     get_api_key,
     get_base_url,
+    WAWAPI_IMAGE_API_KEY,
 )
-from .provider_switch import get_model_provider
 
-if TYPE_CHECKING:
-    from langchain_core.messages import BaseMessage
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_google_genai import ChatGoogleGenerativeAI
+from volcenginesdkarkruntime import Ark
+
+# Preserve provider-specific response fields across LangChain message
+# conversions. Both DeepSeek-compatible reasoning and Gemini-compatible tool
+# calls require these fields to be sent back on later turns.
+import langchain_core.messages as _lc_messages
+import langchain_openai.chat_models.base as _openai_base
 
 _orig_convert_dict = _openai_base._convert_dict_to_message
 _orig_convert_msg = _openai_base._convert_message_to_dict
@@ -90,24 +87,6 @@ _openai_base._convert_message_to_dict = _patched_convert_msg
 
 ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"]
 
-REASONING_BUDGETS: dict[ReasoningEffort, int] = {
-    "none": 0,
-    "minimal": 128,
-    "low": 1024,
-    "medium": 2048,
-    "high": 4096,
-    "xhigh": 8192,
-    "max": 24576,
-}
-
-def calculate_thinking_budget(
-    reasoning_effort: ReasoningEffort | None,
-) -> int | None:
-    """Map provider-agnostic reasoning labels to Gemini ``thinking_budget``."""
-    if reasoning_effort is None:
-        return None
-    return REASONING_BUDGETS.get(reasoning_effort, 0)
-
 
 def get_volcengine_api_model(
     model_name: str,
@@ -126,91 +105,76 @@ def get_volcengine_api_model(
 
 def get_openai_api_model(
     model_name: str,
-    reasoning_effort: ReasoningEffort | None = "high",
-    base_url: str = get_base_url(),
-    api_key = get_api_key(),
-    extra_body: Optional[dict[str, Any]] = {"thinking": {"type": "enabled"}},
-    is_response = True
+    reasoning_effort: ReasoningEffort,
 ) -> ChatOpenAI:
     return ChatOpenAI(
-        base_url=base_url + "/v1",
+        base_url=get_base_url() + "/v1",
         model=model_name,
-        api_key=api_key,
-        reasoning_effort=reasoning_effort if not is_response else None,
-        reasoning={"effort": reasoning_effort} if is_response else None,
-        extra_body=extra_body,
-        output_version="response/v1" if is_response else "v1",
+        api_key=get_api_key(),
+        reasoning_effort=reasoning_effort,
+        output_version="response/v1"
+    )
+
+
+def get_standard_api_model(
+    model_name: str,
+    reasoning_effort: ReasoningEffort = "low",
+) -> ChatOpenAI:
+    """Create the standard OpenAI-compatible chat model."""
+    return get_openai_api_model(
+        model_name,
+        reasoning_effort=reasoning_effort,
     )
 
 def get_google_api_model(
     model_name: str,
     reasoning_effort: ReasoningEffort = "low",
-    provider: Optional[str] = None,
 ) -> ChatGoogleGenerativeAI:
-    if provider is None:
-        provider = get_model_provider()
     return ChatGoogleGenerativeAI(
-        base_url=get_base_url(provider),
+        base_url=get_base_url(),
         model=model_name,
-        api_key=get_api_key(provider)(),
-        thinking_budget=calculate_thinking_budget(reasoning_effort),
+        api_key=get_api_key()(),
+        reasoning_effort=reasoning_effort,
     )
 
-def get_standard_api_model(
-    model_name: str,
-    reasoning_effort: ReasoningEffort = "low",
-    provider: Optional[str] = None,
-) -> BaseChatModel:
-    """Create the standard chat model."""
-    return get_openai_api_model(
-        model_name,
-        reasoning_effort=reasoning_effort,
-        extra_body={"enable_thinking": True}, # for Ali provider only
-    )
 
 def get_advance_model(
     thinking: bool = True,
-    reasoning_effort: ReasoningEffort = "medium",
+    reasoning_effort: ReasoningEffort = "high",
 ) -> BaseChatModel:
     model_name = _config.ADVANCE_MODEL_NAME
-    provider = get_model_provider()
-    print(f"⚡ Using {model_name} via provider '{provider}' for advance model")
-    effective_effort = reasoning_effort if thinking else "none"
+    print(f"⚡ Using {model_name} for advance model")
     return get_standard_api_model(
         model_name,
-        reasoning_effort=effective_effort,
+        reasoning_effort=reasoning_effort if thinking else "none",
     )
 
 
 def get_lite_model() -> BaseChatModel:
-    return get_standard_api_model(LITE_MODEL_NAME, reasoning_effort="low")
-
-def get_mini_model() -> BaseChatModel:
-    return get_standard_api_model(LITE_MODEL_NAME, reasoning_effort="none")
+    return get_standard_api_model(LITE_MODEL_NAME)
 
 
 def get_view_image_model() -> BaseChatModel:
     """Create the dedicated vision model used by ``view_image``."""
-    return get_mini_model()
-
-
-def get_intent_model(reasoning_effort: ReasoningEffort = "medium") -> BaseChatModel:
-    return get_openai_api_model(
-        model_name= QWEN_3_7_FLASH,
-        reasoning_effort=reasoning_effort,
-        base_url=ALI_BASE_URL,
-        api_key=ALI_API_KEY,
-        is_response=True,
-        extra_body=None
+    return ChatOpenAI(
+        base_url=get_base_url("zhth") + "/v1",
+        model=_config.GPT_5_6_LUNA,
+        api_key=get_api_key("zhth"),
+        reasoning_effort="medium",
     )
 
-def get_code_model(reasoning_effort: ReasoningEffort = "medium") -> BaseChatModel:
-    return get_openai_api_model(
-        model_name= os.environ.get("CODING_MODEL_NAME", QWEN_3_7_FLASH),
-        reasoning_effort=reasoning_effort,
-        base_url=os.environ.get("CODING_BASE_URL", ALI_BASE_URL),
-        api_key=os.environ.get("CODING_API_KEY", ALI_API_KEY),
-        extra_body=None
+
+def get_mini_model() -> BaseChatModel:
+    return get_standard_api_model(LITE_MODEL_NAME)
+
+
+def get_code_model() -> BaseChatModel:
+    return ChatOpenAI(
+        base_url=DS_BASE_URL,
+        model=DEEPSEEK_V4_FLASH,
+        extra_body={"thinking": {"type": "enabled"}},
+        reasoning_effort="high",
+        api_key=lambda: DS_API_KEY,
     )
 
 

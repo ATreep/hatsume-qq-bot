@@ -127,3 +127,70 @@ async def _resolve_rank_group(event: GroupMessageEvent, matcher, args: Message) 
         await matcher.finish("只有管理员可以访问其他群的数据。")
         return validate_group_id(event.group_id)
     return group_id
+
+
+async def handle_likerank(
+    bot: Bot,
+    event: GroupMessageEvent,
+    matcher,
+    args: Message,
+) -> None:
+    """Show one group's top 10 users by accumulated like count."""
+    group_id = await _resolve_rank_group(event, matcher, args)
+    try:
+        with _likes_lock:
+            counters = _load_like_groups().get(str(group_id), {})
+    except Exception as exc:
+        print(f"Failed to read group likes: {exc}")
+        await matcher.finish("点赞数据暂时不可用。")
+        return
+
+    top10 = sorted(counters.items(), key=lambda item: item[1], reverse=True)[:10]
+    if not top10:
+        await matcher.finish("暂无点赞数据。")
+        return
+
+    scope = "当前群" if group_id == event.group_id else f"群 {group_id}"
+    lines = [f"🏆 {scope}点赞排行榜 Top 10：\n"]
+    for rank, (user_id, count) in enumerate(top10, 1):
+        try:
+            user_name = await get_group_member_name(bot, group_id, int(user_id))
+        except Exception:
+            user_name = user_id
+        lines.append(f"{rank}. {user_name} (ID: {user_id}) - {count} 次点赞")
+    await matcher.finish("\n".join(lines))
+
+
+async def handle_like(bot: Bot, event: GroupMessageEvent, matcher) -> None:
+    like_time = 0
+    while True:
+        try:
+            await bot.send_like(user_id=event.get_user_id(), times=10)
+        except Exception as exc:
+            print(exc)
+            break
+        like_time += 10
+
+    user_name = "你"
+    try:
+        user_name = await get_group_member_name(bot, event.group_id, event.user_id)
+    except Exception:
+        pass
+
+    if like_time == 0:
+        await matcher.finish(f"点赞失败，今日给 {user_name} 的点赞已达上限。")
+        return
+
+    try:
+        total = _cumulate_user_like(
+            event.group_id,
+            event.get_user_id(),
+            like_time,
+        )
+    except Exception as exc:
+        print(f"Failed to persist group likes: {exc}")
+        await matcher.finish("点赞成功，但累计数据暂时无法保存。")
+        return
+    await matcher.finish(
+        f"刚刚成功点赞 {like_time} 次，已经累计为 {user_name} 点赞 {total} 次。"
+    )

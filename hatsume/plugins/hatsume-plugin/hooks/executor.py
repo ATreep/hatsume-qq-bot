@@ -366,6 +366,7 @@ async def execute_hook(
                         hook_name=hook_name,
                         prompt=str(record["prompt"]),
                         event_text=result.stdout,
+                        notified_user_ids=record.get("notified_user_ids"),
                     )
                 except Exception as exc:  # noqa: BLE001 - callback boundary
                     error = _redacted_error(f"Hook injection failed: {exc}")

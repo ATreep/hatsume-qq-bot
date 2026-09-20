@@ -22,7 +22,6 @@ from nonebot.adapters.onebot.v11 import (
 from PIL import Image
 
 from ..config import (
-    BOT_DISPLAY_NAME,
     IMAGE_MAX_PIXELS,
     IMAGE_MAX_SIZE_BYTES,
     MAX_REAL_AT_SEGMENTS,
@@ -39,7 +38,7 @@ from ..group_runtime import (
 )
 from ..infra import find_sandbox_user_image, save_sandbox_user_image
 from ..graph.nodes import (
-    append_auxiliary_message_async,
+    append_auxiliary_message,
     get_role_sys_prompt,
     make_system_trigger_message,
     set_current_query_user_id,
@@ -54,15 +53,16 @@ from ..utils import (
     message_to_json,
     resolve_cq_at_mentions,
 )
-from ..qq_emoji import render_qqface
-from ..message_render import build_bot_record_content
 from ..utils.md_to_image import auto_convert_text
 
+from ..intent_classifier.handler import on_message_incoming
 from .forward import (
     collect_people_from_messages,
     has_forward_segment,
     resolve_forward_content,
 )
+from .qqface import render_qqface
+
 # ---- Section 2: Message Pipeline & Assembly ----
 
 
@@ -83,19 +83,16 @@ async def _store_user_image(
     image_order: int,
     *,
     group_id: int,
-) -> tuple[str, bytes]:
+) -> str:
     response = requests.get(url, timeout=10)
     response.raise_for_status()
     image_bytes = response.content
 
-    return (
-        await _store_image_bytes(
-            image_bytes,
-            message_id,
-            image_order,
-            group_id=group_id,
-        ),
+    return await _store_image_bytes(
         image_bytes,
+        message_id,
+        image_order,
+        group_id=group_id,
     )
 
 
@@ -150,19 +147,17 @@ async def _cache_sent_images(
     send_result: Any,
     *,
     group_id: int,
-) -> list[str | None]:
-    """Cache sent bot images; return their sandbox paths by image order."""
+) -> None:
+    """Cache successfully sent bot images for later reply resolution."""
     message_id = _sent_message_id(send_result)
     if message_id is None:
-        return []
+        return
 
-    image_paths: list[str | None] = []
     image_order = 0
     for segment in segments:
         if _segment_type(segment) != "image":
             continue
         image_order += 1
-        image_paths.append(None)
         data = getattr(segment, "data", None)
         if not isinstance(data, dict):
             continue
@@ -170,7 +165,7 @@ async def _cache_sent_images(
 
         try:
             if isinstance(source, bytes):
-                image_paths[-1] = await _store_image_bytes(
+                await _store_image_bytes(
                     source,
                     message_id,
                     image_order,
@@ -184,7 +179,7 @@ async def _cache_sent_images(
                     source.removeprefix("base64://"),
                     validate=True,
                 )
-                image_paths[-1] = await _store_image_bytes(
+                await _store_image_bytes(
                     image_bytes,
                     message_id,
                     image_order,
@@ -196,7 +191,7 @@ async def _cache_sent_images(
                 if not separator or ";base64" not in header:
                     raise ValueError("unsupported image data URI")
                 image_bytes = base64.b64decode(encoded, validate=True)
-                image_paths[-1] = await _store_image_bytes(
+                await _store_image_bytes(
                     image_bytes,
                     message_id,
                     image_order,
@@ -204,20 +199,18 @@ async def _cache_sent_images(
                 )
                 continue
             if source.startswith(("http://", "https://")):
-                sandbox_path, _ = await _store_user_image(
+                await _store_user_image(
                     source,
                     message_id,
                     image_order,
                     group_id=group_id,
                 )
-                image_paths[-1] = sandbox_path
         except Exception as exc:
             print(
                 "Cannot cache sent image: "
                 f"group={group_id} message={message_id} order={image_order} err={exc}"
             )
             traceback.print_exc()
-    return image_paths
 
 
 async def _resolve_user_image_markdown(
@@ -227,8 +220,7 @@ async def _resolve_user_image_markdown(
     *,
     find_existing: bool,
     group_id: int,
-    include_image_url: bool = False,
-) -> tuple[str, str | None]:
+) -> str:
     temporary_markdown = f" ![图片（临时链接）]({url}) "
 
     if find_existing:
@@ -239,13 +231,13 @@ async def _resolve_user_image_markdown(
                 group_id=group_id,
             )
             if existing_path is not None:
-                return f" ![图片]({existing_path}) ", None
+                return f" ![图片]({existing_path}) "
         except Exception as exc:
             print("❌ Cannot find saved reply image: ", exc)
             traceback.print_exc()
 
     try:
-        sandbox_path, image_bytes = await _store_user_image(
+        sandbox_path = await _store_user_image(
             url,
             message_id,
             image_order,
@@ -254,19 +246,8 @@ async def _resolve_user_image_markdown(
     except Exception as exc:
         print("❌ Cannot save image to sandbox: ", exc)
         traceback.print_exc()
-        return temporary_markdown, None
-
-    image_url: str | None = None
-    if include_image_url:
-        with Image.open(BytesIO(image_bytes)) as image:
-            extension = _normalized_image_extension(image.format)
-            mime_type = Image.MIME.get(image.format or "")
-        if not mime_type:
-            mime_type = "image/jpeg" if extension == "jpg" else f"image/{extension}"
-        encoded = base64.b64encode(image_bytes).decode("ascii")
-        image_url = f"data:{mime_type};base64,{encoded}"
-
-    return f" ![图片]({sandbox_path}) ", image_url
+        return temporary_markdown
+    return f" ![图片]({sandbox_path}) "
 
 
 def _format_forward_for_reply(messages: list[dict[str, Any]], max_items: int = 10) -> str:
@@ -309,70 +290,8 @@ def _format_forward_for_reply(messages: list[dict[str, Any]], max_items: int = 1
     return header + "\n" + "\n".join(lines) + "\n]"
 
 
-def _message_created_at(event: Any) -> float:
-    """Return the event's send time, falling back to the current time."""
-    raw = getattr(event, "time", None)
-    if isinstance(raw, bool) or not isinstance(raw, (int, float)) or raw <= 0:
-        return time.time()
-    return float(raw)
-
-
-def _reply_target_id(event: Any) -> int | None:
-    """Return the replied-to message id as a positive int when available."""
-    reply = getattr(event, "reply", None)
-    if reply is None:
-        return None
-    raw = getattr(reply, "message_id", None)
-    if isinstance(raw, bool):
-        return None
-    if isinstance(raw, int):
-        return raw if raw > 0 else None
-    if isinstance(raw, str) and raw.isdigit():
-        parsed = int(raw)
-        return parsed if parsed > 0 else None
-    return None
-
-
-def _record_user_message(
-    group_id: int,
-    sender_qq_id: int,
-    sender_name: str,
-    content: str,
-    *,
-    reply_to_message_id: int | None,
-    platform_message_id: int | None,
-    created_at: float,
-) -> None:
-    """Persist one incoming group message; never break the chat pipeline."""
-    try:
-        from ..message_db import get_store
-
-        get_store().insert_message(
-            group_id=group_id,
-            role="user",
-            sender_qq_id=sender_qq_id,
-            sender_name=sender_name,
-            content=content,
-            reply_to_message_id=reply_to_message_id,
-            platform_message_id=platform_message_id,
-            created_at=created_at,
-        )
-    except Exception as exc:
-        print(f"❌ Failed to record user message: group={group_id} err={exc}")
-
-
-async def get_human_message(
-    bot: Bot, event: MessageEvent, *, attach_image_parts: bool = True
-) -> tuple[list[dict], dict]:
-    """Parse a QQ event into (content_parts, source_entry).
-
-    ``attach_image_parts`` controls how images are referenced.  The active
-    conversation keeps inline base64 image parts so the vision model can read
-    the picture in the current turn.  Callers that only retain the message as
-    long-lived auxiliary context pass ``False``: those images stay referenced
-    by their sandbox path inside the text, which keeps the queue small instead
-    of carrying a base64 payload on every later request.
-    """
+async def get_human_message(bot: Bot, event: MessageEvent) -> tuple[list[dict], dict]:
+    """Parse a QQ event into (content_parts, source_entry)."""
     if not isinstance(event, GroupMessageEvent):
         raise ValueError("Hatsume only accepts group messages")
     group_id = event.group_id
@@ -420,14 +339,13 @@ async def get_human_message(
                     re_message += msg_seg.data.get("text", "")
                 case "image":
                     reply_image_order += 1
-                    image_markdown, _ = await _resolve_user_image_markdown(
+                    re_message += await _resolve_user_image_markdown(
                         msg_seg.data.get("url", ""),
                         event.reply.message_id,
                         reply_image_order,
                         find_existing=True,
                         group_id=group_id,
                     )
-                    re_message += image_markdown
                 case "face":
                     re_message += render_qqface(msg_seg.data)
                 case "forward":
@@ -458,7 +376,6 @@ async def get_human_message(
             re_message = re_message[:REPLY_MAX_LENGTH] + "...... （回复消息过长，无法全部显示）"
 
     image_order = 0
-    image_url_parts: list[dict[str, Any]] = []
     for msg_seg in msg:
         match msg_seg.type:
             case "text":
@@ -477,19 +394,13 @@ async def get_human_message(
                         add_source_person(at_qq, str(at_qq))
             case "image":
                 image_order += 1
-                image_markdown, image_url = await _resolve_user_image_markdown(
+                plain_message += await _resolve_user_image_markdown(
                     msg_seg.data.get("url", ""),
                     event.message_id,
                     image_order,
                     find_existing=False,
                     group_id=group_id,
-                    include_image_url=attach_image_parts,
                 )
-                plain_message += image_markdown
-                if image_url is not None:
-                    image_url_parts.append(
-                        {"type": "image_url", "image_url": {"url": image_url}}
-                    )
             case "face":
                 plain_message += render_qqface(msg_seg.data)
             case "forward":
@@ -549,30 +460,12 @@ async def get_human_message(
 
     rendered_text = json.dumps(msg_json, ensure_ascii=False)
     content: list[dict[str, Any]] = [{"type": "text", "text": rendered_text}]
-    if forward_messages is None:
-        content.extend(image_url_parts)
 
     source_entry = {
         "source_id": f"m{getattr(event, 'message_id', int(time.time() * 1000))}",
         "text": rendered_text,
         "people": source_people,
     }
-
-    if event.user_id != event.self_id:
-        record_content = plain_message
-        if forward_messages is not None:
-            forward_summary = _format_forward_for_reply(forward_messages)
-            if forward_summary:
-                record_content = f"{record_content}\n{forward_summary}".strip()
-        _record_user_message(
-            group_id,
-            event.user_id,
-            user_name,
-            record_content,
-            reply_to_message_id=_reply_target_id(event),
-            platform_message_id=message_id,
-            created_at=_message_created_at(event),
-        )
 
     return content, source_entry
 
@@ -590,9 +483,9 @@ def _start_conv_for_trigger(
     """Start a new conversation for an external trigger when not currently chatting.
 
     Uses bot.send_group_msg() to target the specific group directly.
-    trigger_type: "agent", "timer", or "hook" — controls user_id=None
-    behavior. Agent and Hook triggers use user_id=None when user_id==0 (no
-    specific user to notify). Timer triggers always pass the effective user_id.
+    trigger_type: "agent" or "timer" — controls user_id=None behavior.
+    Agent triggers use user_id=None when user_id==0 (no specific user to notify).
+    Timer triggers always pass the effective user_id.
     """
     from ..graph.tools import configure_tool_callbacks as configure_tools
 
@@ -604,12 +497,12 @@ def _start_conv_for_trigger(
     target_bot = bot if bot is not None else group_runtime_registry.get_bot(group_id)
     conv_state = runtime.conversation
 
-    async def _send_to_group(msg, reply_to_message_id=None) -> bool:
+    async def _send_to_group(msg, reply_to_message_id=None):
         if msg == "[CONVERSATION END]":
             conv_state.end_conversation()
-            return False
+            return
         try:
-            return await _send_group_ai_message(
+            await _send_group_ai_message(
                 target_bot,
                 group_id,
                 msg,
@@ -617,12 +510,11 @@ def _start_conv_for_trigger(
             )
         except Exception as e:
             print(f"❌ _send_to_group failed: group={group_id} err={e}")
-            return False
 
     conv_state.ai_answer = _send_to_group
 
     effective_user_id: int | None = user_id
-    if trigger_type in {"agent", "hook"} and user_id == 0:
+    if trigger_type == "agent" and user_id == 0:
         effective_user_id = None
 
     async def _run() -> None:
@@ -633,7 +525,6 @@ def _start_conv_for_trigger(
                 configure_tools,
                 user_id=effective_user_id,
                 system_task_text=notify_msg,
-                system_trigger_type=trigger_type,
             )
 
     asyncio.create_task(_run())
@@ -717,7 +608,6 @@ async def start_new_conversation(
     messages: list[dict] | None = None,
     sources: list[dict] | None = None,
     system_task_text: str | None = None,
-    system_trigger_type: str = "system_task",
     flush_idle: bool = False,
 ) -> None:
     """Set up and invoke the LangGraph conversation from scratch."""
@@ -740,7 +630,7 @@ async def start_new_conversation(
 
             if flush_idle:
                 idle_msgs, idle_srcs = conv_state.flush_idle_to_auxiliary()
-                await append_auxiliary_message_async(idle_msgs, idle_srcs)
+                append_auxiliary_message(idle_msgs, idle_srcs)
 
             if messages is not None:
                 conv_state.human_queue.extend(messages)
@@ -748,7 +638,7 @@ async def start_new_conversation(
 
             if system_task_text is not None:
                 conv_state.human_queue.append(
-                    make_system_trigger_message(system_task_text, system_trigger_type)
+                    make_system_trigger_message(system_task_text, "system_task")
                 )
 
             existing_task = conv_state._graph_task
@@ -775,16 +665,9 @@ async def start_new_conversation(
         except asyncio.CancelledError:
             print(f"🛑 [graph:{runtime.group_id}] Conversation cancelled")
         finally:
-            async with runtime.graph_start_lock:
-                if conv_state._graph_task is graph_task:
-                    conv_state._graph_task = None
-                    conv_state.is_graph_running = False
-                    try:
-                        from ..mcp.manager import get_mcp_manager
-
-                        await get_mcp_manager().close_conversation(runtime.group_id)
-                    except Exception as exc:
-                        print(f"⚠️ [mcp] Conversation cleanup failed: {exc}")
+            if conv_state._graph_task is graph_task:
+                conv_state._graph_task = None
+                conv_state.is_graph_running = False
 
 
 # ---------------------------------------------------------------------------
@@ -915,40 +798,11 @@ async def _build_ai_response_segments(
     return segments, force_message
 
 
-def _record_bot_message(
-    group_id: int,
-    content: str,
-    *,
-    reply_to_message_id: int | None,
-    platform_message_id: int | None,
-    created_at: float,
-) -> None:
-    """Persist one successfully sent bot message; never break the send flow."""
-    try:
-        from ..config import BOT_QQ_ID
-        from ..message_db import get_store
-
-        get_store().insert_message(
-            group_id=group_id,
-            role="assistant",
-            sender_qq_id=BOT_QQ_ID,
-            sender_name=BOT_DISPLAY_NAME,
-            content=content,
-            reply_to_message_id=reply_to_message_id,
-            platform_message_id=platform_message_id,
-            created_at=created_at,
-        )
-    except Exception as exc:
-        print(f"❌ Failed to record bot message: group={group_id} err={exc}")
-
-
 async def _send_group_ai_message(
     bot: Bot,
     group_id: int,
     msg: str | Message | MessageSegment,
     reply_to_message_id: int | None = None,
-    *,
-    record: bool = True,
 ) -> bool:
     """Send one AI response directly to a group with reply fallback."""
     segments, force_message = await _build_ai_response_segments(
@@ -963,6 +817,7 @@ async def _send_group_ai_message(
             group_id=group_id,
             message=_message_payload_for_segments(segments, force_message),
         )
+        await _cache_sent_images(segments, send_result, group_id=group_id)
     except Exception:
         if reply_to_message_id is None:
             raise
@@ -970,33 +825,21 @@ async def _send_group_ai_message(
             "Reply target rejected; retrying without reply segment: "
             f"{reply_to_message_id}"
         )
-        reply_to_message_id = None
-        segments, force_message = await _build_ai_response_segments(
+        fallback_segments, fallback_force = await _build_ai_response_segments(
             msg,
             group_id,
         )
-        send_result = await bot.send_group_msg(
+        fallback_result = await bot.send_group_msg(
             group_id=group_id,
-            message=_message_payload_for_segments(segments, force_message),
+            message=_message_payload_for_segments(
+                fallback_segments,
+                fallback_force,
+            )
         )
-
-    try:
-        image_paths = await _cache_sent_images(
-            segments,
-            send_result,
+        await _cache_sent_images(
+            fallback_segments,
+            fallback_result,
             group_id=group_id,
-        )
-    except Exception as exc:
-        print(f"❌ Failed to cache sent images: group={group_id} err={exc}")
-        image_paths = []
-
-    if record:
-        _record_bot_message(
-            group_id,
-            build_bot_record_content(segments, image_paths),
-            reply_to_message_id=reply_to_message_id,
-            platform_message_id=_sent_message_id(send_result),
-            created_at=time.time(),
         )
     return True
 
@@ -1007,26 +850,25 @@ async def handle_ai_message(
     group_id: int,
     retry: int = 0,
     reply_to_message_id: int | None = None,
-) -> bool:
-    """Send an AI response, retrying up to five times, and report success."""
+) -> None:
+    """Send an AI response to an explicit group. Retries up to 5 times."""
     if retry >= 5:
         try:
             await _send_group_ai_message(
                 bot,
                 group_id,
                 "（电波受到干扰...想要发出的内容丢失了...）",
-                record=False,
             )
         except Exception:
             pass
-        return False
+        return
 
     if msg == "[CONVERSATION END]":
         runtime = group_runtime_registry.get_existing(group_id)
         if runtime is not None:
             runtime.conversation.end_conversation()
         print("Current conversation ends")
-        return False
+        return
 
     try:
         sent = await _send_group_ai_message(
@@ -1040,16 +882,13 @@ async def handle_ai_message(
                 bot,
                 group_id,
                 "（电波受到干扰...想要发出的内容丢失了...）",
-                record=False,
             )
-            return False
-        return True
     except Exception as e:
         print("Send error: ", str(e))
         traceback.print_exc()
         await asyncio.sleep(3)
         print(f"Retry sending message, {retry=}")
-        return await handle_ai_message(
+        await handle_ai_message(
             msg,
             bot,
             group_id=group_id,
@@ -1068,36 +907,11 @@ async def start_chat(bot: Bot, matcher, event: GroupMessageEvent) -> None:
     await matcher.finish()
 
 
-async def _dispatch_message_hooks(bot: Bot, event: GroupMessageEvent) -> None:
-    """Fire every message-match Hook triggered by one incoming group message."""
-    from ..hooks.message_trigger import dispatch_message_hooks
-
-    async def resolve_user_name() -> str:
-        return await get_group_member_name(bot, event.group_id, event.user_id)
-
-    try:
-        if event.user_id == event.self_id:
-            return
-        text = event.message.extract_plain_text()
-        if not text.strip():
-            return
-        await dispatch_message_hooks(
-            group_id=event.group_id,
-            user_id=event.user_id,
-            text=text,
-            resolve_user_name=resolve_user_name,
-        )
-    except Exception as exc:  # noqa: BLE001 - Hook failures must not break chat
-        print(f"❌ Message Hook dispatch failed: {exc}")
-        traceback.print_exc()
-
-
 async def user_chat_handle(bot: Bot, event: GroupMessageEvent, user_chat_matcher) -> None:
     print("call user_chat")
     runtime = group_runtime_registry.bind_bot(event.group_id, bot)
     conv_state = runtime.conversation
     with bind_group_runtime(runtime):
-        await _dispatch_message_hooks(bot, event)
         from ..character_proxy import activate_character_proxy_peer
 
         activate_character_proxy_peer(
@@ -1109,12 +923,8 @@ async def user_chat_handle(bot: Bot, event: GroupMessageEvent, user_chat_matcher
 
         session_id = event.get_session_id()
         if session_id not in conv_state.chat_peers:
-            auxiliary_messages, auxiliary_source_entry = await get_human_message(
-                bot, event, attach_image_parts=False
-            )
-            await append_auxiliary_message_async(
-                auxiliary_messages, [auxiliary_source_entry]
-            )
+            auxiliary_messages, auxiliary_source_entry = await get_human_message(bot, event)
+            append_auxiliary_message(auxiliary_messages, [auxiliary_source_entry])
             print("Collected this auxiliary message.")
             return
         print("Detected chat peers.")

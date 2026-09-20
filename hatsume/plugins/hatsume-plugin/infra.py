@@ -1,4 +1,4 @@
-"""Infrastructure: local shell processes, media files, and HTML rendering."""
+"""Infrastructure: Docker sandbox and HTML rendering."""
 
 from __future__ import annotations
 
@@ -20,22 +20,15 @@ from PIL import Image, UnidentifiedImageError
 
 from .config import (
     CONTAINER_NAME_BASE,
+    DOCKER_ENV_PATH,
     IMAGE_MAX_PIXELS,
     IMAGE_MAX_SIZE_BYTES,
     SHELL_TIMEOUT,
 )
 from .group_runtime import get_current_group_id, validate_group_id
 
-LOCAL_EXECUTION = True
-LOCAL_WORKSPACE_PATH = Path("/work")
-LOCAL_HOME_PATH = Path("/root")
-
-
-def _local_process_env() -> dict[str, str]:
-    return {**os.environ, "HOME": str(LOCAL_HOME_PATH)}
-
 # ===========================================================================
-# Per-group subprocess reference counting
+# Subprocess reference counting (for auto-stop container)
 # ===========================================================================
 _STOP_GRACE_SECONDS: float = 300.0  # 5 minutes
 
@@ -144,12 +137,13 @@ def _release_subprocess(group_id: int | None = None) -> None:
 
 
 async def _delayed_stop_container(state: ContainerRuntime) -> None:
-    """Release an idle logical runtime after the grace period."""
+    """Wait grace period then stop container if still no active subprocesses."""
     try:
         await asyncio.sleep(_STOP_GRACE_SECONDS)
         with state.refcount_lock:
             should_stop = state.refcount == 0 and not state.resetting
         if should_stop:
+            stop_container(state.group_id)
             state.active = False
     finally:
         if state.stop_task is asyncio.current_task():
@@ -157,17 +151,48 @@ async def _delayed_stop_container(state: ContainerRuntime) -> None:
 
 
 # ===========================================================================
-# Local shell and media workspace
+# Docker sandbox
 # ===========================================================================
 USER_IMAGE_SANDBOX_DIR = "/tmp/hatsume-user-images"
 
 
 async def ensure_container_running(group_id: int | None = None) -> None:
-    """Mark the group-local process runtime ready in this container."""
     resolved_group_id = _resolve_group_id(group_id)
     state = _get_container_state(resolved_group_id, create=True)
     assert state is not None
     async with state.startup_lock:
+        if state.active:
+            return
+        proc = await asyncio.create_subprocess_exec(
+            "bash",
+            str(Path(DOCKER_ENV_PATH, "launch_image.sh")),
+            state.name,
+            cwd=DOCKER_ENV_PATH,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _track_foreground_process(state, proc)
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(input=b"echo ready\n"),
+                timeout=SHELL_TIMEOUT,
+            )
+        except asyncio.TimeoutError as exc:
+            await _terminate_async_process(proc)
+            raise AssertionError("Docker container startup timed out") from exc
+        except asyncio.CancelledError:
+            await _terminate_async_process(proc)
+            raise
+        except Exception:
+            await _terminate_async_process(proc)
+            raise
+        finally:
+            _untrack_foreground_process(state, proc)
+        decoded_stdout = _strip_ansi(stdout)
+        if proc.returncode != 0 or decoded_stdout.startswith("[HALT]"):
+            detail = _strip_ansi(stderr).strip() or decoded_stdout.strip()
+            raise AssertionError(detail or "Docker container startup failed")
         state.active = True
 
 
@@ -175,8 +200,11 @@ async def cleanup_persistent_container(group_id: int) -> bool:
     """Terminate and delete one group's existing sandbox without creating it."""
     resolved_group_id = validate_group_id(group_id)
     state = _get_container_state(resolved_group_id, create=False)
-    if state is None:
+    if state is None and not _container_exists(resolved_group_id):
         return False
+    if state is None:
+        state = _get_container_state(resolved_group_id, create=True)
+        assert state is not None
     await _shutdown_container_state(state, delete=True)
     _container_states.pop(resolved_group_id, None)
     return True
@@ -199,7 +227,7 @@ async def run_cmd(
     *,
     group_id: int | None = None,
 ) -> str:
-    """Execute a Bash command in the bot container. Returns stdout+stderr."""
+    """Execute a bash command in Docker. Returns stdout+stderr."""
     resolved_group_id = _resolve_group_id(group_id)
     await ensure_container_running(resolved_group_id)
     state = _acquire_subprocess(resolved_group_id)
@@ -207,8 +235,9 @@ async def run_cmd(
     try:
         proc = await asyncio.create_subprocess_exec(
             "bash",
-            cwd=LOCAL_WORKSPACE_PATH,
-            env=_local_process_env(),
+            str(Path(DOCKER_ENV_PATH, "launch_image.sh")),
+            state.name,
+            cwd=DOCKER_ENV_PATH,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -238,6 +267,7 @@ async def run_cmd(
         try:
             decode_stdout = _strip_ansi(stdout)
             decode_stderr = _strip_ansi(stderr)
+            assert not decode_stdout.startswith("[HALT]"), "Docker is not running!"
             output = decode_stdout
             if decode_stderr.strip() != "":
                 output += "\n\n" + decode_stderr
@@ -303,7 +333,7 @@ def _user_image_basename(message_id: int, image_order: int) -> str:
 async def _ensure_user_image_sandbox_dir(group_id: int) -> None:
     resolved_group_id = validate_group_id(group_id)
     await ensure_container_running(resolved_group_id)
-    quoted_dir = shlex.quote(f"{USER_IMAGE_SANDBOX_DIR}/{resolved_group_id}")
+    quoted_dir = shlex.quote(USER_IMAGE_SANDBOX_DIR)
     output = await run_cmd(
         f"mkdir -p -- {quoted_dir}; echo '::EXIT::'$?",
         timeout=30,
@@ -329,8 +359,7 @@ async def find_sandbox_user_image(
     basename = _user_image_basename(message_id, image_order)
     resolved_group_id = validate_group_id(group_id)
     await _ensure_user_image_sandbox_dir(resolved_group_id)
-    group_dir = f"{USER_IMAGE_SANDBOX_DIR}/{resolved_group_id}"
-    quoted_dir = shlex.quote(group_dir)
+    quoted_dir = shlex.quote(USER_IMAGE_SANDBOX_DIR)
     quoted_pattern = shlex.quote(f"{basename}.*")
     output = await run_cmd(
         (
@@ -349,7 +378,7 @@ async def find_sandbox_user_image(
             f"{detail.strip() or '(no output)'}"
         )
 
-    expected_prefix = f"{group_dir}/{basename}."
+    expected_prefix = f"{USER_IMAGE_SANDBOX_DIR}/{basename}."
     for line in detail.splitlines():
         candidate = line.strip()
         if candidate.startswith(expected_prefix):
@@ -374,8 +403,7 @@ async def save_sandbox_user_image(
     resolved_group_id = validate_group_id(group_id)
     await _ensure_user_image_sandbox_dir(resolved_group_id)
     destination = (
-        f"{USER_IMAGE_SANDBOX_DIR}/{resolved_group_id}/"
-        f"{basename}.{normalized_extension}"
+        f"{USER_IMAGE_SANDBOX_DIR}/{basename}.{normalized_extension}"
     )
 
     temporary_path: Path | None = None
@@ -449,7 +477,7 @@ async def copy_host_file_to_sandbox(
     timeout: float = SHELL_TIMEOUT,
     group_id: int | None = None,
 ) -> None:
-    """Copy one local file to an absolute path in this container."""
+    """Copy one host file into the selected group's container."""
     if not destination.startswith("/") or "\0" in destination:
         raise ValueError("sandbox destination must be an absolute path")
     source = Path(host_path)
@@ -460,15 +488,11 @@ async def copy_host_file_to_sandbox(
     await ensure_container_running(resolved_group_id)
     state = _acquire_subprocess(resolved_group_id)
     try:
-        destination_path = Path(destination)
-        destination_path.parent.mkdir(parents=True, exist_ok=True)
         process = await asyncio.create_subprocess_exec(
+            "docker",
             "cp",
-            "--",
             str(source),
-            str(destination_path),
-            cwd=LOCAL_WORKSPACE_PATH,
-            env=_local_process_env(),
+            f"{state.name}:{destination}",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -501,18 +525,31 @@ async def copy_host_file_to_sandbox(
 
 
 def _container_exists(group_id: int) -> bool:
-    """Return whether the group has a logical local process runtime."""
-    return _get_container_state(group_id, create=False) is not None
+    name = container_name_for_group(group_id)
+    probe = subprocess.run(
+        ["docker", "container", "inspect", name],
+        cwd=DOCKER_ENV_PATH,
+        capture_output=True,
+    )
+    return probe.returncode == 0
 
 
 def delete_container(group_id: int) -> None:
-    """Compatibility no-op: the bot must never delete its own container."""
-    validate_group_id(group_id)
+    name = container_name_for_group(group_id)
+    subprocess.run(
+        ["bash", Path(DOCKER_ENV_PATH, "delete_container.sh"), name],
+        cwd=DOCKER_ENV_PATH,
+        capture_output=True,
+    )
 
 
 def stop_container(group_id: int) -> None:
-    """Compatibility no-op: group cleanup only stops owned subprocesses."""
-    validate_group_id(group_id)
+    name = container_name_for_group(group_id)
+    subprocess.run(
+        ["bash", Path(DOCKER_ENV_PATH, "stop_container.sh"), name],
+        cwd=DOCKER_ENV_PATH,
+        capture_output=True,
+    )
 
 
 # ===========================================================================
@@ -529,11 +566,12 @@ def start_background_cmd(
     *,
     group_id: int | None = None,
 ) -> Path:
-    """Spawn a background Bash process in the bot container.
+    """Spawn a background bash process in the Docker sandbox.
 
     stdout and stderr are merged and redirected to a tmp file.
-    The group runtime must already be active (ensure_container_running should be
-    called before invoking shell_executor flows; background_shell does this).
+    Docker container must already be running (ensure_container_running
+    should be called before invoking shell_executor flows; for
+    background_shell agent this is handled by the existing flow).
 
     Args:
         code: The shell script/command to execute.
@@ -556,9 +594,8 @@ def start_background_cmd(
     output_handle = os.fdopen(file_descriptor, "wb")
     try:
         proc = subprocess.Popen(
-            ["bash"],
-            cwd=LOCAL_WORKSPACE_PATH,
-            env=_local_process_env(),
+            ["bash", Path(DOCKER_ENV_PATH, "launch_image.sh"), state.name],
+            cwd=DOCKER_ENV_PATH,
             stdin=subprocess.PIPE,
             stdout=output_handle,
             stderr=subprocess.STDOUT,
@@ -704,6 +741,10 @@ async def _shutdown_container_state(
 
     with state.refcount_lock:
         state.refcount = 0
+    if delete:
+        delete_container(state.group_id)
+    elif state.active or _container_exists(state.group_id):
+        stop_container(state.group_id)
     state.active = False
     state.resetting = False
 

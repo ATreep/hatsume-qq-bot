@@ -368,45 +368,6 @@ class TestGroupSkillManager:
         assert "名称无效" in manager.load_skill(malicious_name)
         assert "Original common content" in common_file.read_text(encoding="utf-8")
 
-    def test_builtin_skills_are_first_and_read_only(self, tmp_path):
-        builtin_dir = tmp_path / "builtin"
-        common_dir = tmp_path / "common"
-        local_dir = tmp_path / "local"
-        builtin_dir.mkdir()
-        common_dir.mkdir()
-        make_skill_file(builtin_dir, "hook-authoring", "built in", "builtin body")
-        make_skill_file(common_dir, "hook-authoring", "collision", "common body")
-        make_skill_file(common_dir, "shared", "shared", "shared body")
-
-        manager = GroupSkillManager(
-            SkillManager(common_dir),
-            local_dir,
-            create_local=True,
-            builtin_manager=SkillManager(builtin_dir, create_dir=False),
-        )
-
-        assert [skill["name"] for skill in manager.list_skills()] == [
-            "hook-authoring",
-            "shared",
-        ]
-        assert "builtin body" in manager.load_skill("hook-authoring")
-        assert "不能覆盖" in manager.save_skill(
-            "hook-authoring",
-            "---\nname: hook-authoring\ndescription: local\n---\nlocal",
-        )
-        assert "不能删除" in manager.remove_skill("hook-authoring")
-
-
-def test_source_hook_authoring_skill_contract():
-    skill_path = PLUGIN_DIR / "skills/builtin/hook-authoring.md"
-    text = skill_path.read_text(encoding="utf-8")
-    assert "name: hook-authoring" in text
-    assert "HATSUME_HOOK_VALIDATION=1" in text
-    assert "退出码为 `10`" in text
-    assert "至少 300 秒" in text
-    assert "最多 60 秒" in text
-    assert "每群最多启用 5 个 Hook" in text
-
 
 # ---------------------------------------------------------------------------
 # build_skill_prompt tests

@@ -22,7 +22,6 @@ dependencies = [
     "langchain-community>=0.4.2,<0.5",
     "langchain-core>=1.4.9,<2",
     "langchain-openai>=1.3.5,<2",
-    "langchain-keenable>=0.1.2",
     "langgraph>=1.2.9,<2",
     "markdown>=3.10.2,<4",
     "nonebot2[fastapi]>=2.5.0,<3",
@@ -41,8 +40,6 @@ dependencies = [
     "rank-bm25>=0.2.2,<1",
     "requests>=2.34.2,<3",
     "volcengine-python-sdk[ark]>=5.0.40,<6",
-    "langchain-google-genai>=4.2.7",
-    "mcp>=1.25.0,<2",
 ]
 
 [project.optional-dependencies]

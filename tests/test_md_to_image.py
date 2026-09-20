@@ -108,11 +108,16 @@ async def _no_katex():
     return None
 
 
+async def _no_face():
+    return None
+
+
 # Keep these tests independent from installed htmlrender assets and runtime
-# assets. The behavior under test starts at Markdown conversion and the
+# face data. The behavior under test starts at Markdown conversion and the
 # stubbed render_html boundary.
 md_to_image_mod._get_css = _empty_css
 md_to_image_mod._get_katex = _no_katex
+md_to_image_mod._get_random_face_b64 = _no_face
 
 _extract_links = md_to_image_mod._extract_links
 _format_links = md_to_image_mod._format_links
@@ -284,37 +289,6 @@ def test_format_links_empty():
     assert result == ""
 
 
-# ---- _markdown_to_html code-block wrap tests ---------------------------------
-
-@pytest.mark.asyncio
-async def test_markdown_to_html_code_block_wrap_css():
-    """Generated HTML styles code blocks so long lines wrap, not clip."""
-    html = await md_to_image_mod._markdown_to_html(
-        "```python\nprint('hello world')\n```"
-    )
-    # Inline CSS must override the theme's white-space: pre / word-wrap: normal.
-    assert "white-space: pre-wrap" in html
-    assert "overflow-wrap: break-word" in html
-    assert "word-break: break-word" in html
-    # The code block is still emitted as a <pre> element by codehilite.
-    assert "<pre" in html
-
-
-@pytest.mark.asyncio
-async def test_markdown_to_html_code_block_wrap_scoped_and_preserves_content():
-    """Wrap rules target pre/code and the code lines survive conversion intact."""
-    html = await md_to_image_mod._markdown_to_html(
-        "```python\nvery_long_line = \"x\" * 1000\n    indented = True\n```"
-    )
-    # Wrap CSS is scoped to code-block selectors.
-    assert ".markdown-body pre" in html
-    assert ".markdown-body pre code" in html
-    # codehilite output keeps the long and indented lines inside a <pre> block.
-    assert '<div class="codehilite">' in html
-    assert "very_long_line" in html
-    assert "indented" in html
-
-
 # ---- auto_convert_text integration tests -------------------------------------
 
 @pytest.mark.asyncio
@@ -360,17 +334,6 @@ async def test_auto_convert_text_short_with_md_features_and_links():
     assert result[0].type == "image"
     assert result[1].type == "text"
     assert "https://docs.python.org" in result[1].data.get("text", "")
-
-
-@pytest.mark.asyncio
-async def test_auto_convert_text_short_markdown_link():
-    """A short Markdown link renders as an image and preserves its URL."""
-    msg = "[linkname](https://example.com)"
-    result = await auto_convert_text(msg)
-    assert len(result) == 2
-    assert result[0].type == "image"
-    assert result[1].type == "text"
-    assert result[1].data.get("text") == "LINKS\n\n1. https://example.com"
 
 
 @pytest.mark.asyncio

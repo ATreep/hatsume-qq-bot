@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import sqlite3
 import threading
@@ -51,6 +52,7 @@ EXPECTED_COLUMNS = {
     "trigger_type",
     "match_user_id",
     "match_pattern",
+    "notified_user_ids",
 }
 
 # Columns added after the first release of the Hook database. Existing
@@ -59,6 +61,7 @@ MIGRATED_COLUMNS: dict[str, str] = {
     "trigger_type": "TEXT NOT NULL DEFAULT 'heartbeat'",
     "match_user_id": "INTEGER",
     "match_pattern": "TEXT",
+    "notified_user_ids": "TEXT NOT NULL DEFAULT '[]'",
 }
 
 
@@ -128,6 +131,20 @@ def _match_pattern(value: Any) -> str:
     return normalized
 
 
+def _notified_user_ids(value: Any) -> str:
+    if value is None:
+        return "[]"
+    if not isinstance(value, (list, tuple)):
+        raise ValueError("notified_user_ids must be a list of QQ IDs")
+    normalized: list[int] = []
+    for user_id in value:
+        if isinstance(user_id, bool) or not isinstance(user_id, int) or user_id <= 0:
+            raise ValueError("notified_user_ids must contain positive integers")
+        if user_id not in normalized:
+            normalized.append(user_id)
+    return json.dumps(normalized, ensure_ascii=False, separators=(",", ":"))
+
+
 class HookStore:
     """Manage persistent Hook definitions and execution status."""
 
@@ -183,6 +200,7 @@ class HookStore:
                         trigger_type TEXT NOT NULL DEFAULT 'heartbeat',
                         match_user_id INTEGER,
                         match_pattern TEXT,
+                        notified_user_ids TEXT NOT NULL DEFAULT '[]',
                         UNIQUE (group_id, name)
                     )
                     """
@@ -207,6 +225,15 @@ class HookStore:
             return None
         result = dict(row)
         result["enabled"] = bool(result["enabled"])
+        try:
+            notified = json.loads(str(result.get("notified_user_ids") or "[]"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            notified = []
+        result["notified_user_ids"] = [
+            int(user_id)
+            for user_id in notified
+            if isinstance(user_id, int) and not isinstance(user_id, bool) and user_id > 0
+        ] if isinstance(notified, list) else []
         return result
 
     @staticmethod
@@ -234,11 +261,13 @@ class HookStore:
         trigger_type: str = HOOK_TRIGGER_HEARTBEAT,
         match_user_id: int | None = None,
         match_pattern: str | None = None,
+        notified_user_ids: list[int] | None = None,
     ) -> dict[str, Any]:
         resolved_group_id = _positive_int(group_id, "group_id")
         resolved_creator = _positive_int(created_by, "created_by")
         resolved_name = _bounded_text(name, "name", HOOK_MAX_NAME_LENGTH)
         resolved_prompt = _bounded_text(prompt, "prompt", HOOK_MAX_PROMPT_LENGTH)
+        resolved_notified_user_ids = _notified_user_ids(notified_user_ids)
         resolved_trigger = _trigger_type(trigger_type)
         if resolved_trigger == HOOK_TRIGGER_HEARTBEAT:
             if match_user_id is not None or match_pattern is not None:
@@ -249,6 +278,8 @@ class HookStore:
             resolved_match_user_id: int | None = None
             resolved_match_pattern: str | None = None
         else:
+            if resolved_notified_user_ids != "[]":
+                raise ValueError("message_match Hooks must not define notified_user_ids")
             if str(script_path).strip():
                 raise ValueError("message_match Hooks must not define a script_path")
             resolved_path = ""
@@ -282,8 +313,9 @@ class HookStore:
                             group_id, name, script_path, prompt,
                             interval_seconds, timeout_seconds, enabled,
                             created_by, created_at, updated_at,
-                            trigger_type, match_user_id, match_pattern
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            trigger_type, match_user_id, match_pattern,
+                            notified_user_ids
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             resolved_group_id,
@@ -299,6 +331,7 @@ class HookStore:
                             resolved_trigger,
                             resolved_match_user_id,
                             resolved_match_pattern,
+                            resolved_notified_user_ids,
                         ),
                     )
                 except sqlite3.IntegrityError as exc:
@@ -370,6 +403,7 @@ class HookStore:
             "enabled",
             "match_user_id",
             "match_pattern",
+            "notified_user_ids",
         }
         unknown = set(changes) - allowed
         if unknown:
@@ -401,6 +435,10 @@ class HookStore:
             normalized["match_user_id"] = _match_user_id(changes["match_user_id"])
         if "match_pattern" in changes:
             normalized["match_pattern"] = _match_pattern(changes["match_pattern"])
+        if "notified_user_ids" in changes:
+            normalized["notified_user_ids"] = _notified_user_ids(
+                changes["notified_user_ids"]
+            )
 
         with self._operation_lock:
             conn = self._connection()
@@ -419,6 +457,7 @@ class HookStore:
                         "script_path",
                         "interval_seconds",
                         "timeout_seconds",
+                        "notified_user_ids",
                     } & set(normalized)
                 if incompatible:
                     raise ValueError(

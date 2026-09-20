@@ -29,12 +29,4 @@ def test_removed_and_group_selectable_commands():
 
     assert "clear" not in commands
     assert "video" not in commands
-    assert "learn-evolve" not in commands
-    assert {"agents", "skills", "likerank", "resetsandbox", "mcp"} <= commands
-
-
-def test_learning_evolution_module_and_midnight_registration_are_removed():
-    plugin_dir = PLUGIN_INIT.parent
-
-    assert not (plugin_dir / "evolution.py").exists()
-    assert "daily_learn_evolve" not in PLUGIN_INIT.read_text(encoding="utf-8")
+    assert {"agents", "skills", "likerank", "resetsandbox"} <= commands
