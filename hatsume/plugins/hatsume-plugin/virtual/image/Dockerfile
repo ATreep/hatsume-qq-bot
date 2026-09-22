@@ -83,14 +83,10 @@ RUN pip3 config set global.index-url \
         https://pypi.tuna.tsinghua.edu.cn/simple \
     && pip3 install --break-system-packages agent-reach
 
-RUN npm install -g @anthropic-ai/claude-code
 
 RUN npm install -g --force @clawemail/mail-cli
 
-RUN --mount=type=secret,id=coding_api_key,required=true \
-    --mount=type=secret,id=coding_base_url,required=true \
-    --mount=type=secret,id=coding_model_name,required=true \
-    --mount=type=secret,id=clawmail_api_key,required=true \
+RUN --mount=type=secret,id=clawmail_api_key,required=true \
     --mount=type=secret,id=gh_token,required=true \
     install -d -m 700 /root/.config/hatsume \
     && install -d -m 755 /etc/hatsume \
@@ -101,14 +97,7 @@ RUN --mount=type=secret,id=coding_api_key,required=true \
     fi \
     && mail-cli auth login --user hatsume@claw.163.com \
     && { \
-        printf 'export ANTHROPIC_AUTH_TOKEN=%q\n' "$(cat /run/secrets/coding_api_key)"; \
         printf 'export GH_TOKEN=%q\n' "$(cat /run/secrets/gh_token)"; \
-        printf 'export ANTHROPIC_BASE_URL=%q\n' "$(cat /run/secrets/coding_base_url)"; \
-        printf 'export ANTHROPIC_MODEL=%q\n' "$(cat /run/secrets/coding_model_name)"; \
-        printf 'export ANTHROPIC_DEFAULT_OPUS_MODEL=%q\n' "$(cat /run/secrets/coding_model_name)"; \
-        printf 'export ANTHROPIC_DEFAULT_SONNET_MODEL=%q\n' "$(cat /run/secrets/coding_model_name)"; \
-        printf 'export ANTHROPIC_DEFAULT_HAIKU_MODEL=%q\n' "$(cat /run/secrets/coding_model_name)"; \
-        printf 'export CLAUDE_CODE_SUBAGENT_MODEL=%q\n' "$(cat /run/secrets/coding_model_name)"; \
     } > /etc/hatsume/bash_env \
     && chmod 600 /etc/hatsume/bash_env
 
@@ -116,9 +105,6 @@ ENV HOME="/root"
 
 ENV TZ="Asia/Shanghai" \
     PATH="/work/hatsume/.container:/root/.local/bin:${PATH}" \
-    BASH_ENV="/etc/hatsume/bash_env" \
-    CLAUDE_CODE_EFFORT_LEVEL="high" \
-    CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS="0" \
-    CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT="1"
+    BASH_ENV="/etc/hatsume/bash_env"
 
 WORKDIR /work

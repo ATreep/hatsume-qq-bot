@@ -416,7 +416,7 @@ async def _run_coding_agent(task: str, user_id: int) -> str:
     try:
         async for event in coding_agent.astream(
             {"messages": [HumanMessage(task)]},
-            {"recursion_limit": 200},
+            {"recursion_limit": 400},
             stream_mode="updates",
         ):
             # Each event is {node_name: {state_update}}

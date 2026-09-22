@@ -204,8 +204,40 @@ def _result_reason(result: ChatIntentJudgeResult | None, error: Exception | None
     return "chat_intend_judge 判断当前不需要回复。"
 
 
+def _normalize_direct_model_messages(messages: list[Any]) -> list[Any]:
+    """Return messages in the single-leading-system format expected by providers.
+
+    LangChain permits system messages anywhere in a message list, but the
+    Responses API accepts at most one and requires it to be first. Auxiliary
+    model calls often combine a prompt with a slice of graph history, which
+    can already contain a system message, so merge all system content here.
+    """
+    system_contents: list[str] = []
+    conversation: list[Any] = []
+    for message in messages:
+        message_type = (
+            message.get("role", message.get("type"))
+            if isinstance(message, Mapping)
+            else getattr(message, "type", None)
+        )
+        if message_type == "system":
+            content = (
+                message.get("content", "")
+                if isinstance(message, Mapping)
+                else getattr(message, "content", "")
+            )
+            system_contents.append(str(content))
+        else:
+            conversation.append(message)
+
+    if not system_contents:
+        return conversation
+    return [SystemMessage("\n\n".join(system_contents)), *conversation]
+
+
 async def _invoke_model(model: Any, messages: list[Any]) -> Any:
     """Invoke a model directly without provider-specific structured output."""
+    messages = _normalize_direct_model_messages(messages)
     ainvoke = getattr(model, "ainvoke", None)
     if callable(ainvoke):
         result = ainvoke(messages)
