@@ -8,6 +8,7 @@ import binascii
 from io import BytesIO
 import os
 import re
+import signal
 import shlex
 import subprocess
 import tempfile
@@ -38,6 +39,7 @@ def _local_process_env() -> dict[str, str]:
 # Per-group subprocess reference counting
 # ===========================================================================
 _STOP_GRACE_SECONDS: float = 300.0  # 5 minutes
+_PROCESS_CLEANUP_TIMEOUT: float = 2.0
 
 
 @dataclass
@@ -93,16 +95,71 @@ def _untrack_foreground_process(
 
 async def _terminate_async_process(
     process: asyncio.subprocess.Process,
+    communication_task: asyncio.Task[tuple[bytes, bytes]] | None = None,
 ) -> tuple[bytes, bytes]:
-    if process.returncode is None:
-        try:
-            process.kill()
-        except ProcessLookupError:
-            pass
     try:
-        return await process.communicate()
-    except (ProcessLookupError, RuntimeError):
+        os.killpg(process.pid, signal.SIGKILL)
+    except (AttributeError, ProcessLookupError, PermissionError):
+        if process.returncode is None:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+
+    if communication_task is None:
+        communication_task = asyncio.create_task(process.communicate())
+    try:
+        stdout, stderr = await asyncio.wait_for(
+            asyncio.shield(communication_task),
+            timeout=_PROCESS_CLEANUP_TIMEOUT,
+        )
+        return stdout or b"", stderr or b""
+    except (asyncio.TimeoutError, ProcessLookupError, RuntimeError):
+        if not communication_task.done():
+            communication_task.cancel()
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(communication_task, return_exceptions=True),
+                timeout=_PROCESS_CLEANUP_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            pass
+        transport: Any = getattr(process, "_transport", None)
+        get_pipe_transport = getattr(transport, "get_pipe_transport", None)
+        if callable(get_pipe_transport):
+            for file_descriptor in (0, 1, 2):
+                pipe_transport: Any = get_pipe_transport(file_descriptor)
+                if pipe_transport is not None:
+                    pipe_transport.close()
+        try:
+            await asyncio.wait_for(process.wait(), timeout=_PROCESS_CLEANUP_TIMEOUT)
+        except (asyncio.TimeoutError, ProcessLookupError, RuntimeError):
+            pass
         return b"", b""
+
+
+async def _communicate_with_timeout(
+    process: asyncio.subprocess.Process,
+    timeout: float,
+    *,
+    input_data: bytes | None = None,
+) -> tuple[bytes, bytes, bool]:
+    communication_task = asyncio.create_task(process.communicate(input=input_data))
+    try:
+        stdout, stderr = await asyncio.wait_for(
+            asyncio.shield(communication_task),
+            timeout=timeout,
+        )
+        return stdout or b"", stderr or b"", False
+    except asyncio.TimeoutError:
+        stdout, stderr = await _terminate_async_process(process, communication_task)
+        return stdout, stderr, True
+    except asyncio.CancelledError:
+        await _terminate_async_process(process, communication_task)
+        raise
+    except Exception:
+        await _terminate_async_process(process, communication_task)
+        raise
 
 
 def _get_container_state(group_id: int, *, create: bool) -> ContainerRuntime | None:
@@ -212,20 +269,21 @@ async def run_cmd(
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
         )
         _track_foreground_process(state, proc)
         try:
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(input=command.encode("utf-8")),
-                timeout=timeout,
+            stdout, stderr, timed_out = await _communicate_with_timeout(
+                proc,
+                timeout,
+                input_data=command.encode("utf-8"),
             )
-        except asyncio.TimeoutError:
-            stdout, stderr = await _terminate_async_process(proc)
-            return (
-                f"Executing Timeout (timeout={timeout}s)\n"
-                f"stdout:\n{_strip_ansi(stdout)}\n"
-                f"stderr:\n{_strip_ansi(stderr)}"
-            )
+            if timed_out:
+                return (
+                    f"Executing Timeout (timeout={timeout}s)\n"
+                    f"stdout:\n{_strip_ansi(stdout)}\n"
+                    f"stderr:\n{_strip_ansi(stderr)}"
+                )
         except asyncio.CancelledError:
             await _terminate_async_process(proc)
             raise
@@ -471,17 +529,19 @@ async def copy_host_file_to_sandbox(
             env=_local_process_env(),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
         )
         _track_foreground_process(state, process)
         try:
             try:
-                stdout, stderr = await asyncio.wait_for(
-                    process.communicate(),
-                    timeout=timeout,
+                stdout, stderr, timed_out = await _communicate_with_timeout(
+                    process,
+                    timeout,
                 )
-            except asyncio.TimeoutError as exc:
-                await _terminate_async_process(process)
-                raise RuntimeError("Copying file into sandbox timed out") from exc
+                if timed_out:
+                    raise RuntimeError(
+                        "Copying file into sandbox timed out"
+                    )
             except asyncio.CancelledError:
                 await _terminate_async_process(process)
                 raise

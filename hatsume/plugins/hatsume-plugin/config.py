@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from re import M
 from typing import Callable, Literal
 from dotenv import load_dotenv
 
@@ -32,7 +33,8 @@ GITHUB_REPO = os.getenv("GITHUB_REPO", "")
 ARK_PLAN_API_KEY: str = os.environ.get("ARK_PLAN_API_KEY", "")
 ARK_API_KEY: str = os.environ.get("ARK_API_KEY", "")
 SILICONFLOW_API_KEY: str = os.environ.get("SILICONFLOW_API_KEY", "")
-OPENCODE_API_KEY: str = os.environ.get("OPENCODE_API_KEY", "")
+# OPENCODE_API_KEY: str = os.environ.get("OPENCODE_API_KEY", "")
+OPENCODE_API_KEY: str = "public"
 KEGEAI_API_KEY = os.environ.get("KEGEAI_API_KEY", "")
 ZHTH_API_KEY = os.environ.get("ZHTH_API_KEY", "")
 DS_API_KEY = os.environ.get("DS_API_KEY", "")
@@ -42,6 +44,7 @@ PIXELS_API_KEY: str = os.environ.get("PIXELS_API_KEY", "")
 WAWAPI_API_KEY: str = os.environ.get("WAWAPI_API_KEY", "")
 WAWAPI_IMAGE_API_KEY: str = os.environ.get("WAWAPI_IMAGE_API_KEY", "")
 ALI_API_KEY: str = os.environ.get("ALI_API_KEY", "")
+MI_API_KEY: str = os.environ.get("MI_API_KEY", "")
 # ---------------------------------------------------------------------------
 # External service URLs
 # ---------------------------------------------------------------------------
@@ -63,6 +66,7 @@ RUOLI_BASE_URL = "https://ruoli.dev"
 PEXELS_BASE_URL = "https://api.pexels.com"
 WAWAPI_BASE_URL = "https://wawapii.com"
 ALI_BASE_URL = os.environ.get("ALI_BASE_URL", "") 
+MI_BASE_URL = "https://api.xiaomimimo.com"
 
 
 # ---------------------------------------------------------------------------
@@ -71,7 +75,7 @@ ALI_BASE_URL = os.environ.get("ALI_BASE_URL", "")
 DOUBAO_2_LITE: str = "doubao-seed-2-0-lite"
 DOUBAO_2_MINI: str = "doubao-seed-2-0-mini"
 DEEPSEEK_FLASH = "deepseek-flash"
-MIMO_2_5_FREE = "mimo-v2.5-free"
+MIMO_2_6_FLASH = "mimo-v2.6-flash"
 DEEPSEEK_V4_1_FLASH = "deepseek-v4.1-flash"
 SEEDREAM_5_0_LITE: str = "doubao-seedream-5.0-lite"
 SEEDREAM_4_0 = "doubao-seedream-4-0-250828"
@@ -89,8 +93,8 @@ QWEN_3_7_FLASH = "qwen3.7-flash"
 QWEN_3_8_FLASH = "qwen3.8-flash"
 JEV_1_13 = "jev-1.13-free"
 
-ADVANCE_MODEL_NAME: str = QWEN_3_8_FLASH 
-LITE_MODEL_NAME: str =  QWEN_3_7_FLASH
+ADVANCE_MODEL_NAME: str = MIMO_2_6_FLASH 
+LITE_MODEL_NAME: str =  MIMO_2_6_FLASH
 
 
 # ---------------------------------------------------------------------------
@@ -101,13 +105,13 @@ EMBEDDING_MODEL: str = "BAAI/bge-m3"
 # ---------------------------------------------------------------------------
 # Provider selection
 # ---------------------------------------------------------------------------
-PROVIDER: Literal["volc", "volc_plan", "kege", "zhth", "ar", "ruoli", "ds", "waw", "ali"] = "ali"
-CHAT_PROVIDER_SWITCH_CANDIDATES: tuple[str, ...] = ("ali",)
+PROVIDER: Literal["volc", "volc_plan", "kege", "zhth", "ar", "ruoli", "ds", "waw", "ali", "mi"] = "mi"
+CHAT_PROVIDER_SWITCH_CANDIDATES: tuple[str, ...] = ("mi",)
 CHAT_PROVIDER_SWITCH_THRESHOLD_SECONDS: float = 150.0
 CHAT_PROVIDER_SWITCH_COOLDOWN_SECONDS: float = 3 * 60 * 60
 
 def get_base_url(
-    provider: Literal["volc", "volc_plan", "sf", "kege", "zhth", "ar", "ruoli", "ds", "waw", "ali"] = PROVIDER,
+    provider: Literal["volc", "volc_plan", "sf", "kege", "zhth", "ar", "ruoli", "ds", "waw", "ali", "mi"] = PROVIDER,
 ) -> str:
     match provider:
         case "volc_plan":
@@ -130,9 +134,11 @@ def get_base_url(
             return WAWAPI_BASE_URL
         case "ali":
             return ALI_BASE_URL
+        case "mi":
+            return MI_BASE_URL
 
 def get_api_key(
-    provider: Literal["volc", "volc_plan", "sf", "kege", "zhth", "ar", "ruoli", "ds", "waw", "ali"] = PROVIDER,
+    provider: Literal["volc", "volc_plan", "sf", "kege", "zhth", "ar", "ruoli", "ds", "waw", "ali", "mi"] = PROVIDER,
 ) -> Callable[[], str]:
     match provider:
         case "volc_plan":
@@ -155,6 +161,8 @@ def get_api_key(
             return lambda: WAWAPI_API_KEY
         case "ali":
             return lambda: ALI_API_KEY
+        case "mi":
+            return lambda: MI_API_KEY
 
 # ---------------------------------------------------------------------------
 # Behavioral constants

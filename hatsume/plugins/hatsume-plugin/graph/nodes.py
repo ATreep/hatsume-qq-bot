@@ -1,6 +1,6 @@
 """LangGraph nodes backed by the task-local per-group runtime.
 
-Human, detect, AI, and finish nodes share the runtime selected by the current
+Human, AI, and finish nodes share the runtime selected by the current
 graph invocation. Mutable queues, flags, callbacks, proxy state, and Skill state
 belong to that runtime; only node definitions and immutable tool topology are
 common across groups.
@@ -38,7 +38,12 @@ from ..group_runtime import (
     get_current_group_runtime,
     group_runtime_registry,
 )
-from ..models import get_advance_model, get_intent_model, get_lite_model, get_mini_model
+from ..models import (
+    get_advance_model,
+    get_intent_model,
+    get_lite_model,
+    get_mini_model,
+)
 from ..provider_switch import (
     SLOW_THRESHOLD_SECONDS,
     get_model_provider,
@@ -46,7 +51,6 @@ from ..provider_switch import (
 )
 from ..prompts import (
     AUXILIARY_COMPACTION_PROMPT,
-    CHAT_END_DETECT_PROMPT,
     CHAT_INTENT_URGENCY_TYPES,
     build_admin_mode_prompt,
     build_agent_state_prompt,
@@ -96,6 +100,7 @@ JSON_CODE_FENCE_PATTERN = re.compile(
 )
 SYSTEM_TRIGGER_KEY = "_hatsume_system_trigger"
 ADMIN_MODE_KEYWORD = "BYPASS"
+CHAT_DETECTION_BYPASS_KEYWORD = "初芽"
 
 CHAT_INTENT_MAX_ATTEMPTS = 3
 
@@ -444,6 +449,107 @@ def _without_image_url_parts(messages: list[Any]) -> list[Any]:
             filtered_messages.append(filtered_message)
 
     return filtered_messages
+
+
+def _message_content_to_text(content: Any) -> str:
+    """Convert multimodal message content into text for Jev."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, Mapping):
+        if content.get("type") == "text":
+            return str(content.get("text", ""))
+        return ""
+    if isinstance(content, list):
+        text_parts: list[str] = []
+        for part in content:
+            if isinstance(part, str):
+                text_parts.append(part)
+            elif isinstance(part, Mapping) and part.get("type") == "text":
+                text_parts.append(str(part.get("text", "")))
+        return "\n".join(part for part in text_parts if part)
+    if content is None:
+        return ""
+    return str(content)
+
+
+def _current_message_text(content: Any) -> str:
+    """Extract visible text from the current normalized user message."""
+    if isinstance(content, str):
+        stripped = content.strip()
+        if stripped.startswith(("{", "[")):
+            try:
+                return _current_message_text(json.loads(stripped))
+            except (json.JSONDecodeError, TypeError):
+                pass
+        return content
+
+    if isinstance(content, Mapping):
+        content_type = content.get("type")
+        if content_type == "message":
+            return _current_message_text(content.get("content", ""))
+        if content_type == "forward":
+            return _current_message_text(content.get("messages", []))
+        if content_type == "text":
+            return _current_message_text(content.get("text", ""))
+        return ""
+
+    if isinstance(content, (list, tuple)):
+        return "\n".join(
+            text
+            for text in (_current_message_text(item) for item in content)
+            if text
+        )
+
+    return ""
+
+
+def _messages_to_jev_state(messages: list[Any]) -> list[dict[str, str]]:
+    """Build a text-only conversation state accepted by Jev."""
+    jev_messages: list[dict[str, str]] = []
+    for message in _without_image_url_parts(messages):
+        content = (
+            message.get("content", "")
+            if isinstance(message, Mapping)
+            else getattr(message, "content", "")
+        )
+        text = _message_content_to_text(content).strip()
+        if not text:
+            continue
+
+        message_type = (
+            message.get("role", message.get("type", "user"))
+            if isinstance(message, Mapping)
+            else getattr(message, "type", "user")
+        )
+        role = {
+            "human": "user",
+            "ai": "assistant",
+        }.get(str(message_type), str(message_type))
+        jev_messages.append({"role": role, "content": text})
+    return jev_messages
+
+
+def _jev_answer(response: Any, question_id: str) -> Mapping[str, Any] | None:
+    """Extract one raw Jev answer from SDK or HTTP-style response data."""
+    answers = (
+        response.get("answers")
+        if isinstance(response, Mapping)
+        else getattr(response, "answers", None)
+    )
+    if not isinstance(answers, Mapping):
+        return None
+
+    answer = answers.get(question_id)
+    if isinstance(answer, Mapping):
+        return answer
+    model_dump = getattr(answer, "model_dump", None)
+    if callable(model_dump):
+        dumped = model_dump()
+        return dumped if isinstance(dumped, Mapping) else None
+    answer_dict = getattr(answer, "__dict__", None)
+    if isinstance(answer_dict, Mapping):
+        return answer_dict
+    return None
 
 
 def _without_bootstrap_role_prompt(messages: list[Any]) -> list[Any]:
@@ -1111,73 +1217,116 @@ async def ai_node(state: MessagesState) -> dict:
     else:
         last_human_msg = HumanMessage(state["messages"][-1].content)
 
-    print("Start chat intent judge...")
-    t_judge_start = time.time()
+    print("Start Jev chat intent/end judge...")
+    t_jev_start = time.time()
+    chat_end_bypassed = runtime.last_was_auxiliary_only
+    chat_detection_bypassed = CHAT_DETECTION_BYPASS_KEYWORD in _current_message_text(
+        last_content
+    )
     if _has_injected_human_message(state):
-        print("[chat_intend_judge] Bypassed for injected system message")
+        print("[jev_judge] Bypassed for injected system message")
+    elif chat_detection_bypassed:
+        print(
+            "[jev_judge] Bypassed for current message containing "
+            f"{CHAT_DETECTION_BYPASS_KEYWORD}"
+        )
     else:
         try:
-            # Jev is a System One model: send the current state and a closed
-            # Choice question to its ``/systemone`` endpoint.  The model does
-            # not generate JSON text, so the selected label can be consumed
-            # directly without the old chat-model parser.
-            intent_model = get_intent_model()
-            intent_message = _without_image_url_parts([last_human_msg])[0]
-            intent_state = getattr(intent_message, "content", intent_message)
-            try:
-                json.dumps(intent_state, ensure_ascii=False)
-            except TypeError:
-                intent_state = str(intent_state)
+            from ..character_proxy import message_mentions_character_proxy
 
-            intent_response = await intent_model.root_async_client.post(
+            chat_end_bypassed = chat_end_bypassed or message_mentions_character_proxy(
+                last_content
+            )
+            # Jev is a System One model: send the current state and a closed
+            # Choice question pair to its ``/systemone`` endpoint.  The model
+            # does not generate JSON text, so both typed answers can be
+            # consumed directly without parsing generated prose.
+            jev_model: Any = get_intent_model()
+            filtered_last_human_msg = _without_image_url_parts([last_human_msg])[0]
+            recent_messages = _without_bootstrap_role_prompt(
+                state["messages"][-6:]
+            )
+            jev_state = {
+                "current_message": _message_content_to_text(
+                    getattr(filtered_last_human_msg, "content", filtered_last_human_msg)
+                ),
+                "recent_messages": _messages_to_jev_state(recent_messages),
+            }
+
+            jev_response = await jev_model.root_async_client.post(
                 "/systemone",
                 cast_to=object,
                 body={
-                    "model": getattr(intent_model, "model_name", "jev-1.13-free"),
-                    "state": intent_state,
+                    "model": getattr(jev_model, "model_name", "jev-1.13-free"),
+                    "state": jev_state,
                     "questions": {
                         "chat_intent": {
                             "type": "choice",
-                            "instructions": "当前消息最符合哪一种意图？",
+                            "instructions": {
+                                "question": "当前消息最符合哪一种回复意图？",
+                                "focus": "判断 `current_message`，并参考 `recent_messages` 理解上下文。",
+                            },
                             "criteria": CHAT_INTENT_URGENCY_TYPES,
-                        }
+                        },
+                        "chat_end": {
+                            "type": "choice",
+                            "instructions": {
+                                "question": "用户是否想结束与初芽的当前对话？",
+                                "focus": "判断 `current_message` 是否表示想要结束当前聊天或在转向其他的话题。",
+                            },
+                            "criteria": {
+                                "结束": "用户透露出想结束当前话题；或用户开始讨论另一个话题， 且不再关注当前话题。",
+                                "继续": "用户仍在提问、补充信息、回应初芽，或明确希望继续互动。",
+                            },
+                        },
                     },
                 },
             )
-            intent_answer = intent_response["answers"]["chat_intent"]
-            intent_choice = str(intent_answer.get("choice", "无需回复"))
-            intent_confidence = intent_answer.get("confidence")
-            intent_reason = f"Jev 选择“{intent_choice}”"
-            if intent_confidence is not None:
-                intent_reason += f"，置信度 {float(intent_confidence):.2f}"
-            intent_result = ChatIntentJudgeResult(
+            chat_end_answer = _jev_answer(jev_response, "chat_end") or {}
+            chat_end_choice = str(chat_end_answer.get("choice", "继续"))
+            if (
+                not chat_end_bypassed
+                and chat_end_choice == "结束"
+            ):
+                print("[chat_end] Jev chose to end the conversation.")
+                conversation_state.request_end_conversation()
+                return {"messages": []}
+
+            chat_intent_answer = _jev_answer(jev_response, "chat_intent") or {}
+            chat_intent_choice = str(chat_intent_answer.get("choice", "无需回复"))
+            chat_intent_confidence = chat_intent_answer.get("confidence")
+            chat_intent_reason = f"Jev 选择“{chat_intent_choice}”"
+            if chat_intent_confidence is not None:
+                chat_intent_reason += f"，置信度 {float(chat_intent_confidence):.2f}"
+            chat_intent_result = ChatIntentJudgeResult(
                 is_response=(
-                    intent_choice in CHAT_INTENT_URGENCY_TYPES
-                    and intent_choice != "无需回复"
+                    chat_intent_choice in CHAT_INTENT_URGENCY_TYPES
+                    and chat_intent_choice != "无需回复"
                 ),
                 urgency_type=(
-                    intent_choice
-                    if intent_choice in CHAT_INTENT_URGENCY_TYPES
+                    chat_intent_choice
+                    if chat_intent_choice in CHAT_INTENT_URGENCY_TYPES
                     else ""
                 ),
-                brief_reason=intent_reason,
+                brief_reason=chat_intent_reason,
             )
         except Exception as exc:
             reason = _result_reason(None, exc)
-            print(f"[chat_intend_judge] Response skipped: {reason}")
+            print(f"[jev_judge] Response skipped: {reason}")
             return {"messages": []}
 
-        if not _chat_intent_is_eligible(intent_result):
-            reason = _result_reason(intent_result)
-            print(f"[chat_intend_judge] Response skipped: {reason}")
+        if not _chat_intent_is_eligible(chat_intent_result):
+            reason = _result_reason(chat_intent_result)
+            print(f"[jev_judge] Response skipped: {reason}")
             return {"messages": []}
 
         print(
-            "[chat_intend_judge] Response approved: "
-            f"{intent_result.urgency_type} ({intent_result.brief_reason.strip()})"
+            "[jev_judge] Chat intent approved: "
+            f"{chat_intent_result.urgency_type} "
+            f"({chat_intent_result.brief_reason.strip()})"
         )
-    t_judge_end = time.time()
-    print(f"Elapsed time of chat_intend_judge: {t_judge_end - t_judge_start:.3f}s")
+    t_jev_end = time.time()
+    print(f"Elapsed time of Jev judge: {t_jev_end - t_jev_start:.3f}s")
 
     if isinstance(last_content, list) and len(last_content) > 0:
         text_parts: list[str] = []
@@ -1597,87 +1746,17 @@ async def human_node(state: MessagesState) -> dict:
         for part in human_queue
     ]
 
-    return {"messages": [HumanMessage(human_queue)]}  # type: ignore
+    history_updates: list[Any] = []
+    if len(state["messages"]) >= 60:
+        ids = [
+            message.id
+            for message in state["messages"]
+            if message.type in {"human", "ai"} and isinstance(message.id, str)
+        ]
+        if len(ids) >= 2:
+            history_updates.extend([RemoveMessage(ids[0]), RemoveMessage(ids[1])])
 
-
-# ---------------------------------------------------------------------------
-# Chat-end detection node
-# ---------------------------------------------------------------------------
-async def chat_end_detect_node(state: MessagesState) -> dict:
-    print("Enter chat_end_detect_node")
-
-    if _runtime().last_was_system_trigger:
-        return {"messages": []}
-
-    from ..character_proxy import message_mentions_character_proxy
-
-    if message_mentions_character_proxy(state["messages"][-1].content):
-        print("[character_proxy] Nickname or alias detected; continuing chat.")
-        return {"messages": []}
-
-    from openai import APITimeoutError
-
-    response = "yes"
-    msg_count = 0
-    for msg in state["messages"]:
-        content = getattr(msg, "content", None)
-        if isinstance(content, list):
-            msg_count += len(content)
-        else:
-            msg_count += 1
-    print("MSG LEN:", msg_count)
-
-    if "初芽" in str(state["messages"][-1].content) or len(state["messages"]) < 4:
-        response = "no"
-    else:
-        try:
-            detect_model = get_lite_model()
-
-            match random.randint(0, 3):
-                case 0:
-                    detect_model = get_lite_model()
-                    print("Using lite model in chat_end_detect_node...")
-                case 1 | 2:
-                    detect_model = get_mini_model()
-                    print("Using mini model in chat_end_detect_node...")
-                case 3:
-                    response = "no"
-                    print("Directly continue chat.")
-                    raise InterruptedError("Directly continue chat without detection.")
-
-            detect_result = await asyncio.wait_for(
-                _invoke_model(
-                    detect_model,
-                    state["messages"][-6:]
-                    + [SystemMessage(CHAT_END_DETECT_PROMPT)],
-                ),
-                timeout=10,
-            )
-            response = str(
-                detect_result.content if hasattr(detect_result, "content") else detect_result
-            )
-        except (APITimeoutError, LLMLimitExceededError, LLMAuthError):
-            # Rate-limit / timeout / auth errors → silently continue
-            pass
-        except InterruptedError:
-            pass
-        except Exception:
-            print("❌ Bad invoke in chat_end_detect")
-            traceback.print_exc()
-
-    if response == "yes":
-        return {"messages": [SystemMessage("__end__")]}
-
-    if len(state["messages"]) > 60:
-        ids = []
-        for message in state["messages"]:
-            if message.type == "human" or message.type == "ai":
-                ids.append(message.id)
-            if len(ids) == 2:
-                break
-        return {"messages": [RemoveMessage(ids[0]), RemoveMessage(ids[1])]}
-
-    return {"messages": []}
+    return {"messages": [*history_updates, HumanMessage(human_queue)]}  # type: ignore
 
 
 # ---------------------------------------------------------------------------

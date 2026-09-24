@@ -6,9 +6,11 @@ import asyncio
 import contextvars
 import shlex
 import ssl
+import threading
 import traceback
 import urllib.request
 import urllib.error
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Annotated, Any, Callable, Literal, TypedDict
 
 from google.genai import types
@@ -131,25 +133,38 @@ async def _resolve_notified_user_name(user_id: int, group_id: int | None) -> str
 
 
 # ---------------------------------------------------------------------------
-# shell_executor per-context call limit (contextvars isolate chat vs coding agent)
+# shell_executor per-invocation call limit (contextvars select each agent budget)
 # ---------------------------------------------------------------------------
-_shell_call_count: contextvars.ContextVar[int] = contextvars.ContextVar(
-    "_shell_call_count", default=0
-)
-_shell_max_calls: contextvars.ContextVar[int | None] = contextvars.ContextVar(
-    "_shell_max_calls", default=None
+@dataclass(slots=True)
+class _ShellExecutorBudget:
+    """Mutable call budget shared by all child tasks of one agent invoke."""
+
+    max_calls: int | None
+    call_count: int = 0
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+    def reserve(self) -> bool:
+        """Reserve one call synchronously, returning whether it was allowed."""
+        with self._lock:
+            if self.max_calls is not None and self.call_count >= self.max_calls:
+                return False
+            self.call_count += 1
+            return True
+
+
+_shell_executor_budget: contextvars.ContextVar[_ShellExecutorBudget | None] = (
+    contextvars.ContextVar("_shell_executor_budget", default=None)
 )
 
 
 def set_shell_executor_limit(max_calls: int | None) -> None:
-    """Set the per-context shell_executor call limit.
+    """Set the shell_executor budget for the current agent invocation.
 
     Call with ``max_calls=3`` before invoking chat_agent (limits to 3 calls).
     Call with ``max_calls=None`` before invoking coding_agent (no limit).
-    Resets the call counter to 0.
+    Replaces the current shared budget and resets its call counter to 0.
     """
-    _shell_max_calls.set(max_calls)
-    _shell_call_count.set(0)
+    _shell_executor_budget.set(_ShellExecutorBudget(max_calls=max_calls))
 
 
 def set_current_group_id(group_id: int | None) -> None:
@@ -875,15 +890,12 @@ async def shell_executor(shell: str, timeout: int) -> str:
     - 只有你自己可以访问沙盒，用户无法访问沙盒。
     - 禁止将沙盒中的路径告诉用户。你必须通过描述、调用工具或上传到 GitHub 仓库的方式向用户展示沙盒中的文件。
     """
-    max_calls = _shell_max_calls.get()
-    if max_calls is not None:
-        count = _shell_call_count.get()
-        if count >= max_calls:
-            return (
-                "❌ 禁止多次调用 shell_executor，"
-                "请将你的原始任务使用 agent_dispatch 完整地派发给 coding_agent。"
-            )
-        _shell_call_count.set(count + 1)
+    budget = _shell_executor_budget.get()
+    if budget is not None and not budget.reserve():
+        return (
+            "❌ 禁止多次调用 shell_executor，"
+            "请将你的原始任务使用 agent_dispatch 完整地派发给 coding_agent。"
+        )
 
     runtime = get_current_group_runtime()
     print("Executing shell: \n\r", shell)

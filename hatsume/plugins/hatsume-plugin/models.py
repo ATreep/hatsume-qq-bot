@@ -161,13 +161,13 @@ def get_google_api_model(
 def get_standard_api_model(
     model_name: str,
     reasoning_effort: ReasoningEffort = "low",
-    provider: Optional[str] = None,
 ) -> BaseChatModel:
     """Create the standard chat model."""
     return get_openai_api_model(
         model_name,
         reasoning_effort=reasoning_effort,
-        extra_body={"enable_thinking": True}, # for Ali provider only
+        is_response=True,
+        # extra_body={"enable_thinking": True}, # for Ali provider only
     )
 
 def get_advance_model(
@@ -188,7 +188,7 @@ def get_lite_model() -> BaseChatModel:
     return get_standard_api_model(LITE_MODEL_NAME, reasoning_effort="low")
 
 def get_mini_model() -> BaseChatModel:
-    return get_standard_api_model(LITE_MODEL_NAME, reasoning_effort="none")
+    return get_standard_api_model(LITE_MODEL_NAME, reasoning_effort="minimal")
 
 
 def get_view_image_model() -> BaseChatModel:
