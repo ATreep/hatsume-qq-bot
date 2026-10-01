@@ -45,6 +45,7 @@ WAWAPI_API_KEY: str = os.environ.get("WAWAPI_API_KEY", "")
 WAWAPI_IMAGE_API_KEY: str = os.environ.get("WAWAPI_IMAGE_API_KEY", "")
 ALI_API_KEY: str = os.environ.get("ALI_API_KEY", "")
 MI_API_KEY: str = os.environ.get("MI_API_KEY", "")
+SENSENOVA_API_KEY: str = os.environ.get("SENSENOVA_API_KEY", "")
 # ---------------------------------------------------------------------------
 # External service URLs
 # ---------------------------------------------------------------------------
@@ -65,8 +66,9 @@ AR_BASE_URL = "https://agentrouter.org"
 RUOLI_BASE_URL = "https://ruoli.dev"
 PEXELS_BASE_URL = "https://api.pexels.com"
 WAWAPI_BASE_URL = "https://wawapii.com"
-ALI_BASE_URL = os.environ.get("ALI_BASE_URL", "") 
+ALI_BASE_URL = "https://ws-1h26pj40tzf8hqys.cn-beijing.maas.aliyuncs.com/compatible-mode"
 MI_BASE_URL = "https://api.xiaomimimo.com"
+SENSENOVA_BASE_URL: str = "https://token.sensenova.cn/v1"
 
 
 # ---------------------------------------------------------------------------
@@ -82,8 +84,7 @@ SEEDREAM_4_0 = "doubao-seedream-4-0-250828"
 SEEDANCE_1_5: str = "doubao-seedance-1-5-pro-251215"
 SEEDANCE_1_0: str = "doubao-seedance-1-0-pro-250528"
 GPT_IMAGE_2 = "gpt-image-2:stable"
-GPT_5_6_LUNA = "gpt-5.6-luna"
-GPT_5_6_TERRA = "gpt-5.6-terra"
+GPT_6_LUNA = "gpt-6-luna"
 GPT_5_5 = "gpt-5.5"
 GEMINI_3_8_FLASH = "gemini-3.8-flash"
 GROK_4_6 = "grok-4.6"
@@ -92,9 +93,12 @@ LAGUNA_S_2_1_FREE = "laguna-s-2.1-free"
 QWEN_3_7_FLASH = "qwen3.7-flash"
 QWEN_3_8_FLASH = "qwen3.8-flash"
 JEV_1_13 = "jev-1.13-free"
+SENSENOVA_U1_5_FAST: str = "sensenova-u1.5-fast"
+SENSENOVA_U1_5_LITE: str = "sensenova-u1.5-lite"
 
-ADVANCE_MODEL_NAME: str = MIMO_2_6_FLASH 
-LITE_MODEL_NAME: str =  MIMO_2_6_FLASH
+ADVANCE_MODEL_NAME: str = GPT_6_LUNA 
+LITE_MODEL_NAME: str =  GPT_6_LUNA
+CODING_MODEL_NAME: str = GPT_6_LUNA
 
 
 # ---------------------------------------------------------------------------
@@ -105,10 +109,7 @@ EMBEDDING_MODEL: str = "BAAI/bge-m3"
 # ---------------------------------------------------------------------------
 # Provider selection
 # ---------------------------------------------------------------------------
-PROVIDER: Literal["volc", "volc_plan", "kege", "zhth", "ar", "ruoli", "ds", "waw", "ali", "mi"] = "mi"
-CHAT_PROVIDER_SWITCH_CANDIDATES: tuple[str, ...] = ("mi",)
-CHAT_PROVIDER_SWITCH_THRESHOLD_SECONDS: float = 150.0
-CHAT_PROVIDER_SWITCH_COOLDOWN_SECONDS: float = 3 * 60 * 60
+PROVIDER: Literal["volc", "volc_plan", "kege", "zhth", "ar", "ruoli", "ds", "waw", "ali", "mi"] = "waw"
 
 def get_base_url(
     provider: Literal["volc", "volc_plan", "sf", "kege", "zhth", "ar", "ruoli", "ds", "waw", "ali", "mi"] = PROVIDER,
@@ -171,7 +172,7 @@ USER_INPUT_CONFIRM_DURING_TIME: int = 7
 CONTEXT_QUEUE_LEN: int = 60
 CONTEXT_QUEUE_OVERLAP_LEN: int = 7
 VIDEO_RATE_LIMIT_SECONDS: int = 60
-GENERATE_IMAGE_RATE_LIMIT_SECONDS: int = 180
+GENERATE_IMAGE_RATE_LIMIT_SECONDS: int = 60
 IMAGE_MAX_SIZE_BYTES: int = 9 * 1024 * 1024
 IMAGE_MAX_PIXELS: int = 36_000_000
 MESSAGE_MAX_LENGTH: int = 2000

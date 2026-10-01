@@ -44,11 +44,7 @@ from ..models import (
     get_lite_model,
     get_mini_model,
 )
-from ..provider_switch import (
-    SLOW_THRESHOLD_SECONDS,
-    get_model_provider,
-    report_chat_elapsed,
-)
+
 from ..prompts import (
     AUXILIARY_COMPACTION_PROMPT,
     CHAT_INTENT_URGENCY_TYPES,
@@ -1352,7 +1348,6 @@ async def ai_node(state: MessagesState) -> dict:
 
     print("Memory retrieved: \n" + memory_summary)
 
-    chat_provider_used = get_model_provider()
     model_chosen = get_advance_model(thinking=True)
     sys_prompt = _combined_system_prompt()
     sys_prompt += build_lively_tone_prompt(LIVELY_TONE_ENABLED)
@@ -1470,27 +1465,7 @@ async def ai_node(state: MessagesState) -> dict:
                     {"messages": invocation_messages},  # type: ignore
                     {"recursion_limit": 20},
                 )
-            except asyncio.CancelledError:
-                raise
             except Exception:
-                failed_elapsed = time.monotonic() - t_invocation_start
-                switched_to = report_chat_elapsed(
-                    failed_elapsed,
-                    provider=chat_provider_used,
-                    started_at=t_invocation_start,
-                )
-                print(
-                    f"[chat_agent] pass={attempt + 1} failed "
-                    f"elapsed={time.monotonic() - t_pass_start:.3f}s",
-                    flush=True,
-                )
-                if switched_to is not None:
-                    print(
-                        f"[provider-switch] failed chat_agent took "
-                        f"{failed_elapsed:.1f}s; switching provider "
-                        f"'{chat_provider_used}' -> '{switched_to}'",
-                        flush=True,
-                    )
                 raise
             response_messages = response.get("messages", [])
             from ..mcp.tools import consume_requested_tools, make_dynamic_tools
@@ -1553,35 +1528,6 @@ async def ai_node(state: MessagesState) -> dict:
 
         elapsed_invocation = t_invocation_end - t_invocation_start
         print(f"Elapsed time of chat_agent invocation: {elapsed_invocation}s")
-
-        # Provider auto-switching: a slow (>150s) chat_agent invocation marks
-        # the current provider slow (3h cooldown) and switches the standard
-        # model to the next healthy candidate (ruoli <-> waw).
-        switched_to = report_chat_elapsed(
-            elapsed_invocation,
-            provider=chat_provider_used,
-            started_at=t_invocation_start,
-        )
-        if switched_to is not None:
-            print(
-                f"[provider-switch] chat_agent took {elapsed_invocation:.1f}s "
-                f"(> {SLOW_THRESHOLD_SECONDS:.0f}s); switching provider "
-                f"'{chat_provider_used}' -> '{switched_to}'"
-            )
-        elif elapsed_invocation > SLOW_THRESHOLD_SECONDS:
-            current_provider = get_model_provider()
-            if current_provider == chat_provider_used:
-                print(
-                    f"[provider-switch] chat_agent took {elapsed_invocation:.1f}s "
-                    f"(> {SLOW_THRESHOLD_SECONDS:.0f}s) but all candidate "
-                    f"providers are in cooldown; staying on '{chat_provider_used}'"
-                )
-            else:
-                print(
-                    f"[provider-switch] chat_agent took {elapsed_invocation:.1f}s "
-                    f"(> {SLOW_THRESHOLD_SECONDS:.0f}s); provider is already "
-                    f"'{current_provider}' after another invocation"
-                )
 
         # LLM outputs plain text directly
         print(f"Raw AI response: {ai_text}")

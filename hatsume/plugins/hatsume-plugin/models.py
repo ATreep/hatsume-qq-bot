@@ -11,6 +11,8 @@ import time
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, Literal, Optional
 
+import requests
+
 # Preserve provider-specific response fields across LangChain message
 # conversions. Both DeepSeek-compatible reasoning and Gemini-compatible tool
 # calls require these fields to be sent back on later turns.
@@ -25,8 +27,10 @@ from volcenginesdkarkruntime import Ark
 from . import config as _config
 from .config import (
     ALI_BASE_URL,
+    CODING_MODEL_NAME,
     JEV_1_13,
     OPENCODE_ZEN_BASE_URL,
+    PROVIDER,
     QWEN_3_7_FLASH,
     ALI_API_KEY,
     EMBEDDING_MODEL,
@@ -37,13 +41,15 @@ from .config import (
     SEEDANCE_1_0,
     SEEDANCE_1_5,
     SEEDREAM_4_0,
+    SENSENOVA_API_KEY,
+    SENSENOVA_BASE_URL,
+    SENSENOVA_U1_5_LITE,
     VOLCENGINE_BASE_URL,
     WAWAPI_IMAGE_API_KEY,
     _get_int_env,
     get_api_key,
     get_base_url,
 )
-from .provider_switch import get_model_provider
 
 if TYPE_CHECKING:
     from langchain_core.messages import BaseMessage
@@ -147,14 +153,11 @@ def get_openai_api_model(
 def get_google_api_model(
     model_name: str,
     reasoning_effort: ReasoningEffort = "low",
-    provider: Optional[str] = None,
 ) -> ChatGoogleGenerativeAI:
-    if provider is None:
-        provider = get_model_provider()
     return ChatGoogleGenerativeAI(
-        base_url=get_base_url(provider),
+        base_url=get_base_url(),
         model=model_name,
-        api_key=get_api_key(provider)(),
+        api_key=get_api_key()(),
         thinking_budget=calculate_thinking_budget(reasoning_effort),
     )
 
@@ -167,15 +170,16 @@ def get_standard_api_model(
         model_name,
         reasoning_effort=reasoning_effort,
         is_response=True,
+        extra_body=None,
         # extra_body={"enable_thinking": True}, # for Ali provider only
     )
 
 def get_advance_model(
     thinking: bool = True,
-    reasoning_effort: ReasoningEffort = "medium",
+    reasoning_effort: ReasoningEffort = "max",
 ) -> BaseChatModel:
     model_name = _config.ADVANCE_MODEL_NAME
-    provider = get_model_provider()
+    provider = PROVIDER
     print(f"⚡ Using {model_name} via provider '{provider}' for advance model")
     effective_effort = reasoning_effort if thinking else "none"
     return get_standard_api_model(
@@ -185,10 +189,10 @@ def get_advance_model(
 
 
 def get_lite_model() -> BaseChatModel:
-    return get_standard_api_model(LITE_MODEL_NAME, reasoning_effort="low")
+    return get_standard_api_model(LITE_MODEL_NAME, reasoning_effort="high")
 
 def get_mini_model() -> BaseChatModel:
-    return get_standard_api_model(LITE_MODEL_NAME, reasoning_effort="minimal")
+    return get_standard_api_model(LITE_MODEL_NAME, reasoning_effort="medium")
 
 
 def get_view_image_model() -> BaseChatModel:
@@ -208,14 +212,8 @@ def get_jev_model() -> BaseChatModel:
 def get_intent_model() -> BaseChatModel:
     return get_jev_model()
 
-def get_code_model(reasoning_effort: ReasoningEffort = "medium") -> BaseChatModel:
-    return get_openai_api_model(
-        model_name= os.environ.get("CODING_MODEL_NAME", QWEN_3_7_FLASH),
-        reasoning_effort=reasoning_effort,
-        base_url=os.environ.get("CODING_BASE_URL", ALI_BASE_URL),
-        api_key=os.environ.get("CODING_API_KEY", ALI_API_KEY),
-        extra_body=None
-    )
+def get_code_model(reasoning_effort: ReasoningEffort = "high") -> BaseChatModel:
+    return get_standard_api_model(CODING_MODEL_NAME, reasoning_effort=reasoning_effort)
 
 
 def choose_video_model() -> Literal["1.0", "1.5"]:
@@ -337,6 +335,45 @@ async def generate_image_for_volc(
     assert img_url.startswith("http")
     return img_url
 
+
+async def generate_image_for_sensenova(
+    prompt: str,
+    images: list[str] | None = None,
+    *,
+    model: str = SENSENOVA_U1_5_LITE,
+) -> str:
+    """Generate or edit an image via SenseNova and return its temporary URL."""
+    if not SENSENOVA_API_KEY:
+        raise ValueError("SENSENOVA_API_KEY is not configured")
+
+    image_sources = await _resolve_image_srcs(images or [])
+    payload: dict[str, Any] = {
+        "model": model,
+        "prompt": prompt,
+        "n": 1,
+        "size": "auto",
+        "watermark": False,
+        "prompt_extend": True,
+        "response_format": "url",
+    }
+    if image_sources:
+        payload["images"] = [{"image_url": src} for src in image_sources]
+    endpoint = "edits" if image_sources else "generations"
+
+    response = await asyncio.to_thread(
+        requests.post,
+        f"{SENSENOVA_BASE_URL.rstrip('/')}/images/{endpoint}",
+        headers={"Authorization": f"Bearer {SENSENOVA_API_KEY}"},
+        json=payload,
+        timeout=300,
+    )
+    response.raise_for_status()
+
+    image_url = response.json()["data"][0]["url"]
+    if not isinstance(image_url, str) or not image_url.startswith(("http://", "https://")):
+        raise ValueError("SenseNova image response missing URL")
+    return image_url
+
 def generate_image_for_kege(
     prompt: str,
     aspect_ratio: str = "1:1",
@@ -370,6 +407,8 @@ def generate_image_for_kege(
     img_url: str = data["data"][0]["url"]
     assert img_url.startswith("http")
     return img_url
+
+
 
 
 async def generate_video_for(
