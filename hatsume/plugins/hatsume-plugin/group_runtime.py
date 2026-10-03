@@ -36,8 +36,13 @@ class GroupRuntime:
     last_was_system_trigger: bool = False
 
     generate_video_used: bool = False
+    send_text_count: int = 0
     send_image_count: int = 0
     send_video_count: int = 0
+    send_voice_count: int = 0
+    send_file_count: int = 0
+    replyable_message_ids: set[int] = field(default_factory=set)
+    replyable_senders: dict[int, int] = field(default_factory=dict)
 
     character_proxy: Any = None
     character_proxy_termination_handle: asyncio.TimerHandle | None = None

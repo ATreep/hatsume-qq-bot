@@ -22,10 +22,10 @@ from google.genai import types
 
 import requests
 from langchain_core.tools import tool as _langchain_tool
-from nonebot.adapters.onebot.v11 import MessageSegment
+from nonebot.adapters.onebot.v11 import Message, MessageSegment
 from langchain_community.tools import DuckDuckGoSearchRun
 from langchain_keenable import KeenableSearch, KeenableFetch
-from pydantic import Field
+from pydantic import BaseModel, Field
 
 from ..infra import (
     ensure_container_running,
@@ -39,9 +39,15 @@ from ..group_runtime import (
     set_current_group_runtime,
 )
 
-from ..config import GENERATE_IMAGE_RATE_LIMIT_SECONDS
+from ..config import GENERATE_IMAGE_RATE_LIMIT_SECONDS, MAX_REAL_AT_SEGMENTS
 
 from ..memory import query_mems
+from ..utils import (
+    CQ_AT_PATTERN,
+    mask_secret_keys,
+    resolve_cq_at_mentions,
+)
+from ..utils.md_to_image import auto_convert_text
 from .agents import get_agent_list, get_agent_handler
 
 if TYPE_CHECKING:
@@ -57,6 +63,13 @@ HookIntervalSeconds = Annotated[int, Field(strict=True, ge=300)]
 HookTimeoutSeconds = Annotated[int, Field(strict=True, ge=1, le=60)]
 StrictBool = Annotated[bool, Field(strict=True)]
 MatchUserId = Annotated[int, Field(strict=True, ge=0)]
+
+
+class MemoryRecordInput(BaseModel):
+    """One memory and the group members it is associated with."""
+
+    content: str
+    keymans: list[int] = Field(default_factory=list)
 
 
 class WeeklyTimePoint(TypedDict):
@@ -219,8 +232,13 @@ def configure_agent_notification_callback(cb: Callable[[int, int, str], None]) -
 def reset_capture_flag() -> None:
     runtime = get_current_group_runtime()
     runtime.generate_video_used = False
+    runtime.send_text_count = 0
     runtime.send_image_count = 0
     runtime.send_video_count = 0
+    runtime.send_voice_count = 0
+    runtime.send_file_count = 0
+    runtime.replyable_message_ids.clear()
+    runtime.replyable_senders.clear()
 
 
 
@@ -667,6 +685,169 @@ async def view_image(image_url: str) -> str:
 
 
 @tool
+async def send_text(
+    text: str,
+    reply_to_message_id: int | None = None,
+    memories: list[MemoryRecordInput] | None = None,
+    hatsumeface: str | None = None,
+) -> str:
+    """直接向当前群发送文字，并可附带回复、记忆和表情控制参数。
+
+    CQ at 标记必须包含在 text 中。特殊控制标记请使用对应参数，不能写入 text。
+    """
+    runtime = get_current_group_runtime()
+    message_text = (text or "").strip()
+    if not message_text:
+        return "文字发送失败：text 不能为空。"
+    if runtime.send_text_count >= 3:
+        return "文字发送失败：一轮 ai_node 中最多发送3条文字。"
+    answer = runtime.conversation.ai_answer
+    if answer is None:
+        return "文字发送失败：发送通道未就绪。"
+    if reply_to_message_id is not None and (
+        isinstance(reply_to_message_id, bool)
+        or reply_to_message_id not in runtime.replyable_message_ids
+    ):
+        reply_to_message_id = None
+
+    runtime.send_text_count += 1
+    message_text = mask_secret_keys(message_text)
+    at_matches = list(CQ_AT_PATTERN.finditer(message_text))
+    if not at_matches:
+        segments = await auto_convert_text(message_text)
+    else:
+        mentions = await resolve_cq_at_mentions(message_text, runtime.group_id)
+        mention_iter = iter(mentions)
+        rendered_text = CQ_AT_PATTERN.sub(
+            lambda _match: f"@{next(mention_iter)[1]}",
+            message_text,
+        )
+        rendered_segments = await auto_convert_text(rendered_text)
+        if any(segment.type == "image" for segment in rendered_segments):
+            mention_segments = [
+                MessageSegment.at(user_id)
+                if index < MAX_REAL_AT_SEGMENTS
+                else MessageSegment.text(f"@{display_name}")
+                for index, (user_id, display_name) in enumerate(mentions)
+            ]
+            segments = mention_segments + rendered_segments
+        else:
+            segments = []
+            cursor = 0
+            for index, match in enumerate(at_matches):
+                if match.start() > cursor:
+                    segments.append(MessageSegment.text(message_text[cursor:match.start()]))
+                user_id, display_name = mentions[index]
+                segments.append(
+                    MessageSegment.at(user_id)
+                    if index < MAX_REAL_AT_SEGMENTS
+                    else MessageSegment.text(f"@{display_name}")
+                )
+                cursor = match.end()
+            if cursor < len(message_text):
+                segments.append(MessageSegment.text(message_text[cursor:]))
+
+    try:
+        if reply_to_message_id is not None:
+            await answer(
+                Message(segments),
+                reply_to_message_id=reply_to_message_id,
+            )
+        else:
+            await answer(Message(segments))
+    except Exception as error:
+        print(f"❌ send_text failed: {error}")
+        return f"文字发送失败：{error}"
+
+    from ..config import BOT_QQ_ID
+    from ..state import peer_session_id
+    addressed_user_ids = [
+        int(match.group(1)) for match in CQ_AT_PATTERN.finditer(message_text)
+    ]
+    if reply_to_message_id is not None:
+        sender_id = runtime.replyable_senders.get(reply_to_message_id)
+        if sender_id is not None:
+            addressed_user_ids.append(sender_id)
+    for user_id in addressed_user_ids:
+        if user_id > 0 and user_id != BOT_QQ_ID:
+            runtime.conversation.chat_peers.add(
+                peer_session_id(runtime.group_id, user_id)
+            )
+
+    memory_records = [
+        memory for memory in (memories or []) if memory.content.strip()
+    ]
+    if memory_records:
+        from ..memory import add_mem
+
+        people_by_id: dict[int, str] = {}
+        keyman_ids = {
+            user_id
+            for memory in memory_records
+            for user_id in memory.keymans
+            if user_id > 0
+        }
+        if keyman_ids:
+            from ..utils import get_group_member_name
+
+            try:
+                bot = runtime.bot or group_runtime_registry.get_bot(runtime.group_id)
+                for user_id in keyman_ids:
+                    people_by_id[user_id] = await get_group_member_name(
+                        bot, runtime.group_id, user_id
+                    )
+            except Exception as error:
+                print(f"[memory] Failed to resolve usernames for QQ numbers: {error}")
+
+        for memory in memory_records:
+            people = [
+                {"user_id": user_id, "user_name": people_by_id.get(user_id, str(user_id))}
+                for user_id in dict.fromkeys(memory.keymans)
+                if user_id > 0
+            ]
+            print(
+                f"[memory] Writing record for keymans="
+                f"{[person['user_id'] for person in people]}: "
+                f"{mask_secret_keys(memory.content.strip())}"
+            )
+            add_mem(
+                memory.content.strip(),
+                people=people,
+                group_id=runtime.group_id,
+            )
+
+    if hatsumeface:
+        import random
+
+        import nonebot_plugin_localstore as store
+
+        try:
+            faces_dir = Path(store.get_plugin_data_file("faces"))
+            faces = []
+            if faces_dir.is_dir():
+                faces = [
+                    path for path in faces_dir.iterdir()
+                    if path.is_file()
+                    and path.name.lower().endswith((".png", ".jpg", ".jpeg"))
+                    and path.name.split("_")[0] == hatsumeface.strip()
+                ]
+            if faces:
+                face_path = random.choice(faces)
+                face_data = base64.b64encode(face_path.read_bytes()).decode("ascii")
+                print(
+                    f"[face] Sending emotion={hatsumeface.strip()!r} "
+                    f"image={face_path.name!r}"
+                )
+                await answer(MessageSegment.image("base64://" + face_data, cache=False))
+            else:
+                print(f"[face] No image found for emotion={hatsumeface.strip()!r}")
+        except Exception as error:
+            print(f"❌ send_text face failed: {error}")
+
+    return "文字已成功发送给用户。"
+
+
+@tool
 async def send_image(image_url: str) -> str:
     """
     发送一张图片给用户。
@@ -747,7 +928,7 @@ async def send_video(video_url: str) -> str:
         3) 容器 file:// 绝对路径（如 "file:///work/path/to/video.mp4"）
 
     ## 注意：
-    - 每轮 ai_node 最多调用一次
+    - 每轮 ai_node 最多调用三次
     - 每次调用只能发送一个视频
     - 视频会直接发送给用户，你不需要再额外描述视频内容
     """
@@ -756,8 +937,8 @@ async def send_video(video_url: str) -> str:
     if not video_url or not video_url.strip():
         return "❌ 错误：video_url 不能为空。"
 
-    if runtime.send_video_count >= 1:
-        return "视频发送失败：一轮发言中你最多只能发送1个视频。"
+    if runtime.send_video_count >= 3:
+        return "视频发送失败：一轮 ai_node 中最多发送3个视频。"
 
     runtime.send_video_count += 1
 
@@ -849,6 +1030,9 @@ async def send_voice(voice_url: str) -> str:
             return "❌ 声音发送失败：HTTP/HTTPS URL 必须包含主机地址。"
 
         runtime = get_current_group_runtime()
+        if runtime.send_voice_count >= 3:
+            return "❌ 声音发送失败：一轮 ai_node 中最多发送3个声音。"
+        runtime.send_voice_count += 1
         await ensure_container_running(runtime.group_id)
         if parsed.scheme in {"http", "https"}:
             file_path = await asyncio.to_thread(
@@ -960,6 +1144,9 @@ async def send_file(file_url: str, file_name: str | None = None) -> str:
     url = (file_url or "").strip()
     if not url:
         return "❌ 文件发送失败：file_url 不能为空。"
+    if runtime.send_file_count >= 3:
+        return "文件发送失败：一轮 ai_node 中最多发送3个文件。"
+    runtime.send_file_count += 1
 
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https", "file"}:
@@ -2282,6 +2469,7 @@ CHAT_TOOLS = [
     view_image,
     generate_image,
     # generate_video,
+    send_text,
     send_image,
     send_video,
     send_voice,

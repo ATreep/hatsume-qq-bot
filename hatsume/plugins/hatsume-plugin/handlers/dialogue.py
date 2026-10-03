@@ -57,7 +57,6 @@ from ..utils import (
 )
 from ..qq_emoji import render_qqface
 from ..message_render import build_bot_record_content
-from ..utils.md_to_image import auto_convert_text
 
 from ..intent_classifier.handler import on_message_incoming
 from .forward import (
@@ -865,17 +864,6 @@ def _replace_cq_at_with_segments(
     return segments
 
 
-def _render_cq_at_display_names(
-    text: str,
-    mentions: list[tuple[int, str]],
-) -> str:
-    mention_iter = iter(mentions)
-    return CQ_AT_PATTERN.sub(
-        lambda _match: f"@{next(mention_iter)[1]}",
-        text,
-    )
-
-
 async def _build_text_response_segments(
     text: str,
     group_id: int | None,
@@ -885,20 +873,9 @@ async def _build_text_response_segments(
     if not text.strip():
         return [], False
     if not CQ_AT_PATTERN.search(text):
-        return await auto_convert_text(text), False
+        return [MessageSegment.text(text)], False
 
     mentions = await resolve_cq_at_mentions(text, group_id)
-    rendered_text = _render_cq_at_display_names(text, mentions)
-    rendered_segments = await auto_convert_text(rendered_text)
-    if any(_segment_type(seg) == "image" for seg in rendered_segments):
-        mention_segments = [
-            MessageSegment.at(uid)
-            if index < max_real_at_segments
-            else MessageSegment.text(f"@{display_name}")
-            for index, (uid, display_name) in enumerate(mentions)
-        ]
-        return mention_segments + rendered_segments, bool(mention_segments)
-
     return _replace_cq_at_with_segments(
         text,
         mentions,
@@ -911,7 +888,9 @@ async def _build_ai_response_segments(
     group_id: int | None,
     reply_to_message_id: int | None = None,
 ) -> tuple[list[Any], bool]:
-    if isinstance(msg, str):
+    if isinstance(msg, Message):
+        segments, force_message = list(msg), True
+    elif isinstance(msg, str):
         segments, force_message = await _build_text_response_segments(msg, group_id)
     elif _is_text_segment(msg):
         segments, force_message = await _build_text_response_segments(

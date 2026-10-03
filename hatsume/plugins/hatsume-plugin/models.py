@@ -44,8 +44,6 @@ from .config import (
     SENSENOVA_API_KEY,
     SENSENOVA_BASE_URL,
     SENSENOVA_U1_5_LITE,
-    TYPESAFE_API_KEY,
-    TYPESAFE_BASE_URL,
     JEV_1_13,
     VOLCENGINE_BASE_URL,
     WAWAPI_IMAGE_API_KEY,
@@ -176,10 +174,14 @@ def get_standard_api_model(
         extra_body=None,
         # extra_body={"enable_thinking": True}, # for Ali provider only
     )
+    # return get_google_api_model(
+    #     model_name,
+    #     reasoning_effort=reasoning_effort,
+    # )
 
 def get_advance_model(
     thinking: bool = True,
-    reasoning_effort: ReasoningEffort = "max",
+    reasoning_effort: ReasoningEffort = "medium",
 ) -> BaseChatModel:
     model_name = _config.ADVANCE_MODEL_NAME
     provider = PROVIDER
@@ -192,10 +194,10 @@ def get_advance_model(
 
 
 def get_lite_model() -> BaseChatModel:
-    return get_standard_api_model(LITE_MODEL_NAME, reasoning_effort="high")
+    return get_standard_api_model(LITE_MODEL_NAME, reasoning_effort="medium")
 
 def get_mini_model() -> BaseChatModel:
-    return get_standard_api_model(LITE_MODEL_NAME, reasoning_effort="medium")
+    return get_standard_api_model(LITE_MODEL_NAME, reasoning_effort="low")
 
 
 def get_view_image_model() -> BaseChatModel:

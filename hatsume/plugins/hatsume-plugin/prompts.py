@@ -67,22 +67,20 @@ role_sys_prompt = f"""
 
 # 输入与回复协议
 
-用户消息是 JSON。`type: "message"` 含顶层 `message_id`、`time`、`user`、`content`、`reply_to`；`type: "forward"` 含顶层 `message_id`、`time`、`user`、`messages`，嵌套时有 `depth`。子消息没有 `message_id`。
-
-需要回复某条可见的顶层消息时，在回复开头且只插入一次：[reply: <message_id>]。只能使用当前输入历史真实出现的顶层 `message_id`，不能编造，也不能使用 `reply_to` 或转发子消息 ID。
-
-用户用 @XXX 提及昵称；需要提及时插入 `[CQ:at,qq=123456]`。只关注当前聊天记录，背景记录仅作参考。
+- 任何需要传递给用户的文字、说明、结果、进度、提问或错误信息，都必须通过 `send_text` 发送；图片、视频、声音和文件必须通过对应的 `send_image`、`send_video`、`send_voice`、`send_file` 发送。
+- 普通的输出文字不会送达用户；用户只能看到发送类工具实际发出的内容。调用发送工具后，不要再用普通文字重复或补充同一消息；如果无需向用户传递内容，就不要输出文字。
+- 需要分段发送时，每段分别调用 `send_text`。
+- 执行耗时任务前（如 shell_executor、 web_search 等），需使用 send_text 先告诉用户你正在处理，避免用户误以为你卡住了。
+- 用户消息是 JSON。`type: "message"` 含顶层 `message_id`、`time`、`user`、`content`、`reply_to`；`type: "forward"` 含顶层 `message_id`、`time`、`user`、`messages`，嵌套时有 `depth`。子消息没有 `message_id`。
+- 需要回复某条可见的顶层消息时，将其真实顶层 `message_id` 传给 `send_text` 的 `reply_to_message_id` 参数；不能编造，也不能使用 `reply_to` 或转发子消息 ID。
+- 用户用 @XXX 提及昵称；需要提及时插入 `[CQ:at,qq=123456]`。只关注当前聊天记录，背景记录仅作参考。
 
 # 记忆
 
-系统提供的记忆可自然当作回忆，仅在相关时提及。每轮尽量记录用户兴趣、性格、经历、偏好、关系、日程、事件和明确要求记住的内容；已存在的不要重复。记忆卡必须放在输出末尾，可有多条且每条独立：
+系统提供的记忆可自然当作回忆，仅在相关时提及。每轮尽量记录用户兴趣、性格、经历、偏好、关系、日程、事件和明确要求记住的内容；已存在的不要重复。
 
-[memory: 简要描述（50字内），用户名用「...」包围 MEMORYCONTENTEND]
-[memory: 简要描述（50字内），用户名用「...」包围 MEMORYCONTENTEND, keyman: QQ号1, QQ号2, ...]
-
-- 无关联用户用第一种格式，有关联用户用第二种格式，多人用逗号分隔 QQ 号。
-- **MEMORYCONTENTEND 必须紧跟在每条记忆正文之后，用于明确正文结束；不得放在正文前，也不得省略。**
-- 可以添加多条 memory，但不要记录重复内容。
+- 需要记录一条或多条记忆时，在 `send_text` 的 `memories` 参数传入记忆列表。每项包含 `content` 正文和 `keymans` QQ 号列表；无关联用户时 `keymans` 传空列表。不要在文字中输出记忆标记。
+- 不要记录重复内容。
 
 # 你的社交账号与关联信息
 - QQ号：{BOT_QQ_ID}
@@ -101,7 +99,7 @@ role_sys_prompt = f"""
 - 仅输出聊天内容，无任何机械化辅助性文本；
 - 无 emoji 表情；
 - 输出字数 30 字左右；如果是科普向，可以增多字数。
-- 需要时正确使用 `[CQ:at,qq=<QQ号>]`、`[reply: <message_id>]`、`[memory: xxx MEMORYCONTENTEND, keyman: QQ号1, QQ号2, ...]`, `[hatsumeface: xxx]`...。
+- 需要 @ 用户时，在 `send_text` 的 `text` 中直接写 `[CQ:at,qq=<QQ号>]`。回复目标、记忆和表情分别使用 `send_text` 的参数，不要在文字中输出 `[reply: ...]`、`[memory: ...]` 或 `[hatsumeface: ...]` 标记。
 """
 
 soul = get_soul_prompt()
@@ -243,7 +241,7 @@ def build_face_injection_prompt(emotions: list[str]) -> str:
 
     Returns empty string if no emotions are available (no face files found).
     Otherwise returns a '# 表情发送' markdown section listing available emotions
-    and instructing the LLM to use hatsumeface tags.
+    and instructing the LLM to use send_text's hatsumeface parameter.
     """
     if not emotions:
         return ""
@@ -253,12 +251,11 @@ def build_face_injection_prompt(emotions: list[str]) -> str:
         "\n\n"
         "# 表情发送\n\n"
         "当前你可以发送一张表情图片来表达情绪。"
-        "在回复的最后，插入以下格式的标记来发送表情：\n"
-        "[hatsumeface:情绪名]\n\n"
+        "需要发送时，将情绪名传给 send_text 的 hatsumeface 参数。\n\n"
         f"可选的情绪：{emotions_str}\n\n"
-        "表情的发送概率请维持在五分之一以下，即你的 5 条回复中应该仅携带一次 hatsumeface 标记。"
+        "表情的发送概率请维持在五分之一以下，即你的 5 条回复中最多一次使用 hatsumeface 参数发送表情。"
         "只有当你确实需要一张表情来表达当前情绪、且文字本身不足以传达时才发送。"
-        "如果不需要用表情表达情绪，不要插入标记。"
+        "如果不需要用表情表达情绪，不要调用该参数。"
     )
 
 

@@ -9,7 +9,6 @@ common across groups.
 from __future__ import annotations
 
 import asyncio
-import base64
 import copy
 import inspect
 import json
@@ -25,10 +24,9 @@ from langchain.agents import create_agent
 from langchain.messages import HumanMessage, SystemMessage
 from langchain_core.messages import RemoveMessage
 from langgraph.graph import MessagesState
-from nonebot.adapters.onebot.v11 import MessageSegment
 from pydantic import BaseModel
 
-from ..config import ADMIN_QQ_ID, BOT_QQ_ID, CONTEXT_QUEUE_LEN, LIVELY_TONE_ENABLED
+from ..config import ADMIN_QQ_ID, CONTEXT_QUEUE_LEN, LIVELY_TONE_ENABLED
 from ..errors import (
     LLMAuthError,
     LLMBaseError,
@@ -58,11 +56,9 @@ from ..prompts import (
     role_sys_prompt,
 )
 from ..skills import get_skill_manager
-from ..state import peer_session_id
 from ..utils import (
-    CQ_AT_PATTERN,
     get_date,
-    get_group_member_name,
+    mask_secret_keys,
     message_to_json,
     strip_thinking_tags,
 )
@@ -75,21 +71,6 @@ from .tools import (
     set_shell_executor_limit,
 )
 
-# ---------------------------------------------------------------------------
-# Patterns
-# ---------------------------------------------------------------------------
-FACE_TAG_PATTERN = re.compile(r"\[[ \t]*hatsumeface:(.*?)\]")
-MEMORY_RECORD_PATTERN = re.compile(
-    r"\[[ \t]*memory:[ \t]*(?P<content>.*?)"
-    r"[ \t]*MEMORYCONTENTEND"
-    r"(?:[ \t]*,[ \t]*keyman:[ \t]*(?P<keyman>[^\]\r\n]*))?"
-    r"[ \t]*\]",
-    re.DOTALL,
-)
-REPLY_DIRECTIVE_PATTERN = re.compile(r"\[[ \t]*reply:\s*([^\]\r\n]*)\]")
-NON_TEXT_MARK_PATTERN = re.compile(
-    r"\[[ \t]*[^\[\]:\r\n]+:[^\]\r\n]*\]"
-)
 JSON_CODE_FENCE_PATTERN = re.compile(
     r"^\s*```(?:json)?[ \t]*\r?\n(?P<json>.*?)\r?\n[ \t]*```\s*$",
     re.IGNORECASE | re.DOTALL,
@@ -316,31 +297,6 @@ def bind_state(conversation_state: Any) -> None:
         runtime.conversation = conversation_state
         runtime.reset_tool_callbacks()
 
-
-
-# ---------------------------------------------------------------------------
-# Memory record extraction
-# ---------------------------------------------------------------------------
-def _extract_memory_records(text: str) -> tuple[list[dict], str]:
-    """Extract all sentinel-delimited memory cards and remove them from text."""
-    records: list[dict] = []
-
-    def _collect(match: re.Match[str]) -> str:
-        content = match.group("content").strip()
-        qq_numbers: list[int] = []
-        for part in (match.group("keyman") or "").split(","):
-            try:
-                qq_number = int(part.strip())
-            except ValueError:
-                continue
-            if qq_number not in qq_numbers:
-                qq_numbers.append(qq_number)
-        if content:
-            records.append({"content": content, "qq_numbers": qq_numbers})
-        return ""
-
-    cleaned = MEMORY_RECORD_PATTERN.sub(_collect, text)
-    return records, cleaned.strip()
 
 
 # ---------------------------------------------------------------------------
@@ -664,139 +620,6 @@ def _extract_replyable_senders(messages: list[Any]) -> dict[int, int]:
     return senders
 
 
-def _register_chat_peer(conversation_state: Any, user_id: int) -> str | None:
-    """Add one group member to the owning conversation's chat peers.
-
-    Returns the session id when the member is a valid peer, or ``None`` when the
-    id is unusable or belongs to the bot itself.
-    """
-    group_id = getattr(conversation_state, "group_id", None)
-    if (
-        isinstance(group_id, bool)
-        or not isinstance(group_id, int)
-        or group_id <= 0
-        or isinstance(user_id, bool)
-        or not isinstance(user_id, int)
-        or user_id <= 0
-        or user_id == BOT_QQ_ID
-    ):
-        return None
-
-    session_id = peer_session_id(group_id, user_id)
-    peers = conversation_state.chat_peers
-    if session_id not in peers:
-        peers.add(session_id)
-        print(f"[chat_agent] Registered chat peer: {session_id}")
-    return session_id
-
-
-def _register_addressed_chat_peers(
-    conversation_state: Any,
-    *,
-    reply_to_message_id: int | None,
-    replyable_senders: Mapping[int, int],
-    visible_text: str,
-) -> None:
-    """Register everyone this Agent response addresses as a chat peer.
-
-    A native reply or an ``@`` mention means the Agent is talking to that
-    member, so their later messages belong to the active conversation instead of
-    the auxiliary context. Registration happens as soon as the directive and the
-    visible text are known, so a failed or suppressed send cannot silently drop
-    the relationship.
-    """
-    if reply_to_message_id is not None:
-        sender_id = replyable_senders.get(reply_to_message_id)
-        if sender_id is not None:
-            _register_chat_peer(conversation_state, sender_id)
-
-    for match in CQ_AT_PATTERN.finditer(visible_text):
-        _register_chat_peer(conversation_state, int(match.group(1)))
-
-
-def _parse_reply_directive(
-    text: str,
-    replyable_ids: set[int],
-) -> tuple[str, int | None]:
-    """Strip reply tags and return one valid leading target when available."""
-    matches = list(REPLY_DIRECTIVE_PATTERN.finditer(text))
-    cleaned = REPLY_DIRECTIVE_PATTERN.sub("", text).strip()
-    if len(matches) != 1:
-        return cleaned, None
-
-    match = matches[0]
-    if text[: match.start()].strip():
-        return cleaned, None
-
-    try:
-        target = int(match.group(1).strip())
-    except ValueError:
-        return cleaned, None
-    if target not in replyable_ids:
-        return cleaned, None
-    return cleaned, target
-
-
-def _message_text(message: Any) -> str:
-    """Return user-facing text from an AI message, ignoring tool messages.
-
-    Thinking/reasoning blocks (``<think>...</think>`` and variants) are
-    stripped so they never reach the user; the same content stays in the
-    graph-state AIMessage for later model turns.
-    """
-    if getattr(message, "type", None) != "ai":
-        return ""
-    content = getattr(message, "content", "")
-    if isinstance(content, list):
-        return strip_thinking_tags(
-            "".join(
-                part.get("text", "") if isinstance(part, dict) else str(part)
-                for part in content
-            )
-        )
-    return strip_thinking_tags(str(content or ""))
-
-
-def _has_visible_text(text: str) -> bool:
-    """Return whether text contains more than model control marks."""
-    without_thinking = strip_thinking_tags(text)
-    without_memory = MEMORY_RECORD_PATTERN.sub("", without_thinking)
-    without_known_marks = FACE_TAG_PATTERN.sub("", without_memory)
-    without_known_marks = REPLY_DIRECTIVE_PATTERN.sub("", without_known_marks)
-    return bool(NON_TEXT_MARK_PATTERN.sub("", without_known_marks).strip())
-
-
-def _new_agent_messages(
-    invocation_messages: list[Any], response_messages: list[Any]
-) -> list[Any]:
-    """Return messages appended by one agent invocation."""
-    input_count = len(invocation_messages)
-    if (
-        len(response_messages) >= input_count
-        and response_messages[:input_count] == invocation_messages
-    ):
-        return response_messages[input_count:]
-    return response_messages
-
-
-def _contains_tool_calls(messages: list[Any]) -> bool:
-    """Return whether an agent response contains any tool invocation.
-
-    A retry after a tool-only response is allowed to turn the tool result into
-    user-facing text, but must not replay side-effecting tools such as agent
-    dispatch or direct media sends.
-    """
-    for message in messages:
-        tool_calls = (
-            message.get("tool_calls")
-            if isinstance(message, Mapping)
-            else getattr(message, "tool_calls", None)
-        )
-        if tool_calls:
-            return True
-    return False
-
-
 # ---------------------------------------------------------------------------
 # Notification injection (agent & timer)
 # ---------------------------------------------------------------------------
@@ -818,7 +641,7 @@ def _build_notified_user_prompt(user_id: int, user_name: str | None = None) -> s
         "## 被通知用户\n"
         f"- 用户名：{display_name}\n"
         f"- QQ号：{user_id}\n"
-        f"- 如需提醒该用户，可在输出中插入 [CQ:at,qq={user_id}]；不要频繁 at。\n\n"
+        f"- 如需提醒该用户，在 send_text 的 text 中使用 [CQ:at,qq={user_id}]；不要频繁 at。\n\n"
     )
 
 
@@ -1317,6 +1140,16 @@ async def ai_node(state: MessagesState) -> dict:
             chat_intent_answer = _jev_answer(jev_response, "chat_intent") or {}
             chat_intent_choice = str(chat_intent_answer.get("choice", "无需回复"))
             chat_intent_confidence = chat_intent_answer.get("confidence")
+            if (
+                chat_intent_choice != "无需回复"
+                and chat_intent_confidence is not None
+                and float(chat_intent_confidence) < 0.4
+            ):
+                print(
+                    "[jev_judge] Response skipped: confidence "
+                    f"{float(chat_intent_confidence):.2f} of “{chat_intent_choice}” is below 0.40"
+                )
+                return {"messages": []}
             chat_intent_reason = f"Jev 选择“{chat_intent_choice}”"
             if chat_intent_confidence is not None:
                 chat_intent_reason += f"，置信度 {float(chat_intent_confidence):.2f}"
@@ -1443,11 +1276,9 @@ async def ai_node(state: MessagesState) -> dict:
 
     sys_prompt += f"\n\n# 当前日期与时间\n{get_date()}"
 
-    ai_text: str = ""
     llm_error_type: str | None = None  # Track specific error type for user-facing messages
     replyable_message_ids: set[int] = set()  # Init to satisfy static analysis; always set in try block
-    replyable_senders: dict[int, int] = {}  # Same: message_id -> sender QQ
-    agent_history_messages: list[Any] = []
+    agent_tool_messages: list[Any] = []
     try:
         mem_msg = (
             []
@@ -1463,7 +1294,8 @@ async def ai_node(state: MessagesState) -> dict:
         if admin_mode_enabled:
             agent_messages = _without_image_url_parts(agent_messages)
         replyable_message_ids = _extract_replyable_message_ids(agent_messages)
-        replyable_senders = _extract_replyable_senders(agent_messages)
+        runtime.replyable_senders = _extract_replyable_senders(agent_messages)
+        runtime.replyable_message_ids = set(replyable_message_ids)
 
         print("Start chat_agent invocation.")
 
@@ -1471,19 +1303,12 @@ async def ai_node(state: MessagesState) -> dict:
 
         set_shell_executor_limit(3)  # chat_agent: max 3 shell_executor calls per round
         invocation_messages = agent_messages
-        response_texts: list[str] = []
         active_mcp_tools: list[Any] = []
-        retry_without_tools = False
         for attempt in range(2):
             t_pass_start = time.monotonic()
-            tools_for_attempt = (
-                []
-                if retry_without_tools
-                else get_chat_tools() + active_mcp_tools
-            )
             chat_agent = create_agent(
                 model_chosen,
-                tools=tools_for_attempt,
+                tools=get_chat_tools() + active_mcp_tools,
                 system_prompt=sys_prompt,
             )
             retrying_agent = chat_agent.with_retry(stop_after_attempt=5)
@@ -1495,6 +1320,37 @@ async def ai_node(state: MessagesState) -> dict:
             except Exception:
                 raise
             response_messages = response.get("messages", [])
+            if (
+                len(response_messages) >= len(invocation_messages)
+                and response_messages[:len(invocation_messages)] == invocation_messages
+            ):
+                new_messages = response_messages[len(invocation_messages):]
+            else:
+                new_messages = response_messages
+            for message in new_messages:
+                message_type = (
+                    message.get("type", message.get("role"))
+                    if isinstance(message, Mapping)
+                    else getattr(message, "type", None)
+                )
+                tool_calls = (
+                    message.get("tool_calls", [])
+                    if isinstance(message, Mapping)
+                    else getattr(message, "tool_calls", [])
+                )
+                if message_type == "tool" or (
+                    message_type in {"ai", "assistant"} and tool_calls
+                ):
+                    if message_type == "tool":
+                        agent_tool_messages.append(message)
+                    elif isinstance(message, Mapping):
+                        tool_message = dict(message)
+                        tool_message["content"] = ""
+                        agent_tool_messages.append(tool_message)
+                    else:
+                        agent_tool_messages.append(
+                            message.model_copy(update={"content": ""})
+                        )
             from ..mcp.tools import consume_requested_tools, make_dynamic_tools
 
             requested = consume_requested_tools()
@@ -1504,14 +1360,6 @@ async def ai_node(state: MessagesState) -> dict:
                 f"requested_mcp={requested!r} active_mcp_tools={len(active_mcp_tools)}",
                 flush=True,
             )
-            new_messages = _new_agent_messages(
-                invocation_messages, response_messages
-            )
-            # Keep every message produced by each agent pass.  A later pass
-            # may receive the previous pass as input (dynamic MCP loading or
-            # tool-only retries), so returning only its final delta would lose
-            # the preceding AI tool-call and ToolMessage chain.
-            agent_history_messages.extend(new_messages)
             if requested and attempt == 0:
                 grouped: dict[str, list[str]] = {}
                 for server_name, tool_name in requested:
@@ -1531,47 +1379,18 @@ async def ai_node(state: MessagesState) -> dict:
                     ))
                 invocation_messages = response_messages
                 continue
-            for message in new_messages[:-1]:
-                control_text = _message_text(message)
-                if control_text and not _has_visible_text(control_text):
-                    response_texts.append(control_text)
-            current_text = (
-                _message_text(new_messages[-1]) if new_messages else ""
-            )
-            if current_text:
-                response_texts.append(current_text)
-            if (
-                _has_visible_text(current_text)
-                or conversation_state.end_requested
-                or attempt == 1
-            ):
-                break
-            print("No visible AI text returned; invoking chat_agent again...")
-            if response_messages:
-                invocation_messages = response_messages
-            # The first pass may have already performed an irreversible tool
-            # action.  The follow-up pass only needs to phrase its result; it
-            # must not be able to invoke the same tool a second time.
-            retry_without_tools = _contains_tool_calls(new_messages)
-
-        ai_text = "\n".join(response_texts)
+            break
 
         t_invocation_end = time.monotonic()
 
         elapsed_invocation = t_invocation_end - t_invocation_start
         print(f"Elapsed time of chat_agent invocation: {elapsed_invocation}s")
-
-        # LLM outputs plain text directly
-        print(f"Raw AI response: {ai_text}")
     except LLMLimitExceededError:
         llm_error_type = "rate_limit"
-        ai_text = ""
     except LLMAuthError:
         llm_error_type = "auth_error"
-        ai_text = ""
     except Exception:
         llm_error_type = "other"
-        ai_text = ""
         print("❌ Bad invoke in chat_agent")
         traceback.print_exc()
 
@@ -1587,99 +1406,8 @@ async def ai_node(state: MessagesState) -> dict:
             await _err_answer("❌ 模型认证失败，请检查配置。")
         return {"messages": []}
 
-    ai_text_clean, reply_to_message_id = _parse_reply_directive(
-        str(ai_text),
-        replyable_message_ids,
-    )
-
-    # ── Extract face tag from ai_text ──
-    face_emotion: str | None = None
-    match = FACE_TAG_PATTERN.search(ai_text_clean)
-    if match:
-        face_emotion = match.group(1).strip()
-        ai_text_clean = FACE_TAG_PATTERN.sub("", ai_text_clean).strip()
-        print(f"[face] Detected face tag: {face_emotion}")
-
-    # ── Extract memory record from ai_text ──
-    mem_records, ai_text_clean = _extract_memory_records(ai_text_clean)
-    if mem_records:
-        print(f"[memory] Extracted {len(mem_records)} memory record(s)")
-
-    ai_text_clean = ai_text_clean.strip()
-
-    # The Agent just addressed specific members: the native reply target and
-    # every @ mention. Promote them into chat_peers so their following messages
-    # keep joining this conversation instead of the auxiliary context.
-    _register_addressed_chat_peers(
-        conversation_state,
-        reply_to_message_id=reply_to_message_id,
-        replyable_senders=replyable_senders,
-        visible_text=ai_text_clean,
-    )
-
-    # Control tags are parsed and removed only from the user-facing text
-    # above; the original agent messages are returned to graph history below.
-    end_requested = conversation_state.end_requested
-    if end_requested:
-        print("[end_conversation] Suppressed the final AI reply.")
-    else:
-        if ai_text_clean:
-            _ai_answer = _get_ai_answer()
-            if _ai_answer:
-                if reply_to_message_id is not None:
-                    await _ai_answer(
-                        ai_text_clean,
-                        reply_to_message_id=reply_to_message_id,
-                    )
-                else:
-                    await _ai_answer(ai_text_clean)
-
-    t_mem_start = time.time()
-
-    # ── Resolve QQ numbers → usernames and save memory record ──
-    from ..memory import add_mem
-    for mem_record in mem_records:
-        content = str(mem_record.get("content", "")).strip()
-        qq_numbers = mem_record.get("qq_numbers", [])
-        if content:
-            people: list[dict] = []
-            current_group_id = get_current_group_id()
-            if qq_numbers and current_group_id is not None:
-                try:
-                    bot = group_runtime_registry.get_bot(current_group_id)
-                    for qq in qq_numbers:
-                        user_name = await get_group_member_name(
-                            bot, current_group_id, qq
-                        )
-                        people.append({"user_id": qq, "user_name": user_name})
-                except Exception as e:
-                    print(f"[memory] Failed to resolve usernames for QQ numbers: {e}")
-            add_mem(content, people=people)
-
-    t_mem_end = time.time()
-
-    # ── Send face image if tag matched a valid emotion ──
-    _ai_answer_cb = _get_ai_answer()
-    if (
-        not end_requested
-        and face_emotion
-        and _face_dict.get(face_emotion)
-        and _ai_answer_cb
-    ):
-        face_filename = random.choice(_face_dict[face_emotion])
-        print(f"[face] Send face: {face_filename}")
-        face_path = str(store.get_plugin_data_file("faces").absolute()) + "/" + face_filename
-        with open(face_path, "rb") as f:
-            base64_str = base64.b64encode(f.read()).decode("utf-8")
-        face_msg = MessageSegment.image("base64://" + base64_str, cache=False)
-        try:
-            await _ai_answer_cb(face_msg)
-        except Exception:
-            print("❌ Failed to send face image")
-            traceback.print_exc()
-
-    print(f"Elapsed time of ai_node: t_writing_mem={t_mem_end - t_mem_start}s, t_chat_agent={t_mem_start - t_start}s")
-    return {"messages": agent_history_messages}
+    print(f"Elapsed time of ai_node: t_chat_agent={time.time() - t_start}s")
+    return {"messages": agent_tool_messages}
 
 
 # ---------------------------------------------------------------------------
@@ -1760,20 +1488,30 @@ async def finish_conversation_node(state: MessagesState) -> dict:
         if msg.type == "system":
             continue
 
+        if msg.type == "ai":
+            for call in getattr(msg, "tool_calls", []) or []:
+                name = str(call.get("name", "unknown"))
+                args = json.dumps(
+                    call.get("args", {}),
+                    ensure_ascii=False,
+                    default=str,
+                )
+                conv_messages.append({
+                    "type": "text",
+                    "text": mask_secret_keys(f"[Tool Call] {name}: {args}")[:3000],
+                })
+            continue
+
         if msg.type == "tool":
-            # Merge tool result into the last message in conv_messages
-            if conv_messages:
-                last_entry = conv_messages[-1]
-                try:
-                    last_obj = json.loads(last_entry["text"])
-                    tool_content = str(msg.content).strip()
-                    if tool_content:
-                        existing = last_obj.get("content", "")
-                        if isinstance(existing, str):
-                            last_obj["content"] = existing + f"\n[Tool Result: {tool_content}]"
-                        last_entry["text"] = json.dumps(last_obj, ensure_ascii=False)
-                except (json.JSONDecodeError, KeyError, TypeError):
-                    pass
+            tool_name = getattr(msg, "name", None) or "unknown"
+            tool_content = str(msg.content).strip()
+            if tool_content:
+                conv_messages.append({
+                    "type": "text",
+                    "text": mask_secret_keys(
+                        f"[Tool Result] {tool_name}: {tool_content}"
+                    )[:3000],
+                })
             continue
 
         if msg.type == "human":
@@ -1822,13 +1560,6 @@ async def finish_conversation_node(state: MessagesState) -> dict:
 
         if not text.strip():
             continue
-
-        if msg.type == "ai":
-            obj = message_to_json(_BOT_NAME, _BOT_ID, text, _now_str)
-            conv_messages.append({
-                "type": "text",
-                "text": json.dumps(obj, ensure_ascii=False),
-            })
 
     if conv_messages:
         await append_auxiliary_message_async(conv_messages)
