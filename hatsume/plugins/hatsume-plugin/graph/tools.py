@@ -3,15 +3,20 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextvars
+import hashlib
 import shlex
 import ssl
 import threading
 import traceback
+import uuid
 import urllib.request
 import urllib.error
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Callable, Literal, TypedDict
+from urllib.parse import unquote, urlparse
 
 from google.genai import types
 
@@ -798,6 +803,217 @@ async def send_video(video_url: str) -> str:
         return f"❌ 视频发送失败: {e}"
 
     return "视频已成功发送给用户。"
+
+
+def _download_voice_to_sandbox(voice_url: str, *, group_id: int) -> Path:
+    """Download audio into /tmp, preserving its URL suffix for format checks."""
+    suffix = Path(unquote(urlparse(voice_url).path)).suffix
+    destination = Path(f"/tmp/hatsume-voice-{group_id}-{uuid.uuid4().hex}{suffix}")
+    try:
+        with requests.get(voice_url, stream=True, timeout=30) as response:
+            response.raise_for_status()
+            with destination.open("xb") as output:
+                for chunk in response.iter_content(chunk_size=64 * 1024):
+                    if chunk:
+                        output.write(chunk)
+    except Exception:
+        destination.unlink(missing_ok=True)
+        raise
+    return destination
+
+
+@tool
+async def send_voice(voice_url: str) -> str:
+    """使用语音消息的方式向用户发送 声音/音乐 文件。
+
+    voice_url 支持 HTTP/HTTPS 声音文件 URL 或沙盒 file:// 绝对路径，如 file:///tmp/voice.mp3。
+    仅支持 .mp3，其他格式的声音文件请先转换为 MP3 后再调用本工具。
+    """
+    url = (voice_url or "").strip()
+    if not url:
+        return "❌ 声音发送失败：voice_url 不能为空。"
+
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme not in {"http", "https", "file"}:
+            return "❌ 声音发送失败：仅支持 HTTP/HTTPS URL 或 file:// 沙盒绝对路径。"
+        if parsed.scheme == "file":
+            file_path = Path(unquote(parsed.path))
+            if (
+                parsed.netloc not in {"", "localhost"}
+                or not file_path.is_absolute()
+                or "\0" in str(file_path)
+            ):
+                return "❌ 声音发送失败：file URL 必须指向沙盒内的绝对路径。"
+        elif not parsed.netloc:
+            return "❌ 声音发送失败：HTTP/HTTPS URL 必须包含主机地址。"
+
+        runtime = get_current_group_runtime()
+        await ensure_container_running(runtime.group_id)
+        if parsed.scheme in {"http", "https"}:
+            file_path = await asyncio.to_thread(
+                _download_voice_to_sandbox, url, group_id=runtime.group_id
+            )
+        if not await asyncio.to_thread(file_path.is_file):
+            return f"❌ 声音发送失败：沙盒文件不存在或不是普通文件（{file_path}）。"
+        if file_path.suffix.lower() != ".mp3":
+            return (
+                "❌ 此工具仅支持 mp3 格式的声音，请处理后再发送。"
+                f"原声音文件在沙盒中的路径是：{file_path}"
+            )
+
+        if not runtime.conversation.ai_answer:
+            return "❌ 错误：无法发送声音（发送通道未就绪）。"
+        audio_data = await asyncio.to_thread(file_path.read_bytes)
+        encoded = base64.b64encode(audio_data).decode("ascii")
+        await runtime.conversation.ai_answer(
+            MessageSegment.record(file=f"base64://{encoded}")
+        )
+    except Exception as error:
+        print(f"❌ send_voice failed: {error}")
+        return f"❌ 声音发送失败：{error}"
+    return "声音已成功发送给用户。"
+
+
+_FILE_STREAM_CHUNK_SIZE = 64 * 1024
+_FILE_STREAM_RETENTION_MS = 300_000
+
+
+def _file_name_from_url(file_url: str) -> str:
+    parsed = urlparse(file_url)
+    candidate = Path(unquote(parsed.path)).name
+    return candidate or "downloaded-file"
+
+
+def _stream_file_chunks(path: Path) -> tuple[list[bytes], str, int]:
+    chunks: list[bytes] = []
+    digest = hashlib.sha256()
+    file_size = 0
+    with path.open("rb") as source:
+        while True:
+            chunk = source.read(_FILE_STREAM_CHUNK_SIZE)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            digest.update(chunk)
+            file_size += len(chunk)
+    if not chunks:
+        chunks.append(b"")
+    return chunks, digest.hexdigest(), file_size
+
+
+def _napcat_response_data(response: Any) -> Any:
+    """Accept both OneBot's data-only result and a raw OpenAPI response."""
+    if not isinstance(response, dict):
+        raise RuntimeError(f"NapCat 返回值无效：{response!r}")
+    if response.get("status") in {"ok", "failed"}:
+        if response.get("status") != "ok":
+            raise RuntimeError(f"NapCat 接口调用失败：{response!r}")
+        return response.get("data")
+    return response
+
+
+async def _upload_container_file_to_napcat(bot: Any, path: Path) -> str:
+    """Upload a container file through NapCat's stream API and return its path."""
+    chunks, sha256, file_size = await asyncio.to_thread(_stream_file_chunks, path)
+    stream_id = str(uuid.uuid4())
+    total_chunks = len(chunks)
+    for chunk_index, chunk in enumerate(chunks):
+        response = await bot.call_api(
+            "upload_file_stream",
+            stream_id=stream_id,
+            chunk_data=base64.b64encode(chunk).decode("ascii"),
+            chunk_index=chunk_index,
+            total_chunks=total_chunks,
+            file_size=file_size,
+            expected_sha256=sha256,
+            filename=path.name,
+            file_retention=_FILE_STREAM_RETENTION_MS,
+        )
+        _napcat_response_data(response)
+
+    response = await bot.call_api(
+        "upload_file_stream",
+        stream_id=stream_id,
+        is_complete=True,
+        file_retention=_FILE_STREAM_RETENTION_MS,
+    )
+    data = _napcat_response_data(response)
+    if not isinstance(data, dict):
+        raise RuntimeError(f"NapCat 文件合并响应无效：{response!r}")
+    uploaded_file = data.get("file_path") or data.get("file_url") or data.get("url")
+    if not isinstance(uploaded_file, str) or not uploaded_file.strip():
+        raise RuntimeError(f"NapCat 文件合并响应缺少 file_path：{response!r}")
+    return uploaded_file
+
+
+@tool
+async def send_file(file_url: str, file_name: str | None = None) -> str:
+    """将文件上传到当前群的群文件中。
+    用于向用户发送文件时调用。
+    若你需要发送图片、视频或声音，则使用其他对应的工具发送。仅其他类型文件使用此工具发送。
+
+    ``file_url`` 支持 HTTP/HTTPS URL，或沙盒
+    中的 ``file://`` 文件 URL。
+    """
+    runtime = get_current_group_runtime()
+    url = (file_url or "").strip()
+    if not url:
+        return "❌ 文件发送失败：file_url 不能为空。"
+
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https", "file"}:
+        return "❌ 文件发送失败：仅支持 http(s) 或 file 协议。"
+
+    display_name = (file_name or "").strip()
+    if not display_name:
+        display_name = _file_name_from_url(url)
+    if not display_name or display_name in {".", ".."}:
+        return "❌ 文件发送失败：无法确定文件名。"
+
+    bot = runtime.bot
+    if bot is None:
+        try:
+            bot = group_runtime_registry.get_bot(runtime.group_id)
+        except Exception as error:
+            return f"❌ 文件发送失败：发送通道未就绪（{error}）。"
+
+    uploaded_file = url
+    stream_file = parsed.scheme == "file"
+    stream_started = False
+    try:
+        if stream_file:
+            file_path = Path(unquote(parsed.path))
+            if not file_path.is_absolute():
+                return "❌ 文件发送失败：file URL 必须指向容器内的绝对路径。"
+            try:
+                is_file = await asyncio.to_thread(file_path.is_file)
+            except OSError as error:
+                return f"❌ 文件发送失败：无法访问沙盒文件（{error}）。"
+            if not is_file:
+                return f"❌ 文件发送失败：沙盒文件不存在或不是普通文件（{file_path}）。"
+            stream_started = True
+            uploaded_file = await _upload_container_file_to_napcat(bot, file_path)
+
+        response = await bot.call_api(
+            "upload_group_file",
+            group_id=str(runtime.group_id),
+            file=uploaded_file,
+            name=display_name,
+            upload_file=True,
+        )
+        _napcat_response_data(response)
+    except Exception as error:
+        print(f"❌ send_file failed: {error}")
+        traceback.print_exc()
+        return f"❌ 文件发送失败：{error}"
+    finally:
+        if stream_started:
+            try:
+                await bot.call_api("clean_stream_temp_file")
+            except Exception as cleanup_error:
+                print(f"⚠️ 清理 NapCat 流式临时文件失败：{cleanup_error}")
+    return f"文件已成功发送给用户：{display_name}。"
 
 
 @tool
@@ -2068,6 +2284,8 @@ CHAT_TOOLS = [
     # generate_video,
     send_image,
     send_video,
+    send_voice,
+    send_file,
     get_avatar,
     create_daily_timer,
     create_weekly_timer,

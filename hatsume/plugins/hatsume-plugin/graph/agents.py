@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import subprocess
 import uuid
+from collections.abc import Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from typing import Any, Callable, Coroutine, Iterator, Literal, overload
@@ -360,6 +361,41 @@ def get_agent_handler(name: str) -> AgentHandler | None:
 # Built-in agent handler implementations
 # ---------------------------------------------------------------------------
 
+def _extract_visible_agent_text(content: Any) -> str:
+    """Extract visible text from an agent message without reasoning metadata."""
+    from ..utils import strip_thinking_tags
+
+    if isinstance(content, str):
+        return strip_thinking_tags(content).strip()
+
+    if not isinstance(content, list):
+        return strip_thinking_tags(str(content or "")).strip()
+
+    text_parts: list[str] = []
+    for part in content:
+        if isinstance(part, str):
+            text = part
+        elif isinstance(part, Mapping):
+            part_type = str(part.get("type", "")).lower()
+            if part_type in {"reasoning", "thinking", "thought"}:
+                continue
+            text_value = part.get("text")
+            if isinstance(text_value, str):
+                text = text_value
+            elif isinstance(part.get("content"), (str, list)):
+                text = _extract_visible_agent_text(part["content"])
+            else:
+                text = ""
+        else:
+            text = ""
+
+        text = strip_thinking_tags(text).strip()
+        if text:
+            text_parts.append(text)
+
+    return "\n".join(text_parts)
+
+
 def _get_coding_agent_tools() -> list[Any]:
     """Build the coding-agent tool list without creating an import cycle."""
     from .tools import (
@@ -395,6 +431,7 @@ async def _run_coding_agent(task: str, user_id: int) -> str:
     """
     from langchain.agents import create_agent
     from langchain.messages import HumanMessage
+    from tenacity import AsyncRetrying, stop_after_attempt, wait_exponential_jitter
 
     from ..models import get_code_model
     from ..prompts import CODING_AGENT_PROMPT, build_skill_prompt
@@ -414,21 +451,29 @@ async def _run_coding_agent(task: str, user_id: int) -> str:
     result = ""
     streamed_messages: list[Any] = []
     try:
-        async for event in coding_agent.astream(
-            {"messages": [HumanMessage(task)]},
-            {"recursion_limit": 400},
-            stream_mode="updates",
+        # Runnable.with_retry() does not retry streaming calls.
+        async for attempt in AsyncRetrying(
+            stop=stop_after_attempt(5),
+            wait=wait_exponential_jitter(),
+            reraise=True,
         ):
-            # Each event is {node_name: {state_update}}
-            for _node_name, update in event.items():
-                if isinstance(update, dict) and "messages" in update:
-                    streamed_messages.extend(update["messages"])
+            with attempt:
+                streamed_messages.clear()
+                async for event in coding_agent.astream(
+                    {"messages": [HumanMessage(task)]},
+                    {"recursion_limit": 400},
+                    stream_mode="updates",
+                ):
+                    # Each event is {node_name: {state_update}}
+                    for _node_name, update in event.items():
+                        if isinstance(update, dict) and "messages" in update:
+                            streamed_messages.extend(update["messages"])
 
         # Extract final AI content from the last message
         if streamed_messages:
             for msg in reversed(streamed_messages):
                 if isinstance(msg, AIMessage) and msg.content and not msg.tool_calls:
-                    result = str(msg.content)
+                    result = _extract_visible_agent_text(msg.content)
                     break
     except Exception as e:
         import traceback
@@ -520,9 +565,7 @@ Rules:
         HumanMessage(task),
     ])
 
-    from ..utils import strip_thinking_tags
-
-    raw = strip_thinking_tags(str(parse_response.content))
+    raw = _extract_visible_agent_text(parse_response.content)
     # Extract JSON block if wrapped in markdown
     match = re.search(r'\{[\s\S]*\}', raw)
     if match:
@@ -634,7 +677,7 @@ Rules:
                 SystemMessage(BACKGROUND_SHELL_DECISION_PROMPT),
                 HumanMessage(decision_prompt),
             ])
-            decision = str(decision_response.content).strip().upper()
+            decision = _extract_visible_agent_text(decision_response.content).upper()
 
             print(f"BG Shell Agent Decision: {decision}")
 
@@ -751,7 +794,7 @@ Rules:
                     SystemMessage(resolution_prompt),
                     HumanMessage("请决定下一步操作。"),
                 ])
-                resolution = str(resolution_response.content).strip()
+                resolution = _extract_visible_agent_text(resolution_response.content)
 
                 print(f"BG Shell stdin resolution: {resolution}")
 
@@ -821,7 +864,9 @@ Rules:
                             SystemMessage(resolution_prompt),
                             HumanMessage("请决定下一步操作。"),
                         ])
-                        resolution = str(resolution_response.content).strip()
+                        resolution = _extract_visible_agent_text(
+                            resolution_response.content
+                        )
 
                         if resolution.startswith("FINAL_INPUT:"):
                             final_text = resolution.split(":", 1)[1].strip()

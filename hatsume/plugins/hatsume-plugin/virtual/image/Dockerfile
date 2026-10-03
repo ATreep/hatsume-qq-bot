@@ -84,20 +84,15 @@ RUN pip3 config set global.index-url \
     && pip3 install --break-system-packages agent-reach
 
 
-RUN npm install -g --force @clawemail/mail-cli
+RUN npm install -g agentmail-cli
 
-RUN --mount=type=secret,id=clawmail_api_key,required=true \
+RUN --mount=type=secret,id=agentmail_api_key,required=true \
     --mount=type=secret,id=gh_token,required=true \
     install -d -m 700 /root/.config/hatsume \
     && install -d -m 755 /etc/hatsume \
-    && if ! mail-cli auth apikey set \
-        "$(cat /run/secrets/clawmail_api_key)" > /dev/null 2>&1; then \
-        echo 'Failed to configure mail-cli API authentication.' >&2; \
-        exit 1; \
-    fi \
-    && mail-cli auth login --user hatsume@claw.163.com \
     && { \
         printf 'export GH_TOKEN=%q\n' "$(cat /run/secrets/gh_token)"; \
+        printf 'export AGENTMAIL_API_KEY=%q\n' "$(cat /run/secrets/agentmail_api_key)"; \
     } > /etc/hatsume/bash_env \
     && chmod 600 /etc/hatsume/bash_env
 

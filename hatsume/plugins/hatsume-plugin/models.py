@@ -28,7 +28,7 @@ from . import config as _config
 from .config import (
     ALI_BASE_URL,
     CODING_MODEL_NAME,
-    JEV_1_13,
+    OPENCODE_API_KEY,
     OPENCODE_ZEN_BASE_URL,
     PROVIDER,
     QWEN_3_7_FLASH,
@@ -44,6 +44,9 @@ from .config import (
     SENSENOVA_API_KEY,
     SENSENOVA_BASE_URL,
     SENSENOVA_U1_5_LITE,
+    TYPESAFE_API_KEY,
+    TYPESAFE_BASE_URL,
+    JEV_1_13,
     VOLCENGINE_BASE_URL,
     WAWAPI_IMAGE_API_KEY,
     _get_int_env,
@@ -199,15 +202,21 @@ def get_view_image_model() -> BaseChatModel:
     """Create the dedicated vision model used by ``view_image``."""
     return get_mini_model()
 
-def get_jev_model() -> BaseChatModel: 
+def get_typesafe_model() -> BaseChatModel:
     return get_openai_api_model(
-        model_name= JEV_1_13,
+        model_name=JEV_1_13,
         reasoning_effort="medium",
         base_url=OPENCODE_ZEN_BASE_URL,
-        api_key="public",
+        api_key=OPENCODE_API_KEY,
         is_response=False,
-        extra_body=None
+        extra_body=None,
     )
+
+
+def get_jev_model() -> BaseChatModel:
+    """Backward-compatible name for the TypeSafe-compatible intent model."""
+    return get_typesafe_model()
+
 
 def get_intent_model() -> BaseChatModel:
     return get_jev_model()

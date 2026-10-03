@@ -36,15 +36,15 @@ sys.stdout.write(value)
 PY
 }
 
-CLAWMAIL_API_KEY="$(load_dotenv_value CLAWMAIL_API_KEY)"
+AGENTMAIL_API_KEY="$(load_dotenv_value AGENTMAIL_API_KEY)"
 GH_TOKEN="$(load_dotenv_value GH_TOKEN)"
-export CLAWMAIL_API_KEY DS_API_KEY GH_TOKEN CODING_BASE_URL CODING_MODEL_NAME CODING_API_KEY
+export AGENTMAIL_API_KEY GH_TOKEN
 DOCKER_BUILDKIT=1 docker build \
     --no-cache \
-    --secret "id=clawmail_api_key,env=CLAWMAIL_API_KEY" \
+    --secret "id=agentmail_api_key,env=AGENTMAIL_API_KEY" \
     --secret "id=gh_token,env=GH_TOKEN" \
     -t "${IMAGE_NAME}" \
     "${SCRIPT_DIR}/image"
 
-unset CLAWMAIL_API_KEY GH_TOKEN
+unset AGENTMAIL_API_KEY GH_TOKEN
 docker save "${IMAGE_NAME}" | zstd -T0 -19 > "${ARCHIVE_PATH}"

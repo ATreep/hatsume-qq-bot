@@ -9,6 +9,7 @@ import time
 import traceback
 from io import BytesIO
 from typing import Any
+from urllib.parse import unquote, urlparse
 
 import requests
 from nonebot.adapters import Bot
@@ -334,6 +335,36 @@ def _reply_target_id(event: Any) -> int | None:
     return None
 
 
+def _render_user_media_segment(segment_type: str, data: Any) -> str:
+    """Render a received video/file segment as a named Markdown link."""
+    if not isinstance(data, dict):
+        data = {}
+
+    media_name = "视频" if segment_type == "video" else "文件"
+    url = str(data.get("url") or "").strip()
+    name = ""
+    for candidate in (
+        data.get("name"),
+        data.get("file_name"),
+        data.get("filename"),
+        data.get("file"),
+        url,
+    ):
+        if not isinstance(candidate, str) or not candidate.strip():
+            continue
+        candidate = unquote(candidate.strip())
+        parsed = urlparse(candidate)
+        path = parsed.path or candidate
+        path = path.replace("\\", "/").rstrip("/")
+        name = path.rsplit("/", 1)[-1]
+        if name:
+            break
+
+    name = name or media_name
+    label = f"{media_name}：{name}"
+    return f"[{label}]({url})" if url else f"[{label}]"
+
+
 def _record_user_message(
     group_id: int,
     sender_qq_id: int,
@@ -431,6 +462,10 @@ async def get_human_message(
                     re_message += image_markdown
                 case "face":
                     re_message += render_qqface(msg_seg.data)
+                case "video" | "file" as media_type:
+                    re_message += _render_user_media_segment(
+                        media_type, msg_seg.data
+                    )
                 case "forward":
                     reply_has_forward = True
 
@@ -493,6 +528,10 @@ async def get_human_message(
                     )
             case "face":
                 plain_message += render_qqface(msg_seg.data)
+            case "video" | "file" as media_type:
+                plain_message += _render_user_media_segment(
+                    media_type, msg_seg.data
+                )
             case "forward":
                 forward_id_in_loop = msg_seg.data.get("id", "")
                 plain_message += f" [合并转发消息 id={forward_id_in_loop}] "

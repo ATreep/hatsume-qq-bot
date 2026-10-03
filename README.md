@@ -13,6 +13,8 @@ Hatsume 是一个面向 QQ 群聊的 AI 机器人，运行于 Python 3.12+，以
 
 这些缺失项不会影响本地依赖安装、源码开发和单元测试。涉及真实 QQ、模型供应商、媒体服务、macOS Photos 或 Docker 运行环境的功能，需要维护者自己的私有配置与运行资产才能联调。
 
+System One 判断默认通过 Drex（兼容 TypeSafe/Jev 请求格式）执行。部署时设置 `TYPESAFE_API_KEY`；旧配置也可以暂时使用 `DREX_API_KEY`，程序只把它作为 `TYPESAFE_API_KEY` 的后备读取，不会写回文件或打印。可通过 `TYPESAFE_BASE_URL` 和 `TYPESAFE_DEFAULT_MODEL` 覆盖默认的 `https://drex.nace.ai` 与 `drex-latest`。
+
 ## 当前容器化运行副本
 
 当前部署副本运行在 `hatsume-containerization` 容器中，默认工作目录为 `/work`，home 目录为 `/root`，项目目录挂载到 `/work/hatsume`，容器时区固定为 `Asia/Shanghai`（UTC+8）。Shell 工具、后台 Agent、Hook heartbeat 和媒体文件操作都在同一容器内执行，并继续按群追踪进程、stdin 与脚本所有权。Hook 脚本和游标位于共享目录 `data/hatsume-plugin/hooks/`，不要求按群创建子目录；元数据位于 `data/hatsume-plugin/hooks/hooks.db`。每群最多启用 5 个，heartbeat 间隔至少 300 秒、单次超时不超过 60 秒；消息匹配 Hook 不调度脚本，只在群消息命中触发人和正则时触发。NapCat 通过 `shared-net` 的 Docker DNS 连接 `ws://hatsume-containerization:6999/onebot/v11/ws`。

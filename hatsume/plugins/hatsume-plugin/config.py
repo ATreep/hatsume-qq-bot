@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from re import M
 from typing import Callable, Literal
 from dotenv import load_dotenv
 
@@ -46,6 +45,8 @@ WAWAPI_IMAGE_API_KEY: str = os.environ.get("WAWAPI_IMAGE_API_KEY", "")
 ALI_API_KEY: str = os.environ.get("ALI_API_KEY", "")
 MI_API_KEY: str = os.environ.get("MI_API_KEY", "")
 SENSENOVA_API_KEY: str = os.environ.get("SENSENOVA_API_KEY", "")
+HIYO_API_KEY: str = os.environ.get("HIYO_API_KEY", "")
+
 # ---------------------------------------------------------------------------
 # External service URLs
 # ---------------------------------------------------------------------------
@@ -69,6 +70,7 @@ WAWAPI_BASE_URL = "https://wawapii.com"
 ALI_BASE_URL = "https://ws-1h26pj40tzf8hqys.cn-beijing.maas.aliyuncs.com/compatible-mode"
 MI_BASE_URL = "https://api.xiaomimimo.com"
 SENSENOVA_BASE_URL: str = "https://token.sensenova.cn/v1"
+HIYO_BASE_URL: str = "https://codex.hiyo.top"
 
 
 # ---------------------------------------------------------------------------
@@ -96,7 +98,8 @@ JEV_1_13 = "jev-1.13-free"
 SENSENOVA_U1_5_FAST: str = "sensenova-u1.5-fast"
 SENSENOVA_U1_5_LITE: str = "sensenova-u1.5-lite"
 
-ADVANCE_MODEL_NAME: str = GPT_6_LUNA 
+
+ADVANCE_MODEL_NAME: str = GPT_6_LUNA
 LITE_MODEL_NAME: str =  GPT_6_LUNA
 CODING_MODEL_NAME: str = GPT_6_LUNA
 
@@ -109,10 +112,10 @@ EMBEDDING_MODEL: str = "BAAI/bge-m3"
 # ---------------------------------------------------------------------------
 # Provider selection
 # ---------------------------------------------------------------------------
-PROVIDER: Literal["volc", "volc_plan", "kege", "zhth", "ar", "ruoli", "ds", "waw", "ali", "mi"] = "waw"
+PROVIDER: Literal["volc", "volc_plan", "kege", "zhth", "ar", "ruoli", "ds", "waw", "ali", "mi", "hiyo"] = "hiyo"
 
 def get_base_url(
-    provider: Literal["volc", "volc_plan", "sf", "kege", "zhth", "ar", "ruoli", "ds", "waw", "ali", "mi"] = PROVIDER,
+    provider: Literal["volc", "volc_plan", "sf", "kege", "zhth", "ar", "ruoli", "ds", "waw", "ali", "mi", "hiyo"] = PROVIDER,
 ) -> str:
     match provider:
         case "volc_plan":
@@ -137,9 +140,11 @@ def get_base_url(
             return ALI_BASE_URL
         case "mi":
             return MI_BASE_URL
+        case "hiyo":
+            return HIYO_BASE_URL
 
 def get_api_key(
-    provider: Literal["volc", "volc_plan", "sf", "kege", "zhth", "ar", "ruoli", "ds", "waw", "ali", "mi"] = PROVIDER,
+    provider: Literal["volc", "volc_plan", "sf", "kege", "zhth", "ar", "ruoli", "ds", "waw", "ali", "mi", "hiyo"] = PROVIDER,
 ) -> Callable[[], str]:
     match provider:
         case "volc_plan":
@@ -164,6 +169,8 @@ def get_api_key(
             return lambda: ALI_API_KEY
         case "mi":
             return lambda: MI_API_KEY
+        case "hiyo":
+            return lambda: HIYO_API_KEY
 
 # ---------------------------------------------------------------------------
 # Behavioral constants
@@ -176,7 +183,7 @@ GENERATE_IMAGE_RATE_LIMIT_SECONDS: int = 60
 IMAGE_MAX_SIZE_BYTES: int = 9 * 1024 * 1024
 IMAGE_MAX_PIXELS: int = 36_000_000
 MESSAGE_MAX_LENGTH: int = 2000
-REPLY_MAX_LENGTH: int = 200
+REPLY_MAX_LENGTH: int = 1500
 MAX_FORWARD_DEPTH: int = 3
 MAX_REAL_AT_SEGMENTS: int = 3
 FORWARD_API_TIMEOUT_SECONDS: int = 10

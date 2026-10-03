@@ -22,7 +22,7 @@ from typing import Any
 
 import nonebot_plugin_localstore as store
 from langchain.agents import create_agent
-from langchain.messages import AIMessage, HumanMessage, SystemMessage
+from langchain.messages import HumanMessage, SystemMessage
 from langchain_core.messages import RemoveMessage
 from langgraph.graph import MessagesState
 from nonebot.adapters.onebot.v11 import MessageSegment
@@ -546,6 +546,36 @@ def _jev_answer(response: Any, question_id: str) -> Mapping[str, Any] | None:
     if isinstance(answer_dict, Mapping):
         return answer_dict
     return None
+
+
+def _build_systemone_body(
+    model_name: str,
+    state: Any,
+    questions: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build the TypeSafe/Drex System One request without changing question data."""
+    return {
+        "model": model_name,
+        "state": state,
+        "questions": dict(questions),
+    }
+
+
+async def _post_systemone(
+    model: Any,
+    state: Any,
+    questions: Mapping[str, Any],
+) -> Any:
+    """Send all typed questions in one TypeSafe/Drex forward pass."""
+    return await model.root_async_client.post(
+        "/systemone",
+        cast_to=object,
+        body=_build_systemone_body(
+            getattr(model, "model_name", "drex-latest"),
+            state,
+            questions,
+        ),
+    )
 
 
 def _without_bootstrap_role_prompt(messages: list[Any]) -> list[Any]:
@@ -1249,31 +1279,27 @@ async def ai_node(state: MessagesState) -> dict:
                 "recent_messages": _messages_to_jev_state(recent_messages),
             }
 
-            jev_response = await jev_model.root_async_client.post(
-                "/systemone",
-                cast_to=object,
-                body={
-                    "model": getattr(jev_model, "model_name", "jev-1.13-free"),
-                    "state": jev_state,
-                    "questions": {
-                        "chat_intent": {
-                            "type": "choice",
-                            "instructions": {
-                                "question": "当前消息最符合哪一种回复意图？",
-                                "focus": "判断 `current_message`，并参考 `recent_messages` 理解上下文。",
-                            },
-                            "criteria": CHAT_INTENT_URGENCY_TYPES,
+            jev_response = await _post_systemone(
+                jev_model,
+                jev_state,
+                {
+                    "chat_intent": {
+                        "type": "choice",
+                        "instructions": {
+                            "question": "当前消息最符合哪一种回复意图？",
+                            "focus": "判断 `current_message`，并参考 `recent_messages` 理解上下文。",
                         },
-                        "chat_end": {
-                            "type": "choice",
-                            "instructions": {
-                                "question": "用户是否想结束与初芽的当前对话？",
-                                "focus": "判断 `current_message` 是否表示想要结束当前聊天或在转向其他的话题。",
-                            },
-                            "criteria": {
-                                "结束": "用户透露出想结束当前话题；或用户开始讨论另一个话题， 且不再关注当前话题。",
-                                "继续": "用户仍在提问、补充信息、回应初芽，或明确希望继续互动。",
-                            },
+                        "criteria": CHAT_INTENT_URGENCY_TYPES,
+                    },
+                    "chat_end": {
+                        "type": "choice",
+                        "instructions": {
+                            "question": "用户是否想结束与初芽的当前对话？",
+                            "focus": "判断 `current_message` 是否表示想要结束当前聊天或在转向其他的话题。",
+                        },
+                        "criteria": {
+                            "结束": "用户透露出想结束当前话题；或用户开始讨论另一个话题， 且不再关注当前话题。",
+                            "继续": "用户仍在提问、补充信息、回应初芽，或明确希望继续互动。",
                         },
                     },
                 },
@@ -1421,6 +1447,7 @@ async def ai_node(state: MessagesState) -> dict:
     llm_error_type: str | None = None  # Track specific error type for user-facing messages
     replyable_message_ids: set[int] = set()  # Init to satisfy static analysis; always set in try block
     replyable_senders: dict[int, int] = {}  # Same: message_id -> sender QQ
+    agent_history_messages: list[Any] = []
     try:
         mem_msg = (
             []
@@ -1477,6 +1504,14 @@ async def ai_node(state: MessagesState) -> dict:
                 f"requested_mcp={requested!r} active_mcp_tools={len(active_mcp_tools)}",
                 flush=True,
             )
+            new_messages = _new_agent_messages(
+                invocation_messages, response_messages
+            )
+            # Keep every message produced by each agent pass.  A later pass
+            # may receive the previous pass as input (dynamic MCP loading or
+            # tool-only retries), so returning only its final delta would lose
+            # the preceding AI tool-call and ToolMessage chain.
+            agent_history_messages.extend(new_messages)
             if requested and attempt == 0:
                 grouped: dict[str, list[str]] = {}
                 for server_name, tool_name in requested:
@@ -1496,9 +1531,6 @@ async def ai_node(state: MessagesState) -> dict:
                     ))
                 invocation_messages = response_messages
                 continue
-            new_messages = _new_agent_messages(
-                invocation_messages, response_messages
-            )
             for message in new_messages[:-1]:
                 control_text = _message_text(message)
                 if control_text and not _has_visible_text(control_text):
@@ -1585,9 +1617,8 @@ async def ai_node(state: MessagesState) -> dict:
         visible_text=ai_text_clean,
     )
 
-    # Keep the model response unchanged in graph history. Control tags are
-    # parsed and removed only from the user-facing text above.
-    ai_text_history = str(ai_text)
+    # Control tags are parsed and removed only from the user-facing text
+    # above; the original agent messages are returned to graph history below.
     end_requested = conversation_state.end_requested
     if end_requested:
         print("[end_conversation] Suppressed the final AI reply.")
@@ -1648,8 +1679,7 @@ async def ai_node(state: MessagesState) -> dict:
             traceback.print_exc()
 
     print(f"Elapsed time of ai_node: t_writing_mem={t_mem_end - t_mem_start}s, t_chat_agent={t_mem_start - t_start}s")
-    messages = [AIMessage(ai_text_history)]
-    return {"messages": messages}
+    return {"messages": agent_history_messages}
 
 
 # ---------------------------------------------------------------------------

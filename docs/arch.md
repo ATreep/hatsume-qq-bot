@@ -52,6 +52,7 @@ flowchart LR
 | 图片发送 | send_image | 支持 HTTP、base64 和沙盒 file:// 文件，每轮最多三张 | graph/tools.py |
 | 图片生成 | generate_image | 在 Seedream 与兼容图像接口之间选择，支持参考图和限流 | graph/tools.py、models.py、state.py |
 | 视频发送 | send_video | 支持 HTTP URL、沙盒绝对路径和沙盒 file:// 文件，每轮最多一个 | graph/tools.py |
+| 声音发送 | send_voice | 支持 HTTP/HTTPS 和沙盒 file://；网络文件下载到 /tmp，按后缀仅允许 MP3，其他格式保留文件并返回沙盒路径 | graph/tools.py |
 | 视频生成 | generate_video | Seedance 1.0/1.5 文生视频或图生视频，并轮询任务结果；聊天工具返回 URL，由 send_video 发送 | graph/tools.py、models.py |
 | 高级模型切换 | 管理员 /model [模型名] | 查看或切换当前进程的高级模型名，不改变供应商、Base URL 或 API Key | handlers/tools.py、models.py、config.py |
 | ADMIN MODE | `ADMIN_QQ_ID` 本人发送含大写 `BYPASS` 的普通消息 | 程序校验顶层发送者和当前消息正文；本轮 chat_agent 保持当前高级模型、防御性移除历史 `image_url`/`img_url` 输入段并注入完整沙盒操作授权，下一轮恢复未过滤输入 | graph/nodes.py、models.py、prompts.py |
@@ -464,6 +465,7 @@ flowchart LR
 | generate_video | 生成视频并返回临时 URL；每轮最多一次 |
 | send_image | 发送 HTTP、base64 或沙盒文件；每轮最多三张 |
 | send_video | 发送 HTTP URL、沙盒绝对路径或沙盒文件；每轮最多一个 |
+| send_voice | HTTP/HTTPS 文件先下载到 /tmp，或读取沙盒 file:// 文件；按后缀仅发送 MP3，其他格式返回保留文件的沙盒路径 |
 | get_avatar | 获取 QQ 头像 URL |
 | create_daily_timer | 创建含起止边界、1..5 个 `HH:MM:SS` 点和天间隔的任务；未指定结束时间时由 Agent 推断并在创建后告知用户 |
 | create_weekly_timer | 创建含 weekday/time 周期点和周间隔的任务；未指定结束时间时由 Agent 推断并在创建后告知用户 |
