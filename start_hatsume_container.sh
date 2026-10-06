@@ -4,14 +4,16 @@ set -Eeuo pipefail
 
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly CONTAINER_NAME="hatsume-containerization"
-readonly LEGACY_CONTAINER_NAME="hatsume-space"
+readonly GUI_DISPLAY="${HATSUME_DISPLAY:-:99}"
+readonly GUI_SCREEN_WIDTH="${HATSUME_SCREEN_WIDTH:-1280}"
+readonly GUI_SCREEN_HEIGHT="${HATSUME_SCREEN_HEIGHT:-800}"
 readonly NETWORK_NAME="${HATSUME_NETWORK_NAME:-shared-net}"
-readonly IMAGE_NAME="${HATSUME_IMAGE_NAME:-hatsume-space:1.0}"
-readonly IMAGE_ARCHIVE="${HATSUME_IMAGE_ARCHIVE:-/Users/treep/Dev/qqbot/hatsume/hatsume/plugins/hatsume-plugin/virtual/hatsume-space-image.tar.zst}"
+readonly IMAGE_NAME="${HATSUME_IMAGE_NAME:-hatsume-space-gui:1.0}"
+readonly IMAGE_ARCHIVE="${HATSUME_IMAGE_ARCHIVE:-/Users/treep/Dev/qqbot/hatsume-containerization/hatsume/plugins/hatsume-plugin/virtual/hatsume-space-gui-image.tar.zst}"
 readonly CONTAINER_WORKDIR="/work/hatsume"
 readonly CONTAINER_DEFAULT_WORKDIR="/work"
 readonly CONTAINER_HOME="/root"
-readonly CONTAINER_ENTRYPOINT="${CONTAINER_WORKDIR}/.container/supervise.sh"
+readonly CONTAINER_ENTRYPOINT="/usr/local/bin/gui-entrypoint.sh"
 readonly CONTAINER_PATH="${CONTAINER_WORKDIR}/.container:/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 readonly CONTAINER_TIMEZONE="Asia/Shanghai"
 readonly BOT_PID_FILE="/run/hatsume/bot.pid"
@@ -77,13 +79,11 @@ else
 fi
 
 if docker container inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
-    log "Removing existing container: ${CONTAINER_NAME}"
-    docker rm -f "${CONTAINER_NAME}" >/dev/null
-fi
-
-if docker container inspect "${LEGACY_CONTAINER_NAME}" >/dev/null 2>&1; then
-    log "Removing legacy container: ${LEGACY_CONTAINER_NAME}"
-    docker rm -f "${LEGACY_CONTAINER_NAME}" >/dev/null
+    readonly LEGACY_GUI_CONTAINER_NAME="${CONTAINER_NAME}-previous-$(date +%Y%m%d-%H%M%S)"
+    log "Stopping existing container: ${CONTAINER_NAME}"
+    docker stop "${CONTAINER_NAME}" >/dev/null || true
+    log "Preserving stopped container as: ${LEGACY_GUI_CONTAINER_NAME}"
+    docker rename "${CONTAINER_NAME}" "${LEGACY_GUI_CONTAINER_NAME}"
 fi
 
 log "Creating container: ${CONTAINER_NAME}"
@@ -94,6 +94,10 @@ docker create \
     --env "HOME=${CONTAINER_HOME}" \
     --env "PATH=${CONTAINER_PATH}" \
     --env "TZ=${CONTAINER_TIMEZONE}" \
+    --env "DISPLAY=${GUI_DISPLAY}" \
+    --env "SCREEN_WIDTH=${GUI_SCREEN_WIDTH}" \
+    --env "SCREEN_HEIGHT=${GUI_SCREEN_HEIGHT}" \
+    --publish 6080:6080 \
     --mount "type=bind,src=${SCRIPT_DIR},dst=${CONTAINER_WORKDIR}" \
     --entrypoint "${CONTAINER_ENTRYPOINT}" \
     -it \
@@ -123,3 +127,5 @@ log "Mount: ${SCRIPT_DIR} -> ${CONTAINER_WORKDIR}"
 log "PID 1: ${CONTAINER_ENTRYPOINT}"
 log "Bot PID: $(docker exec "${CONTAINER_NAME}" sh -lc "cat '${BOT_PID_FILE}'")"
 log "Bot port: ${BOT_PORT}"
+log "GUI display: ${GUI_DISPLAY} (${GUI_SCREEN_WIDTH}x${GUI_SCREEN_HEIGHT})"
+log "noVNC: http://localhost:6080/vnc.html?autoconnect=true&resize=scale"

@@ -9,10 +9,25 @@ from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).resolve().parents[3] / ".env.prod")
 
+TYPESAFE_API_KEY: str = os.getenv("TYPESAFE_API_KEY", "") or os.getenv("DREX_API_KEY", "")
+TYPESAFE_BASE_URL: str = os.getenv("TYPESAFE_BASE_URL", "https://drex.nace.ai").rstrip("/")
+TYPESAFE_DEFAULT_MODEL: str = os.getenv("TYPESAFE_DEFAULT_MODEL", "drex-latest")
+
 
 def _get_int_env(name: str) -> int:
     value = os.getenv(name, "").strip()
     return int(value) if value else 0
+
+
+def _get_float_env(name: str, default: float) -> float:
+    value = os.getenv(name, "").strip()
+    try:
+        return float(value) if value else default
+    except ValueError:
+        return default
+
+
+SANDBOX_COMPUTER_USE_MAX_ITERATIONS: int = 30
 
 
 # ---------------------------------------------------------------------------
@@ -45,7 +60,8 @@ WAWAPI_IMAGE_API_KEY: str = os.environ.get("WAWAPI_IMAGE_API_KEY", "")
 ALI_API_KEY: str = os.environ.get("ALI_API_KEY", "")
 MI_API_KEY: str = os.environ.get("MI_API_KEY", "")
 SENSENOVA_API_KEY: str = os.environ.get("SENSENOVA_API_KEY", "")
-HIYO_API_KEY: str = os.environ.get("HIYO_API_KEY", "")
+HIYO_API_KEY: str = os.environ.get("HIYO_API_KEY", default="")
+OPENROUTER_API_KEY: str = os.environ.get("OPENROUTER_API_KEY", "")
 
 # ---------------------------------------------------------------------------
 # External service URLs
@@ -71,6 +87,7 @@ ALI_BASE_URL = "https://ws-1h26pj40tzf8hqys.cn-beijing.maas.aliyuncs.com/compati
 MI_BASE_URL = "https://api.xiaomimimo.com"
 SENSENOVA_BASE_URL: str = "https://token.sensenova.cn/v1"
 HIYO_BASE_URL: str = "https://codex.hiyo.top"
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/alpha"
 
 
 # ---------------------------------------------------------------------------
@@ -94,9 +111,11 @@ GROK_IMAGINE_IMAGE = "grok-imagine-image:stable"
 LAGUNA_S_2_1_FREE = "laguna-s-2.1-free"
 QWEN_3_7_FLASH = "qwen3.7-flash"
 QWEN_3_8_FLASH = "qwen3.8-flash"
-JEV_1_13 = "jev-1.13-free"
+JEV_1_13 = "jev-1.13"
 SENSENOVA_U1_5_FAST: str = "sensenova-u1.5-fast"
 SENSENOVA_U1_5_LITE: str = "sensenova-u1.5-lite"
+MERCURY_DECISION = "inception/mercury-decide:free"
+
 
 
 ADVANCE_MODEL_NAME: str = GPT_6_LUNA
@@ -112,10 +131,10 @@ EMBEDDING_MODEL: str = "BAAI/bge-m3"
 # ---------------------------------------------------------------------------
 # Provider selection
 # ---------------------------------------------------------------------------
-PROVIDER: Literal["volc", "volc_plan", "kege", "zhth", "ar", "ruoli", "ds", "waw", "ali", "mi", "hiyo"] = "hiyo"
+PROVIDER: Literal["volc", "volc_plan", "kege", "zhth", "ar", "ruoli", "ds", "waw", "ali", "mi", "hiyo", "zen"] = "hiyo"
 
 def get_base_url(
-    provider: Literal["volc", "volc_plan", "sf", "kege", "zhth", "ar", "ruoli", "ds", "waw", "ali", "mi", "hiyo"] = PROVIDER,
+    provider: Literal["volc", "volc_plan", "sf", "kege", "zhth", "ar", "ruoli", "ds", "waw", "ali", "mi", "hiyo", "zen"] = PROVIDER,
 ) -> str:
     match provider:
         case "volc_plan":
@@ -142,9 +161,11 @@ def get_base_url(
             return MI_BASE_URL
         case "hiyo":
             return HIYO_BASE_URL
+        case "zen":
+            return OPENCODE_ZEN_BASE_URL
 
 def get_api_key(
-    provider: Literal["volc", "volc_plan", "sf", "kege", "zhth", "ar", "ruoli", "ds", "waw", "ali", "mi", "hiyo"] = PROVIDER,
+    provider: Literal["volc", "volc_plan", "sf", "kege", "zhth", "ar", "ruoli", "ds", "waw", "ali", "mi", "hiyo", "zen"] = PROVIDER,
 ) -> Callable[[], str]:
     match provider:
         case "volc_plan":
@@ -171,6 +192,8 @@ def get_api_key(
             return lambda: MI_API_KEY
         case "hiyo":
             return lambda: HIYO_API_KEY
+        case "zen":
+            return lambda: OPENCODE_API_KEY
 
 # ---------------------------------------------------------------------------
 # Behavioral constants

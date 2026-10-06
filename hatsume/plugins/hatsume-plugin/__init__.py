@@ -22,6 +22,7 @@ from .handlers.tools import (
     handle_aps,
     handle_autoresponse,
     handle_dsbalance,
+    handle_gui_screenshot,
     handle_hooks,
     handle_list_skills,
     handle_membersearch,
@@ -179,6 +180,12 @@ autoresponse_cmd = on_command("autoresponse", rule=lambda event: str(event.get_u
 dsbalance_cmd = on_command("dsbalance", priority=10, block=True)
 proxy_cmd = on_command("proxy", priority=10, block=True)
 todo_cmd = on_command("todo", priority=10, block=True)
+gui_screenshot_cmd = on_command(
+    "guiscreenshot",
+    aliases={"screenshot"},
+    priority=10,
+    block=True,
+)
 
 # ---------------------------------------------------------------------------
 # Chat matchers
@@ -283,6 +290,11 @@ async def _(event: GroupMessageEvent, args: Message = CommandArg()):
 @todo_cmd.handle()
 async def _(event: GroupMessageEvent, args: Message = CommandArg()):
     await handle_todo(event, todo_cmd, args)
+
+
+@gui_screenshot_cmd.handle()
+async def _(bot: Bot, event: GroupMessageEvent):
+    await handle_gui_screenshot(bot, event, gui_screenshot_cmd)
 
 
 # ---------------------------------------------------------------------------

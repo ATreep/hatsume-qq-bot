@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import os as _os
 import subprocess
 import tempfile
@@ -19,6 +20,7 @@ from ..group_runtime import bind_group_runtime, group_runtime_registry
 from ..infra import (
     cache_sandbox_message_image,
     cleanup_persistent_container,
+    read_sandbox_image_data_uri,
     run_cmd,
 )
 
@@ -586,6 +588,60 @@ async def handle_membersearch(bot, event, matcher, args: Message) -> None:
     for i, r in enumerate(results):
         lines.append(f"{i + 1}. {r['username']} (QQ: {r['id']}) - {r['level']}")
     await matcher.finish("\n".join(lines))
+
+
+async def handle_gui_screenshot(bot: Bot, event, matcher) -> None:
+    """Capture and send the current full-screen GUI sandbox image."""
+    from ..graph.tools import _run_gui_automation
+
+    group_id = int(event.group_id)
+    runtime = group_runtime_registry.bind_bot(group_id, bot)
+    try:
+        with bind_group_runtime(runtime):
+            raw_result = await _run_gui_automation("screenshot", timeout=30)
+            payload = json.loads(raw_result)
+            screenshot_path = payload.get("path")
+            if not isinstance(screenshot_path, str) or not screenshot_path.startswith("/"):
+                raise RuntimeError("截图工具未返回有效的沙盒路径")
+            data_uri = await read_sandbox_image_data_uri(
+                screenshot_path,
+                group_id=group_id,
+            )
+    except Exception as exc:
+        print(f"❌ GUI screenshot command failed: group={group_id} err={exc}")
+        await matcher.finish(f"❌ 获取沙盒 GUI 截图失败：{exc}")
+        return
+
+    header, separator, encoded = data_uri.partition(",")
+    if not separator or ";base64" not in header or not encoded:
+        await matcher.finish("❌ 获取沙盒 GUI 截图失败：图片数据无效。")
+        return
+    try:
+        image_bytes = base64.b64decode(encoded, validate=True)
+        async with runtime.outbound_send_lock:
+            send_result = await bot.send_group_msg(
+                group_id=group_id,
+                message=MessageSegment.image("base64://" + encoded, cache=False),
+            )
+    except Exception as exc:
+        print(f"❌ GUI screenshot send failed: group={group_id} err={exc}")
+        await matcher.finish(f"❌ 发送沙盒 GUI 截图失败：{exc}")
+        return
+
+    raw_message_id = (
+        send_result.get("message_id") if isinstance(send_result, dict) else None
+    )
+    if isinstance(raw_message_id, (int, str)) and not isinstance(raw_message_id, bool):
+        try:
+            await cache_sandbox_message_image(
+                image_bytes,
+                int(raw_message_id),
+                1,
+                group_id=group_id,
+            )
+        except Exception as exc:
+            print(f"⚠️ Failed to cache GUI screenshot: group={group_id} err={exc}")
+    await matcher.finish()
 
 
 async def handle_resetsandbox(event, matcher, args: Message) -> None:

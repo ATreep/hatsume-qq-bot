@@ -81,7 +81,7 @@ RUN install -d -m 755 /etc/apt/keyrings /etc/apt/sources.list.d \
 
 RUN pip3 config set global.index-url \
         https://pypi.tuna.tsinghua.edu.cn/simple \
-    && pip3 install --break-system-packages agent-reach
+    && pip3 install --break-system-packages agent-reach websocket-client
 
 
 RUN npm install -g agentmail-cli
@@ -102,4 +102,38 @@ ENV TZ="Asia/Shanghai" \
     PATH="/work/hatsume/.container:/root/.local/bin:${PATH}" \
     BASH_ENV="/etc/hatsume/bash_env"
 
+WORKDIR /work
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        at-spi2-core \
+        dbus-x11 \
+        fonts-noto-cjk \
+        fonts-noto-color-emoji \
+        gir1.2-atspi-2.0 \
+        novnc \
+        openbox \
+        pcmanfm \
+        python3-gi \
+        python3-pyatspi \
+        scrot \
+        wmctrl \
+        x11-utils \
+        x11vnc \
+        xclip \
+        xdotool \
+        xvfb \
+        xfce4-terminal \
+    && rm -rf /var/lib/apt/lists/*
+ENV DISPLAY=":99" SCREEN_WIDTH="1280" SCREEN_HEIGHT="800" SCREEN_DEPTH="24" \
+    DBUS_SESSION_BUS_ADDRESS="unix:path=/run/hatsume/desktop-bus"
+RUN architecture="$(dpkg --print-architecture)" \
+    && curl -fsSL -o /tmp/google-chrome.deb "https://dl.google.com/linux/direct/google-chrome-stable_current_${architecture}.deb" \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends /tmp/google-chrome.deb \
+    && rm -f /tmp/google-chrome.deb \
+    && rm -rf /var/lib/apt/lists/*
+COPY gui-entrypoint.sh /usr/local/bin/gui-entrypoint.sh
+RUN chmod 755 /usr/local/bin/gui-entrypoint.sh && mkdir -p /work/gui-screenshots
+EXPOSE 5900 6080
+ENTRYPOINT ["/usr/local/bin/gui-entrypoint.sh"]
 WORKDIR /work

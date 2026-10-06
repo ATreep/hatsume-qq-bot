@@ -6,6 +6,7 @@ import asyncio
 import base64
 import contextvars
 import hashlib
+import json
 import shlex
 import ssl
 import threading
@@ -158,6 +159,7 @@ class _ShellExecutorBudget:
     """Mutable call budget shared by all child tasks of one agent invoke."""
 
     max_calls: int | None
+    max_timeout: int | None = 60
     call_count: int = 0
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
@@ -178,11 +180,14 @@ _shell_executor_budget: contextvars.ContextVar[_ShellExecutorBudget | None] = (
 def set_shell_executor_limit(max_calls: int | None) -> None:
     """Set the shell_executor budget for the current agent invocation.
 
-    Call with ``max_calls=3`` before invoking chat_agent (limits to 3 calls).
-    Call with ``max_calls=None`` before invoking coding_agent (no limit).
+    Call with ``max_calls=3`` before invoking chat_agent (3 calls, at most 60s each).
+    Call with ``max_calls=None`` before invoking coding_agent (no call/timeout cap).
     Replaces the current shared budget and resets its call counter to 0.
     """
-    _shell_executor_budget.set(_ShellExecutorBudget(max_calls=max_calls))
+    _shell_executor_budget.set(_ShellExecutorBudget(
+        max_calls=max_calls,
+        max_timeout=None if max_calls is None else 60,
+    ))
 
 
 def set_current_group_id(group_id: int | None) -> None:
@@ -610,14 +615,17 @@ def get_avatar(qq_id: int) -> str:
 
 
 @tool
-async def view_image(image_url: str) -> str:
+async def view_image(image_url: str, prompt: str = "") -> str:
     """
-    使用指定视觉模型读取一张图片，并返回客观、详细的文字描述。此工具不会发送图片。
+    使用指定视觉模型读取一张图片并回答提示词中的问题。此工具不会发送图片。
 
     ## 参数：
     - image_url: 图片地址，支持：
         1) HTTP/HTTPS 网络图片 URL
         2) 容器内图片的 file:// 绝对路径，如 "file:///work/folder/image.png"
+    - prompt: 自定义视觉模型提示词，需精准描述你需要从图像中获取的信息；留空或只有空白时使用预置图片描述提示词。
+        查询截图控件坐标时，明确目标控件、原图左上角为原点、像素单位和输出格式；
+        要求返回中心坐标及边界框，找不到或不能确定时明确报告，不要猜测。
     """
     url = image_url.strip()
     if not url:
@@ -653,7 +661,7 @@ async def view_image(image_url: str) -> str:
     from langchain.messages import HumanMessage
     from ..models import get_view_image_model
 
-    prompt = (
+    vision_prompt = prompt.strip() or (
         "请客观、详细地描述这张图片。说明其中可见的人物、物体、场景、动作、"
         "画面风格和重要细节，并准确抄录清晰可见的文字。只返回图片描述。"
     )
@@ -662,7 +670,7 @@ async def view_image(image_url: str) -> str:
             [
                 HumanMessage(
                     content=[
-                        {"type": "text", "text": prompt},
+                        {"type": "text", "text": vision_prompt},
                         {"type": "image_url", "image_url": {"url": url}},
                     ]
                 )
@@ -681,26 +689,30 @@ async def view_image(image_url: str) -> str:
         ).strip()
     else:
         description = str(content).strip()
+    print(f"👁️ [view_image] model response: {description}")
     return description or "❌ 图片读取失败：模型未返回描述。"
 
 
 @tool
 async def send_text(
     text: str,
-    reply_to_message_id: int | None = None,
-    memories: list[MemoryRecordInput] | None = None,
-    hatsumeface: str | None = None,
+    reply_to_message_id: int | None,
+    memories: list[MemoryRecordInput],
+    hatsumeface: str | None,
 ) -> str:
-    """直接向当前群发送文字，并可附带回复、记忆和表情控制参数。
+    """向当前群发送文字，并可附带回复、记忆和表情控制参数。
 
-    CQ at 标记必须包含在 text 中。特殊控制标记请使用对应参数，不能写入 text。
+    复杂任务只允许在开始时发送一次任务开始提示，并在全部完成后发送一次最终结果；
+    任务进行中禁止调用本工具。每轮 ai_node 最多调用两次。
+    CQ at 标记必须包含在 text 中，且每个标记只能指定一个 QQ 用户；不能 @ 全体成员。
+    特殊控制标记请使用对应参数，不能写入 text。
     """
     runtime = get_current_group_runtime()
     message_text = (text or "").strip()
     if not message_text:
         return "文字发送失败：text 不能为空。"
-    if runtime.send_text_count >= 3:
-        return "文字发送失败：一轮 ai_node 中最多发送3条文字。"
+    if runtime.send_text_count >= 2:
+        return "文字发送失败：一轮 ai_node 中最多发送2条文字。"
     answer = runtime.conversation.ai_answer
     if answer is None:
         return "文字发送失败：发送通道未就绪。"
@@ -854,7 +866,7 @@ async def send_image(image_url: str) -> str:
 
     ## 参数：
     - image_url: 图片的 URL 地址，支持
-        1) HTTP/HTTPS URL 
+        1) HTTP/HTTPS URL (downloaded to /tmp before sending)
         2) base64 data URI 格式（如 "base64://..."）
         3) 容器文件绝对路径（如 "file:///work/hatsume/path/to/image.jpg"）
 
@@ -874,6 +886,24 @@ async def send_image(image_url: str) -> str:
 
     url = image_url.strip()
     print(f"Send image: {url[:100]}...")
+
+    downloaded_path: Path | None = None
+    if urlparse(url).scheme in {"http", "https"}:
+        try:
+            await ensure_container_running(runtime.group_id)
+            downloaded_path = await asyncio.to_thread(
+                _download_http_media_to_tmp,
+                url,
+                f"hatsume-image-{runtime.group_id}",
+            )
+            image_data = await asyncio.to_thread(downloaded_path.read_bytes)
+            url = "base64://" + base64.b64encode(image_data).decode("ascii")
+            print(f"  → downloaded image URL to local file: {downloaded_path}")
+        except Exception as error:
+            if downloaded_path is not None:
+                downloaded_path.unlink(missing_ok=True)
+            print(f"❌ send_image download failed: {error}")
+            return f"❌ 图片下载失败: {error}"
 
     # Resolve file:// URLs by reading the file from the sandbox
     if url.startswith("file://"):
@@ -912,6 +942,9 @@ async def send_image(image_url: str) -> str:
         print(f"❌ send_image failed: {e}")
         traceback.print_exc()
         return f"❌ 图片发送失败: {e}"
+    finally:
+        if downloaded_path is not None:
+            downloaded_path.unlink(missing_ok=True)
 
     return "图片已成功发送给用户。"
 
@@ -923,7 +956,7 @@ async def send_video(video_url: str) -> str:
 
     ## 参数：
     - video_url: 视频地址，支持
-        1) HTTP/HTTPS URL
+        1) HTTP/HTTPS URL (downloaded to /tmp before sending)
         2) 容器文件绝对路径（如 "/work/path/to/video.mp4"）
         3) 容器 file:// 绝对路径（如 "file:///work/path/to/video.mp4"）
 
@@ -944,6 +977,24 @@ async def send_video(video_url: str) -> str:
 
     url = video_url.strip()
     print(f"Send video: {url[:100]}...")
+
+    downloaded_path: Path | None = None
+    if urlparse(url).scheme in {"http", "https"}:
+        try:
+            await ensure_container_running(runtime.group_id)
+            downloaded_path = await asyncio.to_thread(
+                _download_http_media_to_tmp,
+                url,
+                f"hatsume-video-{runtime.group_id}",
+            )
+            video_data = await asyncio.to_thread(downloaded_path.read_bytes)
+            url = "base64://" + base64.b64encode(video_data).decode("ascii")
+            print(f"  → downloaded video URL to local file: {downloaded_path}")
+        except Exception as error:
+            if downloaded_path is not None:
+                downloaded_path.unlink(missing_ok=True)
+            print(f"❌ send_video download failed: {error}")
+            return f"❌ 视频下载失败: {error}"
 
     if url.startswith("file://"):
         url = url[7:]
@@ -982,16 +1033,19 @@ async def send_video(video_url: str) -> str:
         print(f"❌ send_video failed: {e}")
         traceback.print_exc()
         return f"❌ 视频发送失败: {e}"
+    finally:
+        if downloaded_path is not None:
+            downloaded_path.unlink(missing_ok=True)
 
     return "视频已成功发送给用户。"
 
 
-def _download_voice_to_sandbox(voice_url: str, *, group_id: int) -> Path:
-    """Download audio into /tmp, preserving its URL suffix for format checks."""
-    suffix = Path(unquote(urlparse(voice_url).path)).suffix
-    destination = Path(f"/tmp/hatsume-voice-{group_id}-{uuid.uuid4().hex}{suffix}")
+def _download_http_media_to_tmp(media_url: str, prefix: str) -> Path:
+    """Download an HTTP media URL into /tmp, preserving its URL suffix."""
+    suffix = Path(unquote(urlparse(media_url).path)).suffix
+    destination = Path(f"/tmp/{prefix}-{uuid.uuid4().hex}{suffix}")
     try:
-        with requests.get(voice_url, stream=True, timeout=30) as response:
+        with requests.get(media_url, stream=True, timeout=30) as response:
             response.raise_for_status()
             with destination.open("xb") as output:
                 for chunk in response.iter_content(chunk_size=64 * 1024):
@@ -1001,6 +1055,11 @@ def _download_voice_to_sandbox(voice_url: str, *, group_id: int) -> Path:
         destination.unlink(missing_ok=True)
         raise
     return destination
+
+
+def _download_voice_to_sandbox(voice_url: str, *, group_id: int) -> Path:
+    """Download audio into /tmp, preserving its URL suffix for format checks."""
+    return _download_http_media_to_tmp(voice_url, f"hatsume-voice-{group_id}")
 
 
 @tool
@@ -1285,8 +1344,9 @@ async def generate_video(prompt: str, image_url: str = "") -> str:
 @tool
 async def shell_executor(shell: str, timeout: int) -> str:
     """
-    在 Ubuntu Linux 无桌面容器中执行 bash shell（当前工作目录 pwd 为 /work，~ 为 /root），并返回输出结果。
-    timeout 参数为命令执行时长，单位为秒，超过该时长会被强制终止。一般设为 180 秒。
+    在 Ubuntu Linux GUI 沙盒中执行 bash shell（当前工作目录 pwd 为 /work，~ 为 /root），并返回输出结果。
+    如果你是初芽，当你需要操作桌面或 Chrome 时必须派发 sandbox_computer_use；该 Agent 可使用 GUI/CDP 工具。
+    timeout 为正整数秒，超过该时长会强制终止命令。
 
     ## 约束：
     - 此工具无法执行交互式命令，如安装包时必须使用 `apt install -y` 或 `apt install --assume-yes`。
@@ -1294,6 +1354,14 @@ async def shell_executor(shell: str, timeout: int) -> str:
     - 禁止将沙盒中的路径告诉用户。你必须通过描述、调用工具或上传到 GitHub 仓库的方式向用户展示沙盒中的文件。
     """
     budget = _shell_executor_budget.get()
+    max_timeout = budget.max_timeout if budget is not None else 60
+    if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout <= 0:
+        return "❌ timeout 必须是正整数秒。"
+    if max_timeout is not None and timeout > max_timeout:
+        return (
+            "❌ chat_agent 的 shell_executor timeout 最大为 60 秒，命令未执行。"
+            "请将耗时任务完整派发给 coding_agent。"
+        )
     if budget is not None and not budget.reserve():
         return (
             "❌ 禁止多次调用 shell_executor，"
@@ -1306,6 +1374,179 @@ async def shell_executor(shell: str, timeout: int) -> str:
     result = await run_cmd(shell, timeout=timeout, group_id=runtime.group_id)
     print("Shell result: \n\r", result)
     return result
+
+
+# ---------------------------------------------------------------------------
+# Semantic GUI automation
+# ---------------------------------------------------------------------------
+_GUI_AUTOMATION_SCRIPT = (
+    "/work/hatsume/hatsume/plugins/hatsume-plugin/gui_automation.py"
+)
+
+
+async def _run_gui_automation(
+    operation: str,
+    *arguments: str,
+    timeout: int = 30,
+) -> str:
+    """Run the internal AT-SPI/CDP bridge in the current GUI sandbox."""
+    runtime = get_current_group_runtime()
+    await ensure_container_running(runtime.group_id)
+    command = " ".join(
+        [
+            f"HATSUME_GUI_GROUP_ID={runtime.group_id}",
+            "/usr/bin/python3",
+            shlex.quote(_GUI_AUTOMATION_SCRIPT),
+            shlex.quote(operation),
+            *(shlex.quote(argument) for argument in arguments),
+        ]
+    )
+    return await run_cmd(command, timeout=timeout, group_id=runtime.group_id)
+
+
+@tool
+async def gui_inspect(application: str = "", max_nodes: int = 200) -> str:
+    """检查整个 Linux 虚拟桌面的 AT-SPI 无障碍树并返回临时元素 ID。
+
+    返回的元素包含 id、application、role、name、actions 和 bounds。后续
+    gui_click、gui_focus 或 gui_set_text 必须使用这一次检查返回的 id；窗口
+    或弹窗变化后重新调用本工具。不要根据 bounds 自己计算坐标。
+    """
+    if max_nodes < 1 or max_nodes > 500:
+        return "错误：max_nodes 必须在 1 到 500 之间。"
+    return await _run_gui_automation("atspi-inspect", str(max_nodes), application)
+
+
+@tool
+async def gui_click(element_id: str) -> str:
+    """通过 AT-SPI 元素 ID 激活桌面控件，例如按钮、菜单项或复选框。"""
+    return await _run_gui_automation("atspi-click", element_id)
+
+
+@tool
+async def gui_click_coordinates(
+    x: int,
+    y: int,
+    button: Literal["left", "right", "middle"] = "left",
+    clicks: int = 1,
+) -> str:
+    """按原始桌面截图的像素坐标点击整个 GUI 桌面。
+
+    用于没有 AT-SPI/CDP 元素 ID 的控件。先用 gui_screenshot 截图，再通过
+    view_image 的自定义 prompt 确定目标坐标；优先使用元素 ID 操作。
+    原图左上角为 (0, 0)，x 向右、y 向下；不要使用缩放预览坐标。
+    button 为 left/right/middle，clicks 为 1（单击）或 2（双击）。
+    程序会根据实际桌面尺寸拒绝越界坐标。点击后重新截图确认结果。
+    """
+    if (isinstance(x, bool) or isinstance(y, bool)
+            or not isinstance(x, int) or not isinstance(y, int) or x < 0 or y < 0):
+        return "错误：x、y 必须为非负整数像素坐标。"
+    if button not in {"left", "right", "middle"} or clicks not in {1, 2}:
+        return "错误：button 必须为 left/right/middle，clicks 必须为 1 或 2。"
+    return await _run_gui_automation("click-coordinates", str(x), str(y), button, str(clicks))
+
+
+@tool
+async def gui_drag(
+    app_id: str,
+    start_x: int,
+    start_y: int,
+    end_x: int,
+    end_y: int,
+    speed: float = 800.0,
+) -> str:
+    """在指定应用窗口内拖拽鼠标。
+
+    app_id 必须是最近一次 gui_inspect 返回的应用根元素 ID；坐标使用原始桌面
+    截图像素。speed 是移动速度，单位为像素/秒，默认 800，工具会按起终点距离
+    计算持续时间并模拟连续的人类鼠标移动。适用于拖动验证码、GUI 控件、页面
+    或元素滚动条；拖拽前先用 gui_screenshot 和 view_image 确定起点、终点。
+    """
+    if not app_id or not app_id.strip():
+        return "错误：app_id 不能为空，必须使用 gui_inspect 返回的应用根元素 ID。"
+    coordinates = (start_x, start_y, end_x, end_y)
+    if any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in coordinates):
+        return "错误：拖拽起点和终点坐标必须为非负整数。"
+    if isinstance(speed, bool) or not isinstance(speed, (int, float)) or speed <= 0:
+        return "错误：speed 必须为正数像素/秒。"
+    return await _run_gui_automation(
+        "drag", app_id, str(start_x), str(start_y), str(end_x), str(end_y), str(float(speed))
+    )
+
+
+@tool
+async def gui_focus(element_id: str) -> str:
+    """通过 AT-SPI 元素 ID 聚焦桌面控件。"""
+    return await _run_gui_automation("atspi-focus", element_id)
+
+
+@tool
+async def gui_set_text(element_id: str, text: str) -> str:
+    """通过 AT-SPI 元素 ID 设置桌面输入控件的文本。"""
+    return await _run_gui_automation("atspi-set-text", element_id, text)
+
+
+@tool
+async def gui_key(element_id: str, key: str) -> str:
+    """先聚焦指定 AT-SPI/CDP 元素，再发送按键，例如 Return、Tab 或 ctrl+l。"""
+    return await _run_gui_automation("key", key, element_id)
+
+
+@tool
+async def gui_type(element_id: str, text: str) -> str:
+    """先聚焦 AT-SPI/CDP 元素再粘贴文本；用于终端等不支持 set_text 的控件。"""
+    return await _run_gui_automation("type", text, element_id)
+
+
+@tool
+async def gui_launch(application: str, arguments: list[str] | None = None) -> str:
+    """启动桌面程序，随后用 gui_inspect 取得控件 ID。
+
+    application 可用 terminal、file_manager，或已安装程序的可执行文件名；
+    arguments 是程序参数列表，不能提供 Shell 命令串。
+    """
+    return await _run_gui_automation("launch", application, json.dumps(arguments or []))
+
+
+@tool
+async def gui_screenshot() -> str:
+    """截取整个虚拟桌面并返回 PNG 路径；需要视觉确认时再调用 view_image。"""
+    return await _run_gui_automation("screenshot", timeout=30)
+
+
+@tool
+async def chrome_open(url: str) -> str:
+    """启动带 CDP 的 Google Chrome，或导航现有 CDP 页面到指定 URL。"""
+    if not url.startswith(("http://", "https://")):
+        return "错误：Chrome URL 必须以 http:// 或 https:// 开头。"
+    return await _run_gui_automation("chrome-open", url, timeout=45)
+
+
+@tool
+async def chrome_inspect(target_id: str = "") -> str:
+    """通过 Chrome CDP 枚举可交互 DOM 元素、Accessibility 信息和 HTML attributes。"""
+    return await _run_gui_automation("chrome-inspect", target_id, timeout=30)
+
+
+@tool
+async def chrome_click(element_id: str) -> str:
+    """通过 Chrome CDP 元素 ID 点击当前页面控件，不使用屏幕坐标。"""
+    return await _run_gui_automation("chrome-click", element_id)
+
+
+@tool
+async def chrome_focus(element_id: str) -> str:
+    """通过 Chrome CDP 元素 ID 聚焦当前页面控件。"""
+    return await _run_gui_automation("chrome-focus", element_id)
+
+
+@tool
+async def chrome_set_text(element_id: str, text: str) -> str:
+    """通过 Chrome CDP 元素 ID 输入文本并校验输入框或 contenteditable 的最终值。
+
+    底层使用 Chrome 的 Input.insertText 事件管线，让网页框架同步受控输入状态。
+    """
+    return await _run_gui_automation("chrome-set-text", element_id, text)
 
 # ---------------------------------------------------------------------------
 # Timer tools
@@ -1780,6 +2021,14 @@ async def skill_loader(name: str) -> str:
 
 
 @tool
+async def load_skill(name: str) -> str:
+    """Load one Skill's instructions for a task handled by a specialized Agent."""
+    from ..skills import get_skill_manager
+
+    return get_skill_manager().load_skill(name)
+
+
+@tool
 async def skill_remove(name: str) -> str:
     """
     删除指定名称的技能文件。
@@ -2241,7 +2490,7 @@ _AGENT_LIST_STR = "\n".join(
 )
 
 
-@tool(description=f"""将特定任务分配给 Subagent 后台执行。Subagent 完成任务后会通知你。
+@tool(description=f"""将特定任务分配给 Subagent 后台执行。Subagent 完成任务后只会把结果返回给你，不具备向用户发送文字、图片、视频、声音或文件的能力；由你在任务完成后调用发送类工具告知用户。
     ## 注意
     - 禁止创建多个重复任务的 agent。
     - 派发 Agents 后，禁止sleep等待后台agents完成。
@@ -2251,7 +2500,7 @@ _AGENT_LIST_STR = "\n".join(
 - agent_name: 内置 Agent 名称
 - task: 要执行的任务描述。任务描述必须包含所有必要信息，包含所有必要的链接、token、数据等。子 Agent 的上下文将只包含 task 中的信息。
 - context: 派发此 Agent 的背景上下文，需给出详细的上下文描述，大概300字左右，包括用户的对话背景、需求内容、以及为什么需要派发 Agent 来完成（必填）
-- notified_user_id: 需要通知的用户 QQ ID，如果有用户向你发起了任务，必须传入其QQ号（可选，默认为 0。如果不需要 @ 提醒任何用户，请设置为 0）
+- notified_user_id: 任务完成后由你在最终用户通知中 @ 的单个用户 QQ ID（可选，默认为 0；Agent 不会直接通知用户）。只能指定明确的一个用户，不支持 @ 全体成员。
 
 ## 可用 Agent：
 {_AGENT_LIST_STR}""")
@@ -2274,12 +2523,26 @@ async def agent_dispatch(
     from .agents import (
         add_agent_instance,
         bind_agent_instance,
+        get_running_agent_instance,
         has_running_agent_task,
         set_agent_state,
         track_agent_task,
         untrack_agent_task,
     )
     import time as _time
+
+    if agent_name == "sandbox_computer_use":
+        active_instance = get_running_agent_instance(agent_name)
+        if active_instance is not None:
+            active_group_id = active_instance.get("group_id")
+            if active_group_id != group_id:
+                return "该agent正在被其他人占用，请稍后再尝试分发。"
+            active_task = str(active_instance.get("task", "")).strip()
+            return (
+                "sandbox_computer_use agent 只能单实例运行，禁止并行运行多个 "
+                "sandbox_computer_use agents。\n"
+                f"当前 sandbox_computer_use 任务提示词：{active_task}"
+            )
 
     if has_running_agent_task(agent_name, group_id, task):
         return f"错误：Agent '{agent_name}' 已在当前群执行相同任务。"
@@ -2461,7 +2724,6 @@ def end_conversation() -> str:
 
 # Single registration point consumed by graph.nodes. Add new chat-facing tools here.
 CHAT_TOOLS = [
-    web_search,
     search_image,
     shell_executor,
     find_memory,

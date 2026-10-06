@@ -28,8 +28,11 @@ from . import config as _config
 from .config import (
     ALI_BASE_URL,
     CODING_MODEL_NAME,
+    MERCURY_DECISION,
     OPENCODE_API_KEY,
     OPENCODE_ZEN_BASE_URL,
+    OPENROUTER_API_KEY,
+    OPENROUTER_BASE_URL,
     PROVIDER,
     QWEN_3_7_FLASH,
     ALI_API_KEY,
@@ -181,7 +184,7 @@ def get_standard_api_model(
 
 def get_advance_model(
     thinking: bool = True,
-    reasoning_effort: ReasoningEffort = "medium",
+    reasoning_effort: ReasoningEffort = "xhigh",
 ) -> BaseChatModel:
     model_name = _config.ADVANCE_MODEL_NAME
     provider = PROVIDER
@@ -205,14 +208,11 @@ def get_view_image_model() -> BaseChatModel:
     return get_mini_model()
 
 def get_typesafe_model() -> BaseChatModel:
-    return get_openai_api_model(
-        model_name=JEV_1_13,
-        reasoning_effort="medium",
-        base_url=OPENCODE_ZEN_BASE_URL,
-        api_key=OPENCODE_API_KEY,
-        is_response=False,
-        extra_body=None,
-    )
+    return ChatOpenAI(
+            base_url=OPENROUTER_BASE_URL,
+            model=MERCURY_DECISION,
+            api_key=OPENROUTER_API_KEY,
+        )
 
 
 def get_jev_model() -> BaseChatModel:

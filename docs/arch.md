@@ -43,7 +43,7 @@ flowchart LR
 | 长期记忆检索 | 每轮自动检索或 find_memory | 只检索当前群；SQLite LIKE 优先，临时 BM25 与 Milvus/BGE-M3 补足 | graph/tools.py、memory/engine.py、memory/vector_store.py、memory/tokenizer.py |
 | 群内角色代理 | create_character_proxy、/proxy；群成员 @ 被代理用户或在对话中提到其昵称/外号 | 每群至多一个 RAM 代理；画像、外号和超时互不共享 | character_proxy.py、handlers/dialogue.py、graph/nodes.py |
 | 记忆协调与清理 | 显式协调命令、启动、每日 04:30 | 按当前 SQLite `group_id` 只读补齐 Milvus；同步清理 150 天前的 SQLite/Milvus 记录 | memory/engine.py、memory/vector_store.py、scripts/migrate_memory_vectors.py |
-| 联网搜索 | web_search | Keenable 搜索（免 key 公共端点），失败或空结果时回退 DuckDuckGo，两者都失败返回提示 | graph/tools.py |
+| 联网搜索 | agent_dispatch(web_researcher, ...) | 专用研究 Agent 仅持有 web_search；Keenable 搜索失败或空结果时回退 DuckDuckGo。chat_agent 不直接持有网络搜索工具 | graph/agents.py、graph/tools.py |
 | QQ 头像 | get_avatar | 返回指定 QQ 号的头像 URL | graph/tools.py、`utils/__init__.py` |
 | 股票报价查询 | query_stock_quote | 调用外部美股模拟盘 Tracker API 查询单股实时报价（价格、涨跌幅、成交量等） | graph/tools.py、config.py |
 | 股票代码搜索 | stock_search | 模糊搜索全部股票列表，按名称、代码或板块过滤，返回最多 10 条结果 | graph/tools.py、config.py |
@@ -456,9 +456,8 @@ flowchart LR
 
 | 工具 | 作用 |
 |---|---|
-| web_search | Keenable 搜索，失败时回退 DuckDuckGo |
 | search_image | 通过 Pexels 搜索真实照片，返回图片 URL 与摄影师来源信息 |
-| shell_executor | 当前容器 `/work/hatsume` 同步命令；普通聊天每轮最多三次 |
+| shell_executor | 当前容器 `/work` 同步命令；普通聊天每轮最多三次，每次 timeout 为 1 至 60 秒，程序在执行前拒绝超限参数 |
 | find_memory | 主动检索长期记忆 |
 | view_image | 使用轻量模型读取网络或沙盒图片并返回文字描述 |
 | generate_image | 图片生成，支持参考图与 60 秒限流 |
@@ -551,7 +550,9 @@ sequenceDiagram
     N->>N: 当前 human_queue 或新对话
 ~~~
 
-- coding_agent 使用代码模型，可调用 shell_executor、Skill 工具、网页与 Pexels 图片搜索、图片生成；它把 Shell 上限设为无限制。
+- web_researcher 使用轻量模型，工具列表严格为 `[web_search]`，不持有 Shell、浏览器、Skill 或派发工具。通过既有 agent_dispatch 的群属实例、后台任务和通知流程返回带来源链接的研究报告；chat_agent 的网络搜索统一派发给此 Agent。
+- coding_agent 使用代码模型，可调用 shell_executor、Skill 工具、网页与 Pexels 图片搜索、图片生成；它的 Shell 调用次数与 timeout 均不设上限，命令仍按调用时指定的正整数 timeout 终止。
+- Shell 预算通过 ContextVar 绑定每次调用上下文，同轮 chat_agent 的并行工具共享三次计数。chat_agent 的单次 timeout 上限为 60 秒；未绑定预算时也采用 60 秒上限。coding_agent 在自己的后台任务中设置不限次数与 timeout 的预算，不改变父聊天任务的限制。非法 timeout 不消耗调用次数，也不启动命令。
 - background_shell 先把任务解析为单条命令、终止条件和总超时，然后后台启动进程并增量读取日志。
 - 后台决策支持 DONE、KILL、CONTINUE:N、NOTIFY:N 与 INPUT_NEEDED:<timeout>:<description>。
 - 每次派发生成唯一 instance_id，并永久记录所属群、任务、上下文、用户、开始时间、状态和结果；派发 task 通过 task-local instance 绑定更新这一条精确记录，后台进程与 stdin request 也保存同一 instance_id，不按同类型 Agent 的“最新实例”猜测所有者。所有查询和 `/agents [群号]` 都按群过滤。
@@ -591,12 +592,22 @@ sequenceDiagram
 - `ContainerRuntime` 按群保存启动锁、active、引用计数、前台进程、前台 owner task 和延迟逻辑停用任务。同群状态合并，不同群命令可并行；它不再代表独立 Docker 容器。
 - `run_cmd()` 与后台命令直接以 `/work/hatsume` 为 cwd 启动 Bash，通过每次调用自己的 stdin 传递脚本，不读写共享 `virtual/script.sh`；stdout/stderr 经独立管道或唯一临时日志返回。
 - 所有调用点在进入 infra.py 时传递经过校验的显式 `group_id`；task-local runtime 只保留为 API 边界的兼容解析方式，不用于跨层猜测目标进程所有权。
-- 前台默认超时为 300 秒；shell_executor 也允许调用方显式传入 timeout。
+- 基础设施前台默认超时为 300 秒；shell_executor 使用调用者显式 timeout，chat_agent 在工具边界限制为 1 至 60 秒，coding_agent 不设上限。
 - 后台命令的进程、临时日志和 stdin 所有权包含群号；跨群进程 ID 不可读取或终止。
 - 每群独立引用计数。该群最后一个进程释放后等待五分钟再把逻辑 runtime 标记为 inactive；同群新任务只取消该群延迟任务。
 - 前台命令和本地文件复制被取消或超时时都会 kill 并 await 对应子进程后再解除跟踪；reset 先取消并等待目标群 owner task，再移除该群状态，不会留下失联子进程，也不会停止或删除 `hatsume-containerization`。
 - `.container/supervise.sh` 作为 PID 1 直接启动 `.container/run_bot.py`，写入当前 Bot PID；`hatsume-restart` 创建显式重启请求并延迟发送 TERM，supervisor 仅在存在该请求时重新启动 Bot。
 - `data/hatsume-plugin/skills/self-evolution.md` 告诉运行时 Agent `/work/hatsume` 的边界、测试要求与重启命令；检查失败时如实报告失败并评估是否为本任务相关，与本任务无关的既有基线失败不自动阻止重启。
+
+### GUI 语义操作
+
+- `graph/tools.py` 的 `CHAT_TOOLS` 直接注册桌面 `gui_launch/inspect/click/focus/set_text/type/key/screenshot` 与坐标后备工具 `gui_click_coordinates`、浏览器 `chrome_open/inspect/click/focus/set_text`，无需 chat_agent 调用 Shell 可执行程序。
+- `gui_automation.py` 是内部基础设施模块；工具通过 `infra.run_cmd` 在系统 Python 中执行，以使用 apt 安装的 AT-SPI 绑定。此模块不导入 graph 或 handlers，不增加循环依赖。
+- `gui_click_coordinates(x, y, button="left", clicks=1)` 使用 xdotool 模拟桌面鼠标，支持左/右/中键和双击，并按实际屏幕尺寸拒绝越界坐标；缺少语义 ID 时先截图并让 view_image 定位，点击后重新截图验证。操作复用桌面文件锁。
+- 主镜像在 Xvfb/Openbox 桌面启动固定地址的 D-Bus 会话与 AT-SPI2，默认终端为支持 AT-SPI 的 Xfce Terminal；PCManFM、终端菜单和输入控件通过真实无障碍对象执行动作，键盘和粘贴先按窗口 PID/标题激活再聚焦目标对象。
+- Google Chrome 调试端口仅监听容器内 localhost。每群拥有一个 CDP 标签页；检查通过 `Accessibility.getFullAXTree` 获取语义控件和 `backendDOMNodeId`，动作解析真实 DOM 对象，拒绝导航后的文档或已移除节点。
+- 每群在 `/run/hatsume/gui/<group-id>` 保存两份最新快照，快照带随机引用前缀且 10 分钟过期；不接受其他群的引用。桌面仍共享，跨群 GUI 操作由文件锁串行化。截图保存到 `/work/gui-screenshots/<group-id>`。容器重建后引用自动清空。
+- 聚焦测试为 `tests/test_gui_refs.py` 与 `tests/test_gui_tools.py`；实际探针覆盖文件管理器菜单点击、终端粘贴/执行、Chrome 中文输入/按钮回显、过期引用拒绝以及截图。
 
 ### 7.2 图片与视频
 
@@ -604,7 +615,7 @@ sequenceDiagram
 - 普通消息、Bot 成功发送的图片与回复图片使用 Pillow 检测实际格式，并把显式 `group_id` 传到 infra.py 的查找、目录创建和本地 copy 边界；文件进入 `/tmp/hatsume-user-images/<group-id>`。路径由群号、QQ 消息 ID 与消息内图片序号确定，避免共享容器内跨群碰撞。
 - 当前普通消息图片使用同一份已校验字节同时生成沙盒 Markdown 路径和 `image_url` data URI，因此模型可以直接理解图片，也可以通过 `view_image(file://...)` 读取沙盒文件。回复图片优先复用沙盒中的确定性路径，缺失时从 OneBot 临时 URL 恢复；合并转发图片保持临时 URL 且不附加顶层多模态块。
 - search_image 使用固定的 Pexels Search API，通过 PIXELS_API_KEY 鉴权；网络请求在线程中执行，最多返回十条带来源信息的候选结果，再由聊天 Agent 复用 send_image 发送。
-- view_image 将 HTTP/HTTPS 图片 URL 直接交给轻量模型；沙盒 file:// 绝对路径通过 infra.py 的统一读取边界传入当前 runtime 的显式群号，在当前容器读取 base64 后由 Pillow 校验实际图片格式并生成 data URI，再返回模型生成的文字描述。该流程不依赖 `file` 命令或文件扩展名。
+- view_image 接受可选 `prompt`，空字符串或纯空白时使用预置图片描述提示词，否则使用自定义提示词。查询截图控件坐标时 chat_agent 应指定目标、原图像素坐标系、中心点和边界框输出格式。HTTP/HTTPS 图片 URL 直接交给轻量模型；沙盒 file:// 绝对路径通过 infra.py 的统一读取边界传入当前 runtime 的显式群号，在当前容器读取 base64 后由 Pillow 校验实际图片格式并生成 data URI。该流程不依赖 `file` 命令或文件扩展名。
 - generate_image 在 Seedream 和兼容图像接口之间选择；有参考图时使用支持参考图的路径，沙盒 `file://` 参考图复用同一个按群读取和字节校验边界，再以 base64 data URI 交给 Ark SDK。
 - generate_video 在 Seedance 1.0 与 1.5 之间选择，轮询供应商任务直至完成或失败。
 - 白名单群戳一戳时通过 AppleScript 将随机 ACG 图片导出到唯一宿主临时目录，发送后清理该目录；导出失败时也会清理并静默返回。

@@ -11,7 +11,7 @@ if [[ "${CONTAINER_NAME}" != "hatsume-containerization" ]]; then
     exit 2
 fi
 
-IMAGE_NAME="hatsume-space:1.0"
+IMAGE_NAME="hatsume-space-gui:1.0"
 
 if ! docker info > /dev/null 2>&1; then
     echo "[HALT] Docker not running."
@@ -19,7 +19,7 @@ if ! docker info > /dev/null 2>&1; then
 fi
 
 if ! docker image inspect "${IMAGE_NAME}" > /dev/null 2>&1; then
-    zstd -d hatsume-space-image.tar.zst -c | docker load > /dev/null
+    zstd -d hatsume-space-gui-image.tar.zst -c | docker load > /dev/null
 fi
 
 if ! docker ps -a --format '{{.Names}}' | grep -qx "${CONTAINER_NAME}"; then
@@ -30,8 +30,11 @@ if ! docker ps -a --format '{{.Names}}' | grep -qx "${CONTAINER_NAME}"; then
         --env "HOME=/root" \
         --env "PATH=/work/hatsume/.container:/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
         --env "TZ=Asia/Shanghai" \
+        --env "DISPLAY=:99" \
+        --env "SCREEN_WIDTH=1280" \
+        --env "SCREEN_HEIGHT=800" \
         --mount "type=bind,src=$(cd -- "${SCRIPT_DIR}/../../../.." && pwd),dst=/work/hatsume" \
-        --entrypoint /work/hatsume/.container/supervise.sh \
+        --entrypoint /usr/local/bin/gui-entrypoint.sh \
         -it \
         "${IMAGE_NAME}" > /dev/null
 fi

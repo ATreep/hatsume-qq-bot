@@ -376,12 +376,7 @@ async def auto_convert_text(text: str) -> list[MessageSegment]:
     Returns:
         A ``list[MessageSegment]`` — one or more segments to send.
     """
-    emoji_pattern = re.compile(
-        "[\U00010000-\U0010ffff]",
-        flags=re.UNICODE
-    )
-    
-    text = emoji_pattern.sub("", text)
+
     if len(text) <= LONG_MSG_THRESHOLD and not _has_md_features(text):
         return [MessageSegment.text(text)]
     try:

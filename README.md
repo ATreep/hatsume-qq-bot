@@ -27,7 +27,9 @@ System One 判断默认通过 Drex（兼容 TypeSafe/Jev 请求格式）执行�
 ./start_hatsume_container.sh
 ```
 
-脚本会加载镜像归档、创建或复用 `shared-net`、删除旧的 `hatsume-containerization` 容器，并将当前项目目录挂载到 `/work/hatsume`。迁移时还会清理上一版误创建的 `hatsume-space` 运行容器；镜像名称仍为 `hatsume-space:1.0`。镜像归档路径可通过 `HATSUME_IMAGE_ARCHIVE` 覆盖，启动超时可通过 `HATSUME_START_TIMEOUT_SECONDS` 调整。
+脚本会加载镜像归档、创建或复用 `shared-net`、停止旧的 `hatsume-containerization` 容器并保留为带时间戳的 `hatsume-containerization-previous-*`，并将当前项目目录挂载到 `/work/hatsume`。迁移时还会使用包含 Xvfb、Openbox、AT-SPI2、Xfce Terminal、PCManFM、Google Chrome、xdotool 和截图工具的 GUI 主镜像 `hatsume-space-gui:1.0`。镜像归档路径可通过 `HATSUME_IMAGE_ARCHIVE` 覆盖，启动超时可通过 `HATSUME_START_TIMEOUT_SECONDS` 调整。
+
+chat_agent 通过内置 GUI 工具读取 AT-SPI 元素 ID、操作桌面控件，并通过 Chrome CDP 操作网页元素；截图仅用于验证。操作流程见 `data/hatsume-plugin/skills/gui-sandbox.md`。
 
 ## 使用 Codex 或 Claude Code 开发
 

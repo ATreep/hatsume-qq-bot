@@ -70,6 +70,11 @@ from .tools import (
     reset_capture_flag,
     set_shell_executor_limit,
 )
+from .systemone import (
+    build_systemone_body,
+    get_choice_answer,
+    post_systemone,
+)
 
 JSON_CODE_FENCE_PATTERN = re.compile(
     r"^\s*```(?:json)?[ \t]*\r?\n(?P<json>.*?)\r?\n[ \t]*```\s*$",
@@ -482,26 +487,17 @@ def _messages_to_jev_state(messages: list[Any]) -> list[dict[str, str]]:
 
 
 def _jev_answer(response: Any, question_id: str) -> Mapping[str, Any] | None:
-    """Extract one raw Jev answer from SDK or HTTP-style response data."""
-    answers = (
-        response.get("answers")
-        if isinstance(response, Mapping)
-        else getattr(response, "answers", None)
-    )
+    answers = response.get("answers") if isinstance(response, Mapping) else getattr(response, "answers", None)
     if not isinstance(answers, Mapping):
         return None
-
     answer = answers.get(question_id)
     if isinstance(answer, Mapping):
         return answer
-    model_dump = getattr(answer, "model_dump", None)
-    if callable(model_dump):
-        dumped = model_dump()
-        return dumped if isinstance(dumped, Mapping) else None
-    answer_dict = getattr(answer, "__dict__", None)
-    if isinstance(answer_dict, Mapping):
-        return answer_dict
-    return None
+    dumped = getattr(answer, "model_dump", lambda: None)()
+    if isinstance(dumped, Mapping):
+        return dumped
+    value = getattr(answer, "__dict__", None)
+    return value if isinstance(value, Mapping) else None
 
 
 def _build_systemone_body(
@@ -509,27 +505,20 @@ def _build_systemone_body(
     state: Any,
     questions: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Build the TypeSafe/Drex System One request without changing question data."""
-    return {
-        "model": model_name,
-        "state": state,
-        "questions": dict(questions),
-    }
+    return {"model": model_name, "state": state, "questions": dict(questions)}
 
 
 async def _post_systemone(
     model: Any,
     state: Any,
     questions: Mapping[str, Any],
+    route = "/systemone"
 ) -> Any:
-    """Send all typed questions in one TypeSafe/Drex forward pass."""
     return await model.root_async_client.post(
-        "/systemone",
+        route,
         cast_to=object,
         body=_build_systemone_body(
-            getattr(model, "model_name", "drex-latest"),
-            state,
-            questions,
+            getattr(model, "model_name", ""), state, questions
         ),
     )
 
@@ -1126,6 +1115,7 @@ async def ai_node(state: MessagesState) -> dict:
                         },
                     },
                 },
+                route="/decisions"
             )
             chat_end_answer = _jev_answer(jev_response, "chat_end") or {}
             chat_end_choice = str(chat_end_answer.get("choice", "继续"))
@@ -1301,7 +1291,7 @@ async def ai_node(state: MessagesState) -> dict:
 
         t_invocation_start = time.monotonic()
 
-        set_shell_executor_limit(3)  # chat_agent: max 3 shell_executor calls per round
+        set_shell_executor_limit(3)  # chat_agent: 3 calls per round, timeout <= 60s
         invocation_messages = agent_messages
         active_mcp_tools: list[Any] = []
         for attempt in range(2):

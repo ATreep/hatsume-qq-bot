@@ -31,6 +31,7 @@ NAMES = {
     "_format_tool_input",
     "_wrap_tool_ainvoke",
     "tool",
+    "_download_http_media_to_tmp",
     "_download_voice_to_sandbox",
     "send_voice",
 }
@@ -66,6 +67,7 @@ class VoiceCase(unittest.IsolatedAsyncioTestCase):
             "unquote": unquote,
             "urlparse": urlparse,
             "requests": requests,
+            "urlparse": urlparse,
             "_langchain_tool": tool,
             "MessageSegment": MessageSegment,
             "get_current_group_runtime": lambda: self.runtime,

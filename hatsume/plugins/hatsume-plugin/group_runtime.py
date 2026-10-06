@@ -28,6 +28,10 @@ class GroupRuntime:
     conversation: ConversationState = field(init=False)
     bot: Any = None
     graph_start_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # OneBot message sends must be serialized per group. LangGraph's ToolNode
+    # executes multiple tool calls in one model turn concurrently, while some
+    # adapters do not reliably preserve concurrent send requests.
+    outbound_send_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     auxiliary_compaction_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     auxiliary_messages_queue: list[dict] = field(default_factory=list)

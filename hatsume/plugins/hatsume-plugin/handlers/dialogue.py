@@ -970,54 +970,56 @@ async def _send_group_ai_message(
     record: bool = True,
 ) -> bool:
     """Send one AI response directly to a group with reply fallback."""
-    segments, force_message = await _build_ai_response_segments(
-        msg,
-        group_id,
-        reply_to_message_id=reply_to_message_id,
-    )
-    if not segments:
-        return False
-    try:
-        send_result = await bot.send_group_msg(
-            group_id=group_id,
-            message=_message_payload_for_segments(segments, force_message),
-        )
-    except Exception:
-        if reply_to_message_id is None:
-            raise
-        print(
-            "Reply target rejected; retrying without reply segment: "
-            f"{reply_to_message_id}"
-        )
-        reply_to_message_id = None
+    runtime = group_runtime_registry.get_or_create(group_id)
+    async with runtime.outbound_send_lock:
         segments, force_message = await _build_ai_response_segments(
             msg,
             group_id,
-        )
-        send_result = await bot.send_group_msg(
-            group_id=group_id,
-            message=_message_payload_for_segments(segments, force_message),
-        )
-
-    try:
-        image_paths = await _cache_sent_images(
-            segments,
-            send_result,
-            group_id=group_id,
-        )
-    except Exception as exc:
-        print(f"❌ Failed to cache sent images: group={group_id} err={exc}")
-        image_paths = []
-
-    if record:
-        _record_bot_message(
-            group_id,
-            build_bot_record_content(segments, image_paths),
             reply_to_message_id=reply_to_message_id,
-            platform_message_id=_sent_message_id(send_result),
-            created_at=time.time(),
         )
-    return True
+        if not segments:
+            return False
+        try:
+            send_result = await bot.send_group_msg(
+                group_id=group_id,
+                message=_message_payload_for_segments(segments, force_message),
+            )
+        except Exception:
+            if reply_to_message_id is None:
+                raise
+            print(
+                "Reply target rejected; retrying without reply segment: "
+                f"{reply_to_message_id}"
+            )
+            reply_to_message_id = None
+            segments, force_message = await _build_ai_response_segments(
+                msg,
+                group_id,
+            )
+            send_result = await bot.send_group_msg(
+                group_id=group_id,
+                message=_message_payload_for_segments(segments, force_message),
+            )
+
+        try:
+            image_paths = await _cache_sent_images(
+                segments,
+                send_result,
+                group_id=group_id,
+            )
+        except Exception as exc:
+            print(f"❌ Failed to cache sent images: group={group_id} err={exc}")
+            image_paths = []
+
+        if record:
+            _record_bot_message(
+                group_id,
+                build_bot_record_content(segments, image_paths),
+                reply_to_message_id=reply_to_message_id,
+                platform_message_id=_sent_message_id(send_result),
+                created_at=time.time(),
+            )
+        return True
 
 
 async def handle_ai_message(
