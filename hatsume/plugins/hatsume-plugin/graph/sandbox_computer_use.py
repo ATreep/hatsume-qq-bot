@@ -213,7 +213,13 @@ class SandboxComputerUseCoordinator:
         result = await self.deps.native_action(
             operation["choice"], element, self.task
         )
-        self._record_step3_history()
+        self._record_step3_history(
+            clicked_element=(
+                _clicked_element_context(element, window["application"])
+                if operation["choice"] == "click"
+                else None
+            )
+        )
         self._record(result)
         return None
 
@@ -311,7 +317,12 @@ class SandboxComputerUseCoordinator:
                 f"for next iteration"
             )
         self._record_step3_history(
-            self.step3_llm_result if operation["choice"] == "chrome_set_text" else None
+            self.step3_llm_result if operation["choice"] == "chrome_set_text" else None,
+            clicked_element=(
+                _clicked_element_context(element, window["application"])
+                if operation["choice"] == "chrome_click"
+                else None
+            ),
         )
         self._record(result)
         return None
@@ -400,15 +411,23 @@ class SandboxComputerUseCoordinator:
         }
         self.step3_decision = decision
 
-    def _record_step3_history(self, llm_result: str | None = None) -> None:
+    def _record_step3_history(
+        self,
+        llm_result: str | None = None,
+        *,
+        clicked_element: dict[str, Any] | None = None,
+    ) -> None:
         """Keep the latest three completed Step 3 iterations for Jev context."""
         if self.step3_decision is None:
             return
-        self.step3_history.append({
+        item = {
             "iteration": self.iteration,
             "decision": deepcopy(self.step3_decision),
             "llm_result": llm_result,
-        })
+        }
+        if clicked_element is not None:
+            item["clicked_element"] = deepcopy(clicked_element)
+        self.step3_history.append(item)
         del self.step3_history[:-3]
 
     def _record(self, result: Any) -> None:
@@ -549,7 +568,7 @@ def _element_criteria(
     })
     if include_wait:
         criteria["wait_before_operation"] = (
-            "If the page is loading. Wait three seconds for page loading, and then redo your decision."
+            "If the page is loading. Wait 5 seconds for page loading, and then redo your decision."
         )
     return criteria
 
@@ -563,6 +582,22 @@ def _element_key(element: Mapping[str, Any]) -> str:
         str(element.get(field) or "")
         for field in ("role", "name", "value")
     )
+
+
+def _clicked_element_context(
+    element: Mapping[str, Any], application: str
+) -> dict[str, Any]:
+    """Keep identifying details for an element that was actually clicked."""
+    value = element.get("value")
+    if value is None:
+        value = element.get("nodeValue")
+    return {
+        "role": element.get("role"),
+        "value": value,
+        "description": element.get("description"),
+        "name": element.get("name"),
+        "application": element.get("application") or application,
+    }
 
 
 def _is_editable_chrome_element(element: Mapping[str, Any]) -> bool:

@@ -704,10 +704,13 @@ async def send_text(
 
     复杂任务只允许在开始时发送一次任务开始提示，并在全部完成后发送一次最终结果；
     任务进行中禁止调用本工具。每轮 ai_node 最多调用两次。
+    调用时必须传入非空的 memories 列表，至少包含一条记忆；为空时工具会返回错误且不会发送消息。
     CQ at 标记必须包含在 text 中，且每个标记只能指定一个 QQ 用户；不能 @ 全体成员。
     特殊控制标记请使用对应参数，不能写入 text。
     """
     runtime = get_current_group_runtime()
+    if not memories:
+        return "文字发送失败：memories 不能为空，至少需要包含一条需要记录的记忆。"
     message_text = (text or "").strip()
     if not message_text:
         return "文字发送失败：text 不能为空。"
