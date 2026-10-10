@@ -52,17 +52,16 @@ def _parse_args() -> argparse.Namespace:
 def main() -> int:
     args = _parse_args()
     config = _load_module(
-        "hatsume_memory_reconciliation_config", PLUGIN_DIR / "config.py"
+        "hatsume_memory_reconciliation_config", PLUGIN_DIR / "model_config.py"
     )
     vectors = _load_module(
         "hatsume_memory_reconciliation_vector_store",
         PLUGIN_DIR / "memory/vector_store.py",
     )
+    settings = config.get_model_config_store().resolve("embedding")
     embedding_model = OpenAIEmbeddings(
-        base_url=config.get_base_url("sf"),
-        model=config.EMBEDDING_MODEL,
-        api_key=config.get_api_key("sf"),
-        chunk_size=32,
+        base_url=settings["base_url"], model=settings["model"],
+        api_key=settings["api_key"], **settings["options"],
     )
     vector_store = vectors.MilvusVectorStore(args.milvus, dimension=1024)
     try:

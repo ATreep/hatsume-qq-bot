@@ -2,7 +2,7 @@
 
 ## 这是什么
 
-Hatsume 是一个面向 QQ 群聊的 AI 机器人，运行于 Python 3.12+，以 NoneBot2 插件形式通过 OneBot V11 接入 QQ。项目使用 LangGraph 编排多轮对话：同一群内串行处理，不同群可并行；长期记忆、自动回复 Timer、持久化 heartbeat Hook、可变 Skill、角色代理、后台 Agent 和点赞均按群隔离。SQLite 保存长期记忆、定时任务与 Hook 元数据；拥有长期记忆的群会进入进程内 activated-group 集合，用于自动回复排期和新成员欢迎。Hook 允许 Agent 编写快速增量脚本监听外部变化，脚本以退出码 10 和 stdout 触发所属群的 chat_agent；Hook 也支持「用户消息匹配」触发方式，指定群号、触发人 QQ 与正则后，命中的群消息会直接注入该群 chat_agent，无需脚本轮询。消息管线统一解析回复、合并转发和 QQ 系统表情，并把收发图片按群缓存供回复引用。自动回复只在目标群没有进行中对话时注入。机器人还提供多模态消息、联网搜索、容器内本地 Shell、图片与视频生成、群成员搜索和白名单群聊互动等能力。
+Hatsume 是一个面向 QQ 群聊的 AI 机器人，运行于 Python 3.12+，以 NoneBot2 插件形式通过 OneBot V11 接入 QQ。项目使用 LangGraph 编排多轮对话：同一群内串行处理，不同群可并行；长期记忆、自动回复 Timer、持久化 heartbeat Hook、可变 Skill、角色代理、后台 Agent 和点赞均按群隔离。SQLite 保存长期记忆、定时任务与 Hook 元数据；拥有长期记忆的群会进入进程内 activated-group 集合，用于自动回复排期和新成员欢迎。Hook 允许 Agent 编写快速增量脚本监听外部变化，脚本以退出码 10 和 stdout 触发所属群的 chat_agent；Hook 也支持「用户消息匹配」触发方式，指定群号、触发人 QQ 与正则后，命中的群消息会直接注入该群 chat_agent，无需脚本轮询。消息管线统一解析回复、合并转发和 QQ 系统表情，并把收发图片按群缓存供回复引用。自动回复只在目标群没有进行中对话时注入。机器人还提供多模态消息、联网搜索、容器内本地 Shell、图片生成、群成员搜索和白名单群聊互动等能力。
 
 核心代码位于 `hatsume/plugins/hatsume-plugin/`。完整功能、运行流程、模块职责和测试索引见 `docs/arch.md`。
 
@@ -13,7 +13,7 @@ Hatsume 是一个面向 QQ 群聊的 AI 机器人，运行于 Python 3.12+，以
 
 这些缺失项不会影响本地依赖安装、源码开发和单元测试。涉及真实 QQ、模型供应商、媒体服务、macOS Photos 或 Docker 运行环境的功能，需要维护者自己的私有配置与运行资产才能联调。
 
-System One 判断默认通过 Drex（兼容 TypeSafe/Jev 请求格式）执行。部署时设置 `TYPESAFE_API_KEY`；旧配置也可以暂时使用 `DREX_API_KEY`，程序只把它作为 `TYPESAFE_API_KEY` 的后备读取，不会写回文件或打印。可通过 `TYPESAFE_BASE_URL` 和 `TYPESAFE_DEFAULT_MODEL` 覆盖默认的 `https://drex.nace.ai` 与 `drex-latest`。
+供应商 URL、API Key 和支持的 API 保存在 `data/hatsume-plugin/providers.yml`；各模型角色的供应商、API、模型 ID 和选项保存在 `data/hatsume-plugin/models.yml`。管理员通过 `/provider` 管理连接，通过 `/model use <role> <provider> <model> [--api <api>]` 切换模型，修改会持久化并在下一次调用生效。支持 OpenAI Chat Completions、OpenAI Responses 和 Google 原生 API；System One 保留独立的结构化请求协议。配置格式、命令、首次部署示例和测试见 [模型配置说明](docs/model-configuration.md)。
 
 ## 当前容器化运行副本
 

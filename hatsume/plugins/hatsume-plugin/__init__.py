@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import nonebot
-from nonebot import on_message, on_command, on_fullmatch, on_notice
+from nonebot import on_message, on_command, on_notice
 from nonebot.rule import is_type, keyword, to_me
 from nonebot.adapters.onebot.v11 import (
     GroupIncreaseNoticeEvent,
     GroupMessageEvent,
     Message,
+    MessageEvent,
     PokeNotifyEvent,
 )
 from nonebot.exception import FinishedException
@@ -27,6 +28,7 @@ from .handlers.tools import (
     handle_list_skills,
     handle_membersearch,
     handle_model,
+    handle_provider,
     handle_mcp,
     handle_poke,
     handle_proxy_command,
@@ -147,12 +149,8 @@ shell_cmd = on_command(
     priority=10, 
     block=True
 )
-model_cmd = on_command(
-    "model",
-    rule=lambda event: str(event.get_user_id()) == ADMIN_QQ_ID,
-    priority=10,
-    block=True,
-)
+model_cmd = on_command("model", priority=10, block=True)
+provider_cmd = on_command("provider", priority=10, block=True)
 mcp_cmd = on_command(
     "mcp",
     rule=lambda event: str(event.get_user_id()) == ADMIN_QQ_ID,
@@ -222,8 +220,13 @@ async def _(event: GroupMessageEvent, args: Message = CommandArg()):
 
 
 @model_cmd.handle()
-async def _(args: Message = CommandArg()):
-    await handle_model(model_cmd, args)
+async def _(event: MessageEvent, args: Message = CommandArg()):
+    await handle_model(event, model_cmd, args)
+
+
+@provider_cmd.handle()
+async def _(event: MessageEvent, args: Message = CommandArg()):
+    await handle_provider(event, provider_cmd, args)
 
 
 @mcp_cmd.handle()

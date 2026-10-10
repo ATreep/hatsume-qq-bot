@@ -1,4 +1,4 @@
-"""Tool commands: poke handler and shell/image/video/timer/skills command handlers."""
+"""Tool commands: poke handler and shell/timer/skills/model command handlers."""
 
 from __future__ import annotations
 
@@ -206,24 +206,40 @@ async def handle_shell(event, matcher, args: Message) -> None:
     await matcher.finish(out)
 
 
-async def handle_model(matcher, args: Message) -> None:
-    """Show or update the process-local advanced model name."""
-    from .. import config as runtime_config
+async def handle_model(event, matcher, args: Message) -> None:
+    """Show, persist or check model roles without exposing credentials."""
+    from ..model_commands import model_command
+    from ..model_config import ModelConfigError, get_model_config_store
 
-    requested_name = args.extract_plain_text().strip()
-    if not requested_name:
-        await matcher.finish(
-            f"当前高级模型：{runtime_config.ADVANCE_MODEL_NAME}\n"
-            "Provider、Base URL 和 API Key 保持不变。"
-        )
+    if str(event.get_user_id()) != str(ADMIN_QQ_ID):
+        await matcher.finish("只有管理员可以使用 /model。")
         return
+    try:
+        result = await model_command(get_model_config_store(), args.extract_plain_text())
+    except ModelConfigError as exc:
+        result = f"❌ {exc}"
+    except OSError:
+        result = "❌ 配置文件写入失败，请检查 data/hatsume-plugin 的权限。"
+    await matcher.finish(result)
 
-    previous_name = runtime_config.ADVANCE_MODEL_NAME
-    runtime_config.ADVANCE_MODEL_NAME = requested_name
-    await matcher.finish(
-        f"✅ 高级模型已切换：{previous_name} → {requested_name}\n"
-        "仅模型名称已更改；Provider、Base URL 和 API Key 保持不变。"
-    )
+
+async def handle_provider(event, matcher, args: Message) -> None:
+    """Manage provider metadata without accepting credentials in chat."""
+    from ..model_commands import provider_command
+    from ..model_config import ModelConfigError, get_model_config_store
+
+    if str(event.get_user_id()) != str(ADMIN_QQ_ID):
+        await matcher.finish("只有管理员可以使用 /provider。")
+        return
+    try:
+        result = provider_command(
+            get_model_config_store(), args.extract_plain_text(),
+        )
+    except ModelConfigError as exc:
+        result = f"❌ {exc}"
+    except OSError:
+        result = "❌ 配置文件写入失败，请检查 data/hatsume-plugin 的权限。"
+    await matcher.finish(result)
 
 
 async def handle_mcp(event, matcher, args: Message) -> None:
@@ -856,13 +872,14 @@ def _format_balance_amount(raw_value: object) -> str:
 
 async def handle_dsbalance(event, matcher, args: Message) -> None:
     """Show the DeepSeek account balance from the official balance API."""
-    from .. import config as runtime_config
+    from ..model_config import get_model_config_store
 
-    api_key = getattr(runtime_config, "DS_API_KEY", "").strip()
+    connection = get_model_config_store().provider_connection("ds")
+    api_key = connection["api_key"].strip()
     if not api_key:
-        await matcher.finish("❌ 错误：未配置 DeepSeek API Key（DS_API_KEY）。")
+        await matcher.finish("❌ 错误：未配置 DeepSeek API Key（providers.yml 中的 ds）。")
         return
-    base_url = getattr(runtime_config, "DS_BASE_URL", "https://api.deepseek.com")
+    base_url = connection["base_url"].removesuffix("/v1")
 
     print("Querying DeepSeek balance.")
     try:

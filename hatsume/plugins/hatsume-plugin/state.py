@@ -9,7 +9,6 @@ from typing import Any, Callable, Coroutine
 
 from .config import (
     CONTEXT_QUEUE_OVERLAP_LEN,
-    VIDEO_RATE_LIMIT_SECONDS,
     GENERATE_IMAGE_RATE_LIMIT_SECONDS,
 )
 
@@ -46,7 +45,6 @@ class ConversationState:
     human_source_queue: list[dict] = field(default_factory=list)
 
     # Timing
-    last_video_time: float = 0
     last_generate_image_time: float = 0
 
     # Debounce
@@ -81,12 +79,6 @@ class ConversationState:
         """Stop message delivery and ask the running graph to finish."""
         self.end_conversation()
         self.end_requested = True
-
-    def is_video_rate_limited(self) -> bool:
-        return time.time() - self.last_video_time < VIDEO_RATE_LIMIT_SECONDS
-
-    def update_video_time(self) -> None:
-        self.last_video_time = time.time()
 
     def is_generate_image_rate_limited(self) -> bool:
         return time.time() - self.last_generate_image_time < GENERATE_IMAGE_RATE_LIMIT_SECONDS

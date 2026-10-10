@@ -50,11 +50,10 @@ flowchart LR
 | 图片查看 | view_image | 使用 ZHTH 的 `GPT_5_6_LUNA` 专用客户端描述 HTTP/HTTPS 或沙盒 file:// 图片 | graph/tools.py、models.py、infra.py |
 | 随机 ACG 图片 | 白名单群戳一戳 | 从 macOS Photos 的 ACG 相册导出并直接发送；非白名单群静默返回 | handlers/tools.py |
 | 图片发送 | send_image | 支持 HTTP、base64 和沙盒 file:// 文件，每轮最多三张 | graph/tools.py |
-| 图片生成 | generate_image | 在 Seedream 与兼容图像接口之间选择，支持参考图和限流 | graph/tools.py、models.py、state.py |
+| 图片生成 | generate_image | 使用 SenseNova 图像接口，支持参考图和限流 | graph/tools.py、models.py、state.py |
 | 视频发送 | send_video | 支持 HTTP URL、沙盒绝对路径和沙盒 file:// 文件，每轮最多一个 | graph/tools.py |
 | 声音发送 | send_voice | 支持 HTTP/HTTPS 和沙盒 file://；网络文件下载到 /tmp，按后缀仅允许 MP3，其他格式保留文件并返回沙盒路径 | graph/tools.py |
-| 视频生成 | generate_video | Seedance 1.0/1.5 文生视频或图生视频，并轮询任务结果；聊天工具返回 URL，由 send_video 发送 | graph/tools.py、models.py |
-| 高级模型切换 | 管理员 /model [模型名] | 查看或切换当前进程的高级模型名，不改变供应商、Base URL 或 API Key | handlers/tools.py、models.py、config.py |
+| 模型与供应商切换 | 管理员 /model、/provider | 全局模型角色与连接分别保存到 models.yml、providers.yml，下一次调用生效并保留到重启后 | handlers/tools.py、model_commands.py、model_config.py、model_factory.py、models.py |
 | ADMIN MODE | `ADMIN_QQ_ID` 本人发送含大写 `BYPASS` 的普通消息 | 程序校验顶层发送者和当前消息正文；本轮 chat_agent 保持当前高级模型、防御性移除历史 `image_url`/`img_url` 输入段并注入完整沙盒操作授权，下一轮恢复未过滤输入 | graph/nodes.py、models.py、prompts.py |
 | 本地 Shell | 管理员 /ccsh、/cc 或 shell_executor | 在当前 `hatsume-containerization` 的 `/work` 执行，home 为 `/root`，源码位于 `/work/hatsume`；进程、计数和延迟逻辑停用按群隔离 | handlers/tools.py、graph/tools.py、infra.py |
 | 后台长任务 | agent_dispatch(background_shell, ...) | 后台运行长时间或交互式命令，周期判断继续、通知、输入、结束或终止 | graph/agents.py、infra.py |
@@ -104,7 +103,8 @@ flowchart LR
 | /hooks [群号] | 所有人；跨群仅管理员 | 无参数列出当前群全部 Hook（触发方式、状态、脚本或匹配规则、下次运行/上次触发）；管理员可指定群号查看其他群 | handlers/tools.py |
 | /aps | 管理员 | 列出当前 APScheduler 注册的全部任务、触发器和下次运行时间 | handlers/tools.py |
 | /todo [群号] | 所有人；跨群仅管理员 | 无参数列出当前群全部活动待办；管理员可指定群号查看其他群 | handlers/tools.py |
-| /model [模型名] | 管理员 | 无参数查看高级模型；有参数时只切换当前进程使用的模型名 | handlers/tools.py |
+| /model [模型名]、use、options、check | 管理员 | 查看全局角色、持久化切换模型/供应商/API、设置选项或检查聊天接口 | handlers/tools.py、model_commands.py |
+| /provider list、show、add、update、remove | 管理员 | 管理供应商连接；Key 只在 YAML 文件中配置，查询不回显凭证 | handlers/tools.py、model_commands.py |
 | /ccsh <命令>、/cc <命令> | 管理员 | 在 bot 容器 `/work` 执行 Shell，home 为 `/root` | handlers/tools.py |
 | /resetsandbox [群号] | 仅管理员 | 取消目标群已有 Agent、进程和 stdin；无参数为当前群 | handlers/tools.py |
 | /proxy create <QQ号> [分钟]、/proxy terminate、/proxy status | 所有人 | 创建、终止或查看当前群 RAM 角色代理、完整角色 Prompt 与自动结束时间 | handlers/tools.py、graph/tools.py |
@@ -113,7 +113,7 @@ flowchart LR
 | 戳一戳机器人 | `POKE_GROUP_WHITELIST` 中的群 | 从 macOS Photos 的 ACG 相册发送随机图片；其他群静默忽略 | handlers/tools.py |
 | 新成员加入 activated group | 新成员 | 获取群名片与头像，要求机器人 at 欢迎、自我介绍并说明其他能力 | handlers/dialogue.py |
 
-图片和视频生成只作为对话内工具提供，没有独立的 `/img`、`/video` matcher；`/clear` 也不再注册。
+图片生成只作为对话内工具提供，没有独立的 `/img` matcher；`/clear` 也不再注册。视频仍可通过 `send_video` 发送已有视频 URL 或文件。
 
 ### 2.3 matcher 顺序
 
@@ -461,7 +461,6 @@ flowchart LR
 | find_memory | 主动检索长期记忆 |
 | view_image | 使用轻量模型读取网络或沙盒图片并返回文字描述 |
 | generate_image | 图片生成，支持参考图与 60 秒限流 |
-| generate_video | 生成视频并返回临时 URL；每轮最多一次 |
 | send_image | 发送 HTTP、base64 或沙盒文件；每轮最多三张 |
 | send_video | 发送 HTTP URL、沙盒绝对路径或沙盒文件；每轮最多一个 |
 | send_voice | HTTP/HTTPS 文件先下载到 /tmp，或读取沙盒 file:// 文件；按后缀仅发送 MP3，其他格式返回保留文件的沙盒路径 |
@@ -577,12 +576,12 @@ sequenceDiagram
 - 非 group-scoped 的扁平 `{user_id: count}` 数据不再迁移；读取会显式失败且不替换原文件。
 - 点赞累计只更新事件所属群；`/likerank [群号]` 默认当前群，跨群仅管理员，并使用目标群成员信息解析榜单名称。
 
-### 6.8 高级模型运行时切换
+### 6.8 模型与供应商运行时切换
 
-- config.py 的 ADVANCE_MODEL_NAME 保存当前进程使用的高级模型名，初始值由源码配置决定。
-- 管理员发送 /model 可查看当前值；/model <模型名> 会原样保留模型标识的大小写和标点，只去除首尾空白。
-- get_advance_model() 每次创建客户端时读取最新值，并继续调用未改动的 get_standard_api_model()。因此 PROVIDER、Base URL、API Key、Responses API 和上下文压缩配置都不会随命令变化。
-- 该选择只保存在当前进程内，不写入 .env.prod、SQLite 或其他持久化文件；进程重启后恢复源码默认值。多进程部署需要分别设置每个进程。
+- `providers.yml` 保存完整 SDK URL、Key 与支持的 API；`models.yml` 保存全局角色、模型与显式选项。两份文件位于 `data/hatsume-plugin/`。
+- `/model use` 持久化切换供应商、模型和 API；`/provider` 管理连接元数据，Key 只直接写入 owner-only 的 YAML 文件，避免进入 OneBot 日志。配置详情见 `docs/model-configuration.md`。
+- 工厂每次读取并校验 YAML；已创建的客户端保持快照。切换模型或连接清除旧选项，下一次调用生效；Responses 不依赖自动的 `previous_response_id`。
+- 聚焦测试为 `test_model_config.py`、`test_model_commands.py` 和 `test_model_protocols.py`；后者使用真实 SDK 请求本地 HTTP Server。
 
 ## 7. 容器内执行、媒体与输出
 
@@ -616,8 +615,7 @@ sequenceDiagram
 - 当前普通消息图片使用同一份已校验字节同时生成沙盒 Markdown 路径和 `image_url` data URI，因此模型可以直接理解图片，也可以通过 `view_image(file://...)` 读取沙盒文件。回复图片优先复用沙盒中的确定性路径，缺失时从 OneBot 临时 URL 恢复；合并转发图片保持临时 URL 且不附加顶层多模态块。
 - search_image 使用固定的 Pexels Search API，通过 PIXELS_API_KEY 鉴权；网络请求在线程中执行，最多返回十条带来源信息的候选结果，再由聊天 Agent 复用 send_image 发送。
 - view_image 接受可选 `prompt`，空字符串或纯空白时使用预置图片描述提示词，否则使用自定义提示词。查询截图控件坐标时 chat_agent 应指定目标、原图像素坐标系、中心点和边界框输出格式。HTTP/HTTPS 图片 URL 直接交给轻量模型；沙盒 file:// 绝对路径通过 infra.py 的统一读取边界传入当前 runtime 的显式群号，在当前容器读取 base64 后由 Pillow 校验实际图片格式并生成 data URI。该流程不依赖 `file` 命令或文件扩展名。
-- generate_image 在 Seedream 和兼容图像接口之间选择；有参考图时使用支持参考图的路径，沙盒 `file://` 参考图复用同一个按群读取和字节校验边界，再以 base64 data URI 交给 Ark SDK。
-- generate_video 在 Seedance 1.0 与 1.5 之间选择，轮询供应商任务直至完成或失败。
+- generate_image 使用 SenseNova 图像接口；有参考图时复用同一个按群读取和字节校验边界，再以 data URI 交给图像接口。
 - 白名单群戳一戳时通过 AppleScript 将随机 ACG 图片导出到唯一宿主临时目录，发送后清理该目录；导出失败时也会清理并静默返回。
 - 戳一戳路径先检查 `POKE_GROUP_WHITELIST`；集合外群不导出、不绑定 runtime、不发送。集合内调用直接读取该次宿主导出文件并以 base64 图片发送，成功时按返回的 QQ 消息 ID 缓存同一字节，随后清理宿主导出；失败时静默返回。
 
@@ -691,10 +689,13 @@ graph/tools.py、graph/agents.py、graph/nodes.py 与 handlers/dialogue.py 之�
 | Python 模块 | 职责说明 |
 |---|---|
 | `hatsume/plugins/hatsume-plugin/__init__.py` | 唯一插件入口；初始化记忆与 activated-group 快照并连接 activation callback 和 auto-response；Bot 连接时发现目标群路由后按 activated group 恢复 Timer，断开时移除路由；修补 @ 检测；注册命令、聊天 matcher、戳一戳与新成员事件。 |
-| hatsume/plugins/hatsume-plugin/config.py | 加载 .env.prod；定义机器人身份、模型和供应商配置读取器，以及队列、限流、图片、记忆、Todo、Timer 与 Skill 常量。文档只记录变量名，不记录真实值。 |
+| hatsume/plugins/hatsume-plugin/config.py | 加载 .env.prod；定义机器人身份、非模型服务凭证，以及队列、限流、图片、记忆、Todo、Timer 与 Skill 常量。模型配置改为读取运行数据 YAML。文档只记录变量名，不记录真实值。 |
 | hatsume/plugins/hatsume-plugin/group_runtime.py | 校验正整数群号；提供稳定 GroupRuntimeRegistry、目标群 Bot 发现/绑定、当前可路由群快照、task-local 绑定、每群图锁和全部群关机清理。 |
 | hatsume/plugins/hatsume-plugin/state.py | 定义带必需 group_id 的 ConversationState；每个 runtime 各自拥有 chat_peers、idle/pending/human 队列、图任务、限流时间、回复回调和记录上下文；并持有 chat_peers 键格式的唯一实现 peer_session_id()。 |
-| hatsume/plugins/hatsume-plugin/models.py | 修补 LangChain OpenAI 消息转换以保留 reasoning_content 与 thought_signature；按运行时 ADVANCE_MODEL_NAME 创建高级模型，并创建轻量、迷你、代码模型和 Embedding；封装图片与视频供应商。 |
+| hatsume/plugins/hatsume-plugin/models.py | 修补 LangChain OpenAI 消息转换以保留 reasoning_content 与 thought_signature；保留各角色工厂函数入口，按 YAML 配置创建聊天、System One、Embedding 与 SenseNova 图片客户端。 |
+| hatsume/plugins/hatsume-plugin/model_config.py | 校验 providers.yml 与 models.yml、读取独立快照、脱敏查询、串行化更新并原子写入 0600 文件；不依赖 NoneBot 或模型 SDK。 |
+| hatsume/plugins/hatsume-plugin/model_factory.py | 明确选择 OpenAI Chat Completions、Responses 或 Google GenAI SDK；按 API 转换选项并创建 Embedding。 |
+| hatsume/plugins/hatsume-plugin/model_commands.py | /model 与 /provider 的解析、持久化配置和聊天 API 检查；聊天命令不接受 Key 参数。 |
 | hatsume/plugins/hatsume-plugin/prompts.py | 保存角色、Skill、Agent 状态、辅助上下文压缩、表情、结束检测、记忆、Todo、角色代理、编码 Agent、自动任务和后台 Shell Prompt。 |
 | hatsume/plugins/hatsume-plugin/character_proxy.py | 解析当前 runtime 的 RAM 代理和超时；生成群内记忆画像、匹配正文称呼，并通过该群 ConversationState 激活 peer。 |
 | hatsume/plugins/hatsume-plugin/infra.py | 在当前容器以 `/work` 为工作目录、`/root` 为 home 执行 Shell 和本地文件复制；按群管理前后台进程、日志、stdin、超时、引用计数与延迟逻辑停用。 |
@@ -848,7 +849,7 @@ config.py 会在本地加载 .env.prod，但公开仓库不提供该文件或任
 - Bot 与权限：BOT_QQ_ID、ADMIN_QQ_ID、AGENT_QQ_EMAIL。
 - 自动回复群黑名单：AUTO_RESPONSE_GROUP_BLACKLIST；戳一戳群集合：POKE_GROUP_WHITELIST。
 - Agent 仓库身份：GITHUB_ACCOUNT、GITHUB_REPO。
-- 模型与媒体供应商：ARK_PLAN_API_KEY、ARK_API_KEY、SILICONFLOW_API_KEY、OPENCODE_API_KEY、KEGEAI_API_KEY、ZHTH_API_KEY、PIXELS_API_KEY。
+- 模型与媒体供应商：`data/hatsume-plugin/providers.yml` 中的连接与 API Key，以及 `models.yml` 中的角色选择；`PIXELS_API_KEY` 仍用于 Pexels 图片搜索。
 - NoneBot 与 OneBot 连接配置，例如 DRIVER、LOCALSTORE_USE_CWD、ONEBOT_ACCESS_TOKEN。
 
 身份和群号未配置时使用空字符串或 0，只用于让导入、静态检查和离线测试保持可执行，不代表可用的生产默认值。文档、测试和示例不得写入真实凭证或私人 QQ 标识。

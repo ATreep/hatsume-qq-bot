@@ -1,15 +1,9 @@
-"""Model factory functions for LLM, embedding, image, and video generation."""
+"""Model factory functions for LLM, embedding, and image generation."""
 
 from __future__ import annotations
 
 import asyncio
-import base64
-import os
-import random
-import tempfile
-import time
-from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any, Literal, Optional
+from typing import Any, Literal
 
 import requests
 
@@ -19,44 +13,10 @@ import requests
 import langchain_core.messages as _lc_messages
 import langchain_openai.chat_models.base as _openai_base
 from langchain_core.language_models import BaseChatModel
-from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-from openai import OpenAI
-from volcenginesdkarkruntime import Ark
 
-from . import config as _config
-from .config import (
-    ALI_BASE_URL,
-    CODING_MODEL_NAME,
-    MERCURY_DECISION,
-    OPENCODE_API_KEY,
-    OPENCODE_ZEN_BASE_URL,
-    OPENROUTER_API_KEY,
-    OPENROUTER_BASE_URL,
-    PROVIDER,
-    QWEN_3_7_FLASH,
-    ALI_API_KEY,
-    EMBEDDING_MODEL,
-    GROK_IMAGINE_IMAGE,
-    KEGEAI_API_KEY,
-    KEGEAI_BASE_URL,
-    LITE_MODEL_NAME,
-    SEEDANCE_1_0,
-    SEEDANCE_1_5,
-    SEEDREAM_4_0,
-    SENSENOVA_API_KEY,
-    SENSENOVA_BASE_URL,
-    SENSENOVA_U1_5_LITE,
-    JEV_1_13,
-    VOLCENGINE_BASE_URL,
-    WAWAPI_IMAGE_API_KEY,
-    _get_int_env,
-    get_api_key,
-    get_base_url,
-)
-
-if TYPE_CHECKING:
-    from langchain_core.messages import BaseMessage
+from .model_config import get_model_config_store
+from .model_factory import create_embedding_model, get_model
 
 _orig_convert_dict = _openai_base._convert_dict_to_message
 _orig_convert_msg = _openai_base._convert_message_to_dict
@@ -102,142 +62,48 @@ _openai_base._convert_message_to_dict = _patched_convert_msg
 
 ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"]
 
-REASONING_BUDGETS: dict[ReasoningEffort, int] = {
-    "none": 0,
-    "minimal": 128,
-    "low": 1024,
-    "medium": 2048,
-    "high": 4096,
-    "xhigh": 8192,
-    "max": 24576,
-}
-
-def calculate_thinking_budget(
-    reasoning_effort: ReasoningEffort | None,
-) -> int | None:
-    """Map provider-agnostic reasoning labels to Gemini ``thinking_budget``."""
-    if reasoning_effort is None:
-        return None
-    return REASONING_BUDGETS.get(reasoning_effort, 0)
-
-
-def get_volcengine_api_model(
-    model_name: str,
-    thinking: bool = True,
-    effort_enable: bool = True,
-    temperature: float = 2,
-) -> ChatOpenAI:
-    return ChatOpenAI(
-        base_url=get_base_url("volc_plan") + "/v3",
-        model=model_name,
-        api_key=get_api_key("volc_plan"),
-        temperature=temperature,
-        extra_body={"thinking": {"type": "enabled" if thinking else "disabled"}},
-        reasoning_effort="high" if thinking and effort_enable else None,
-    )
-
-def get_openai_api_model(
-    model_name: str,
-    reasoning_effort: ReasoningEffort | None = "high",
-    base_url: str = get_base_url(),
-    api_key = get_api_key(),
-    extra_body: Optional[dict[str, Any]] = {"thinking": {"type": "enabled"}},
-    is_response = True
-) -> ChatOpenAI:
-    return ChatOpenAI(
-        base_url=base_url + "/v1",
-        model=model_name,
-        api_key=api_key,
-        reasoning_effort=reasoning_effort if not is_response else None,
-        reasoning={"effort": reasoning_effort} if is_response else None,
-        extra_body=extra_body,
-        output_version="response/v1" if is_response else "v1",
-    )
-
-def get_google_api_model(
-    model_name: str,
-    reasoning_effort: ReasoningEffort = "low",
-) -> ChatGoogleGenerativeAI:
-    return ChatGoogleGenerativeAI(
-        base_url=get_base_url(),
-        model=model_name,
-        api_key=get_api_key()(),
-        thinking_budget=calculate_thinking_budget(reasoning_effort),
-    )
-
-def get_standard_api_model(
-    model_name: str,
-    reasoning_effort: ReasoningEffort = "low",
-) -> BaseChatModel:
-    """Create the standard chat model."""
-    return get_openai_api_model(
-        model_name,
-        reasoning_effort=reasoning_effort,
-        is_response=True,
-        extra_body=None,
-        # extra_body={"enable_thinking": True}, # for Ali provider only
-    )
-    # return get_google_api_model(
-    #     model_name,
-    #     reasoning_effort=reasoning_effort,
-    # )
-
 def get_advance_model(
     thinking: bool = True,
-    reasoning_effort: ReasoningEffort = "xhigh",
+    reasoning_effort: ReasoningEffort | None = None,
 ) -> BaseChatModel:
-    model_name = _config.ADVANCE_MODEL_NAME
-    provider = PROVIDER
-    print(f"⚡ Using {model_name} via provider '{provider}' for advance model")
-    effective_effort = reasoning_effort if thinking else "none"
-    return get_standard_api_model(
-        model_name,
-        reasoning_effort=effective_effort,
-    )
+    return get_model("advance", thinking=thinking, reasoning_effort=reasoning_effort)
 
 
 def get_lite_model() -> BaseChatModel:
-    return get_standard_api_model(LITE_MODEL_NAME, reasoning_effort="medium")
+    return get_model("lite")
+
 
 def get_mini_model() -> BaseChatModel:
-    return get_standard_api_model(LITE_MODEL_NAME, reasoning_effort="low")
+    return get_model("mini")
 
 
 def get_view_image_model() -> BaseChatModel:
-    """Create the dedicated vision model used by ``view_image``."""
-    return get_mini_model()
+    return get_model("vision")
+
 
 def get_typesafe_model() -> BaseChatModel:
+    """Build the transport for the separate System One /decisions API."""
+    settings = get_model_config_store().resolve("systemone")
     return ChatOpenAI(
-            base_url=OPENROUTER_BASE_URL,
-            model=MERCURY_DECISION,
-            api_key=OPENROUTER_API_KEY,
-        )
+        base_url=settings["base_url"], model=settings["model"],
+        api_key=settings["api_key"], use_responses_api=False,
+    )
 
 
 def get_jev_model() -> BaseChatModel:
-    """Backward-compatible name for the TypeSafe-compatible intent model."""
     return get_typesafe_model()
 
 
 def get_intent_model() -> BaseChatModel:
     return get_jev_model()
 
-def get_code_model(reasoning_effort: ReasoningEffort = "high") -> BaseChatModel:
-    return get_standard_api_model(CODING_MODEL_NAME, reasoning_effort=reasoning_effort)
 
-
-def choose_video_model() -> Literal["1.0", "1.5"]:
-    return "1.5" if random.random() < 0.5 else "1.0"
+def get_code_model(reasoning_effort: ReasoningEffort | None = None) -> BaseChatModel:
+    return get_model("coding", reasoning_effort=reasoning_effort)
 
 
 def get_embedding_model() -> OpenAIEmbeddings:
-    return OpenAIEmbeddings(
-        base_url=get_base_url("sf") + "/v1",
-        model=EMBEDDING_MODEL,
-        api_key=get_api_key("sf"),
-        chunk_size=32,
-    )
+    return create_embedding_model(get_model_config_store().resolve("embedding"))
 
 
 async def _resolve_image_srcs(images: list[str]) -> list[str]:
@@ -245,7 +111,7 @@ async def _resolve_image_srcs(images: list[str]) -> list[str]:
 
     URLs (http://, https://) and existing data URIs pass through unchanged.
     Sandbox file URIs and absolute Unix paths are read from the Docker sandbox
-    and converted to base64 data URIs with a detected MIME type for Ark.
+    and converted to base64 data URIs with a detected MIME type.
     """
     from .group_runtime import get_current_group_id
     from .infra import read_sandbox_image_data_uri
@@ -267,99 +133,18 @@ async def _resolve_image_srcs(images: list[str]) -> list[str]:
             resolved.append(src)
     return resolved
 
-async def generate_image_for_openai(
-    prompt: str,
-    images: list[str],
-    base_url: str = get_base_url("waw") + "/v1",
-    api_key: str = WAWAPI_IMAGE_API_KEY,
-) -> str:
-    """Generate an image and save it in the current group's sandbox."""
-    client = OpenAI(base_url=base_url, api_key=api_key)
-    images = await _resolve_image_srcs(images)
-    if len(images) > 0:
-        result = client.images.edit(
-            model="gpt-image-2",
-            prompt=prompt,
-            image=images,  # type: ignore[arg-type]
-        )
-    else:
-        # No input images: create from prompt
-        result = client.images.generate(
-            model="gpt-image-2",
-            prompt=prompt,
-        )
-
-    if not result.data or not result.data[0].b64_json:
-        raise ValueError("OpenAI image response missing base64 data")
-
-    b64_json = result.data[0].b64_json
-    image_bytes = base64.b64decode(b64_json)
-
-    from .group_runtime import get_current_group_id
-    from .infra import copy_host_file_to_sandbox
-
-    sandbox_path = f"/tmp/generate-img-{time.time_ns()}.png"
-    temporary_path: str | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            prefix="hatsume-generate-img-",
-            suffix=".png",
-            delete=False,
-        ) as temporary_file:
-            temporary_file.write(image_bytes)
-            temporary_path = temporary_file.name
-
-        await copy_host_file_to_sandbox(
-            temporary_path,
-            sandbox_path,
-            group_id=get_current_group_id(),
-        )
-    finally:
-        if temporary_path is not None:
-            os.unlink(temporary_path)
-
-    return sandbox_path
-
-
-async def generate_image_for_volc(
-    prompt: str,
-    images: list[str],
-) -> str:
-    """Generate image via Seedream. Returns HTTP URL."""
-    images = await _resolve_image_srcs(images)
-    client = Ark(base_url=get_base_url("volc") + "/v3", api_key=get_api_key("volc")())
-
-    model_name = SEEDREAM_4_0
-
-    response = client.images.generate(
-        model=model_name,
-        prompt=prompt,
-        image=images,
-        sequential_image_generation="disabled",
-        response_format="url",
-        size="2K",
-        stream=False,
-        watermark=False,
-    )
-
-    img_url = response.data[0].url
-    assert img_url.startswith("http")
-    return img_url
-
-
 async def generate_image_for_sensenova(
     prompt: str,
     images: list[str] | None = None,
     *,
-    model: str = SENSENOVA_U1_5_LITE,
+    model: str | None = None,
 ) -> str:
     """Generate or edit an image via SenseNova and return its temporary URL."""
-    if not SENSENOVA_API_KEY:
-        raise ValueError("SENSENOVA_API_KEY is not configured")
+    settings = get_model_config_store().resolve("image_sensenova")
 
     image_sources = await _resolve_image_srcs(images or [])
     payload: dict[str, Any] = {
-        "model": model,
+        "model": model or settings["model"],
         "prompt": prompt,
         "n": 1,
         "size": "auto",
@@ -373,8 +158,8 @@ async def generate_image_for_sensenova(
 
     response = await asyncio.to_thread(
         requests.post,
-        f"{SENSENOVA_BASE_URL.rstrip('/')}/images/{endpoint}",
-        headers={"Authorization": f"Bearer {SENSENOVA_API_KEY}"},
+        f"{settings['base_url'].rstrip('/')}/images/{endpoint}",
+        headers={"Authorization": f"Bearer {settings['api_key']}"},
         json=payload,
         timeout=300,
     )
@@ -384,94 +169,3 @@ async def generate_image_for_sensenova(
     if not isinstance(image_url, str) or not image_url.startswith(("http://", "https://")):
         raise ValueError("SenseNova image response missing URL")
     return image_url
-
-def generate_image_for_kege(
-    prompt: str,
-    aspect_ratio: str = "1:1",
-    resolution: str = "1k",
-    base_url: str = KEGEAI_BASE_URL,
-    api_key: str = KEGEAI_API_KEY,
-) -> str:
-    """Generate image via grok-imagine-image. Returns image URL."""
-    import requests as _requests
-
-
-    payload: dict = {
-        "model": GROK_IMAGINE_IMAGE,
-        "prompt": prompt,
-        "aspect_ratio": aspect_ratio,
-        "resolution": resolution,
-        "response_format": "url",
-    }
-
-    resp = _requests.post(
-        f"{base_url}/v1/images/generations",
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        json=payload,
-        timeout=120,
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    img_url: str = data["data"][0]["url"]
-    assert img_url.startswith("http")
-    return img_url
-
-
-
-
-async def generate_video_for(
-    video_prompt: str,
-    image_url: Optional[str],
-    duration: Literal[10, 15, 20, 25] = 10,
-    model: Literal["1.0", "1.5"] = "1.5",
-    poll_interval: int = 5,
-    max_wait_time: int = 1200,
-) -> Optional[str]:
-    """Generate video via Seedance. Returns URL or None on failure."""
-    client = Ark(base_url=VOLCENGINE_BASE_URL, api_key=os.environ.get("ARK_API_KEY"))
-
-    content: list[dict[str, Any]] = [{"type": "text", "text": video_prompt}]
-    if image_url:
-        content.append({"type": "image_url", "image_url": {"url": image_url}})
-
-    model_name = SEEDANCE_1_0 if model == "1.0" else SEEDANCE_1_5
-    try:
-        print(f"✅ 提交视频生成任务，模型：{model_name}")
-        task = client.content_generation.tasks.create(
-            model=model_name,
-            content=content,  # type: ignore[arg-type]
-            ratio="16:9",
-            duration=duration,
-            watermark=False,
-            generate_audio=True,
-        )
-
-        task_id = task.id
-        print(f"✅ 任务提交成功，任务ID：{task_id}")
-
-        start_time = time.time()
-        while True:
-            if time.time() - start_time > max_wait_time:
-                print(f"❌ 任务超时（{max_wait_time}秒）")
-                return None
-
-            task_status = client.content_generation.tasks.get(task_id=task_id)
-            status = task_status.status
-
-            if status == "succeeded":
-                video_url = task_status.content.video_url
-                print(f"🎉 视频生成完成！时长：{duration}秒")
-                return video_url
-
-            if status == "failed":
-                print(f"❌ 生成失败：{task_status.error}")
-                return None
-
-            await asyncio.sleep(poll_interval)
-
-    except Exception as e:
-        print(f"❌ 执行异常：{str(e)}")
-        return None

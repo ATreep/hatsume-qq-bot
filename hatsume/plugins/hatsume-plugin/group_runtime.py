@@ -39,7 +39,6 @@ class GroupRuntime:
     last_was_auxiliary_only: bool = False
     last_was_system_trigger: bool = False
 
-    generate_video_used: bool = False
     send_text_count: int = 0
     send_image_count: int = 0
     send_video_count: int = 0
@@ -55,8 +54,6 @@ class GroupRuntime:
     mcp_active_tools: list[Any] = field(default_factory=list)
     agent_tasks: set[asyncio.Task[Any]] = field(default_factory=set)
 
-    is_video_rate_limited_callback: Any = None
-    update_video_time_callback: Any = None
     is_generate_image_rate_limited_callback: Any = None
     update_generate_image_time_callback: Any = None
     end_conversation_callback: Any = None
@@ -68,8 +65,6 @@ class GroupRuntime:
 
     def reset_tool_callbacks(self) -> None:
         state = self.conversation
-        self.is_video_rate_limited_callback = state.is_video_rate_limited
-        self.update_video_time_callback = state.update_video_time
         self.is_generate_image_rate_limited_callback = (
             state.is_generate_image_rate_limited
         )

@@ -204,8 +204,6 @@ def get_current_group_id() -> int | None:
 def configure_tool_callbacks(
     query_user_id: int | None,
     answer_fn: Any = None,
-    is_video_rate_limited: Callable[[], bool] | None = None,
-    update_video_time: Callable[[], None] | None = None,
     is_generate_image_rate_limited: Callable[[], bool] | None = None,
     update_generate_image_time: Callable[[], None] | None = None,
     end_conversation_fn: Callable[[], None] | None = None,
@@ -217,10 +215,6 @@ def configure_tool_callbacks(
     runtime.end_conversation_callback = (
         end_conversation_fn or state.request_end_conversation
     )
-    if is_video_rate_limited is not None:
-        runtime.is_video_rate_limited_callback = is_video_rate_limited
-    if update_video_time is not None:
-        runtime.update_video_time_callback = update_video_time
     if is_generate_image_rate_limited is not None:
         runtime.is_generate_image_rate_limited_callback = is_generate_image_rate_limited
     if update_generate_image_time is not None:
@@ -236,7 +230,6 @@ def configure_agent_notification_callback(cb: Callable[[int, int, str], None]) -
 
 def reset_capture_flag() -> None:
     runtime = get_current_group_runtime()
-    runtime.generate_video_used = False
     runtime.send_text_count = 0
     runtime.send_image_count = 0
     runtime.send_video_count = 0
@@ -1296,53 +1289,6 @@ async def generate_image(prompt: str, image_urls: list[str]) -> str:
         return f"❌ 图片生成失败: {e}"
 
     return result_msg
-
-@tool
-async def generate_video(prompt: str, image_url: str = "") -> str:
-    """
-    AI 视频生成工具。根据文字描述生成短视频（Seedance），并返回视频 URL。
-
-    ## 参数：
-    - prompt: 视频描述，支持中文或英文。描述越详细，生成效果越好。
-    - image_url: 可选，一张参考图片的 URL（HTTP URL 或 base64 data URI）。仅支持单张参考图。
-
-    ## 注意：
-    - 视频生成耗时较长（通常 2-10 分钟），请提醒用户耐心等待
-    - 生成后你必须调用 send_video 工具把返回的 URL 发送给用户，禁止将视频 URL 直接返回给用户
-
-    ## 返回值：
-    返回视频生成状态与临时 URL。
-    """
-    runtime = get_current_group_runtime()
-    from ..models import generate_video_for, choose_video_model
-
-    if runtime.generate_video_used:
-        return "❌ 视频生成工具在本轮对话中已被调用过，禁止重复调用。"
-
-    if runtime.is_video_rate_limited_callback():
-        return "❌ 视频生成请求过于频繁，请稍后再试。"
-
-    print(f"Generate video: {prompt}, image_url: {image_url[:80] if image_url else '(none)'}")
-
-    model = choose_video_model()
-    url = None
-    try:
-        url = await generate_video_for(prompt, image_url=image_url or None, model=model)
-    except Exception as e:
-        print(f"❌ generate_video failed: {e}")
-        traceback.print_exc()
-        return f"❌ 视频生成失败: {e}"
-
-    runtime.update_video_time_callback()
-    runtime.generate_video_used = True
-
-    if url is None:
-        return f"❌ 视频生成失败（模型 Seedance {model} Pro）。"
-
-    _audio_note = "该模型不支持生成声音。" if model == "1.0" else ""
-    note = f"\n{_audio_note}" if _audio_note else ""
-    return f"✅ 视频已生成成功（模型 Seedance {model} Pro）。\n临时 URL：{url}{note}"
-
 
 @tool
 async def shell_executor(shell: str, timeout: int) -> str:
@@ -2733,7 +2679,6 @@ CHAT_TOOLS = [
     search_history_messages,
     view_image,
     generate_image,
-    # generate_video,
     send_text,
     send_image,
     send_video,

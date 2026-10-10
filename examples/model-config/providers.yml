@@ -1,0 +1,19 @@
+schema_version: 1
+providers:
+  openai:
+    base_url: https://api.openai.com/v1
+    api_key: ''
+    supported_apis:
+      - openai_chat_completions
+      - openai_responses
+      - openai_embeddings
+  google:
+    base_url: https://generativelanguage.googleapis.com
+    api_key: ''
+    supported_apis:
+      - google_genai
+  drex:
+    base_url: https://drex.nace.ai
+    api_key: ''
+    supported_apis:
+      - systemone

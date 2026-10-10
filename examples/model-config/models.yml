@@ -1,0 +1,39 @@
+schema_version: 1
+roles:
+  advance:
+    provider: openai
+    api: openai_responses
+    model: gpt-4.1
+    options: {}
+  lite:
+    provider: openai
+    api: openai_chat_completions
+    model: gpt-4.1-mini
+    options: {}
+  mini:
+    provider: openai
+    api: openai_chat_completions
+    model: gpt-4.1-nano
+    options: {}
+  coding:
+    provider: openai
+    api: openai_responses
+    model: gpt-4.1
+    options: {}
+  vision:
+    provider: openai
+    api: openai_responses
+    model: gpt-4.1
+    options: {}
+  systemone:
+    provider: drex
+    api: systemone
+    model: drex-latest
+    options: {}
+  embedding:
+    provider: openai
+    api: openai_embeddings
+    model: text-embedding-3-small
+    options:
+      dimensions: 1024
+      chunk_size: 32

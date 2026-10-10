@@ -59,11 +59,8 @@ class DrexSystemOneTests(unittest.IsolatedAsyncioTestCase):
                 run_name="drex_config_test",
             )
 
-    def test_drex_key_is_only_a_fallback_for_typesafe_key(self):
-        legacy = self.load_config({"DREX_API_KEY": "legacy-secret"})
-        self.assertEqual(legacy["TYPESAFE_API_KEY"], "legacy-secret")
-
-        explicit = self.load_config(
+    def test_model_credentials_are_not_loaded_from_environment(self):
+        config = self.load_config(
             {
                 "DREX_API_KEY": "legacy-secret",
                 "TYPESAFE_API_KEY": "typesafe-secret",
@@ -71,9 +68,9 @@ class DrexSystemOneTests(unittest.IsolatedAsyncioTestCase):
                 "TYPESAFE_DEFAULT_MODEL": "drex-latest",
             }
         )
-        self.assertEqual(explicit["TYPESAFE_API_KEY"], "typesafe-secret")
-        self.assertEqual(explicit["TYPESAFE_BASE_URL"], "https://drex.nace.ai")
-        self.assertEqual(explicit["TYPESAFE_DEFAULT_MODEL"], "drex-latest")
+        self.assertNotIn("TYPESAFE_API_KEY", config)
+        self.assertNotIn("TYPESAFE_BASE_URL", config)
+        self.assertNotIn("TYPESAFE_DEFAULT_MODEL", config)
 
     def questions(self):
         return {

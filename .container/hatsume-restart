@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly RUNTIME_DIR=/run/hatsume
+readonly PID_FILE="${RUNTIME_DIR}/bot.pid"
+readonly RESTART_FILE="${RUNTIME_DIR}/restart.request"
+readonly CONTAINER_NAME="${HATSUME_CONTAINER_NAME:-hatsume-containerization}"
+readonly IN_CONTAINER="${HATSUME_RESTART_IN_CONTAINER:-0}"
+delay_seconds="${HATSUME_RESTART_DELAY_SECONDS:-15}"
+
+if [[ ! "${delay_seconds}" =~ ^[0-9]+$ ]]; then
+    printf 'HATSUME_RESTART_DELAY_SECONDS must be a non-negative integer.\n' >&2
+    exit 2
+fi
+if [[ ! -r "${PID_FILE}" && "${IN_CONTAINER}" != "1" ]]; then
+    if command -v docker >/dev/null 2>&1 \
+        && [[ "$(docker inspect -f '{{.State.Running}}' "${CONTAINER_NAME}" 2>/dev/null || true)" == "true" ]]; then
+        exec docker exec -i \
+            -e HATSUME_RESTART_IN_CONTAINER=1 \
+            -e "HATSUME_RESTART_DELAY_SECONDS=${delay_seconds}" \
+            "${CONTAINER_NAME}" \
+            /work/hatsume/.container/hatsume-restart
+    fi
+    printf 'Hatsume supervisor PID file is unavailable; run this inside the running %s container.\n' \
+        "${CONTAINER_NAME}" >&2
+    exit 1
+fi
+
+bot_pid="$(<"${PID_FILE}")"
+if [[ ! "${bot_pid}" =~ ^[1-9][0-9]*$ ]] || ! kill -0 "${bot_pid}" 2>/dev/null; then
+    printf 'The recorded Hatsume process is not running.\n' >&2
+    exit 1
+fi
+bot_start_time="$(awk '{print $22}' "/proc/${bot_pid}/stat" 2>/dev/null || true)"
+bot_cmdline="$(tr '\0' ' ' < "/proc/${bot_pid}/cmdline" 2>/dev/null || true)"
+if [[ -z "${bot_start_time}" || -z "${bot_cmdline}" ]]; then
+    printf 'The recorded Hatsume process metadata is unavailable.\n' >&2
+    exit 1
+fi
+
+touch "${RESTART_FILE}"
+(
+    nohup setsid bash -c '
+        sleep "$1"
+        pid="$2"
+        expected_start="$3"
+        expected_cmdline="$4"
+        current_start="$(awk '\''{print $22}'\'' "/proc/${pid}/stat" 2>/dev/null || true)"
+        current_cmdline="$(tr '\''\0'\'' '\'' '\'' < "/proc/${pid}/cmdline" 2>/dev/null || true)"
+        if [[ "${current_start}" == "${expected_start}" \
+            && "${current_cmdline}" == "${expected_cmdline}" ]]; then
+            kill -TERM "${pid}" 2>/dev/null || true
+        fi
+    ' _ "${delay_seconds}" "${bot_pid}" "${bot_start_time}" "${bot_cmdline}"
+) >/dev/null 2>&1 < /dev/null &
+
+printf 'Hatsume restart scheduled in %s seconds.\n' "${delay_seconds}"

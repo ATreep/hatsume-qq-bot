@@ -770,8 +770,6 @@ async def start_new_conversation(
             configure_tools_fn(
                 user_id,
                 answer_fn=ai_callback,
-                is_video_rate_limited=conv_state.is_video_rate_limited,
-                update_video_time=conv_state.update_video_time,
                 is_generate_image_rate_limited=conv_state.is_generate_image_rate_limited,
                 update_generate_image_time=conv_state.update_generate_image_time,
                 end_conversation_fn=conv_state.request_end_conversation,
