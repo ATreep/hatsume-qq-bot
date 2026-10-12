@@ -106,6 +106,34 @@ def _wrap_tool_ainvoke(tool_obj: Any) -> Any:
         return tool_obj
 
     _original_ainvoke = tool_obj.ainvoke
+    original_coroutine = getattr(tool_obj, "coroutine", None)
+    original_func = getattr(tool_obj, "func", None)
+    if original_coroutine is not None:
+        async def recorded_call(*args: Any, **kwargs: Any) -> Any:
+            from .agents import begin_agent_tool_record, end_agent_tool_record
+            event = begin_agent_tool_record(tool_obj.name, args, kwargs)
+            try:
+                result = await original_coroutine(*args, **kwargs)
+            except BaseException as exc:
+                if event is not None:
+                    event["error"] = f"{type(exc).__name__}: {exc}"
+                raise
+            end_agent_tool_record(event, result)
+            return result
+        object.__setattr__(tool_obj, "coroutine", recorded_call)
+    if original_func is not None:
+        def recorded_sync_call(*args: Any, **kwargs: Any) -> Any:
+            from .agents import begin_agent_tool_record, end_agent_tool_record
+            event = begin_agent_tool_record(tool_obj.name, args, kwargs)
+            try:
+                result = original_func(*args, **kwargs)
+            except BaseException as exc:
+                if event is not None:
+                    event["error"] = f"{type(exc).__name__}: {exc}"
+                raise
+            end_agent_tool_record(event, result)
+            return result
+        object.__setattr__(tool_obj, "func", recorded_sync_call)
 
     async def _logged_ainvoke(input_data: Any, *args: Any, **kwargs: Any) -> Any:
         args_str = _format_tool_input(input_data)
@@ -1295,7 +1323,8 @@ async def shell_executor(shell: str, timeout: int) -> str:
     """
     在 Ubuntu Linux GUI 沙盒中执行 bash shell（当前工作目录 pwd 为 /work，~ 为 /root），并返回输出结果。
     如果你是初芽，当你需要操作桌面或 Chrome 时必须派发 sandbox_computer_use；该 Agent 可使用 GUI/CDP 工具。
-    timeout 为正整数秒，超过该时长会强制终止命令。
+    timeout 为正整数秒，超过该时长会强制终止命令；chat_agent 默认最多允许 60 秒，
+    coding_agent 不受该 60 秒限制。
 
     ## 约束：
     - 此工具无法执行交互式命令，如安装包时必须使用 `apt install -y` 或 `apt install --assume-yes`。
@@ -2439,7 +2468,8 @@ _AGENT_LIST_STR = "\n".join(
 )
 
 
-@tool(description=f"""将特定任务分配给 Subagent 后台执行。Subagent 完成任务后只会把结果返回给你，不具备向用户发送文字、图片、视频、声音或文件的能力；由你在任务完成后调用发送类工具告知用户。
+@tool(description=f"""将特定任务分配给 Subagent 后台执行。
+Subagent 完成任务后只会把结果返回给你，不具备向用户发送文字、图片、视频、声音或文件的能力；由你在任务完成后调用发送类工具告知用户。
     ## 注意
     - 禁止创建多个重复任务的 agent。
     - 派发 Agents 后，禁止sleep等待后台agents完成。
@@ -2477,6 +2507,7 @@ async def agent_dispatch(
         set_agent_state,
         track_agent_task,
         untrack_agent_task,
+        finish_agent_history,
     )
     import time as _time
 
@@ -2509,16 +2540,17 @@ async def agent_dispatch(
 
     async def _run_and_notify() -> None:
         with bind_group_runtime(runtime):
-            notified_user_name = await _resolve_notified_user_name(
-                notified_user_id, group_id
-            )
-            set_agent_state(
-                agent_name,
-                group_id=group_id,
-                instance_id=instance_id,
-                user_name=notified_user_name,
-            )
+            notified_user_name = None
             try:
+                notified_user_name = await _resolve_notified_user_name(
+                    notified_user_id, group_id
+                )
+                set_agent_state(
+                    agent_name,
+                    group_id=group_id,
+                    instance_id=instance_id,
+                    user_name=notified_user_name,
+                )
                 with bind_agent_instance(instance_id):
                     result = await handler(task, notified_user_id)
             except asyncio.CancelledError:
@@ -2541,6 +2573,7 @@ async def agent_dispatch(
                 status="done",
                 result=result,
             )
+            finish_agent_history(instance_id, result)
             untrack_agent_task(instance_id)
 
             from .nodes import inject_agent_notification
@@ -2549,7 +2582,7 @@ async def agent_dispatch(
                     user_id=notified_user_id,
                     group_id=group_id,
                     agent_name=agent_name,
-                    result=result,
+                    result=f"Agent ID: {instance_id}\n{result}",
                     task=task,
                     context=context,
                     notified_user_name=notified_user_name,
@@ -2562,7 +2595,59 @@ async def agent_dispatch(
     runtime.agent_tasks.add(agent_task)
     agent_task.add_done_callback(runtime.agent_tasks.discard)
     track_agent_task(instance_id, group_id, agent_task)
-    return f"✅ Agent '{agent_name}' 开始执行任务，任务完成后将通知你。"
+    return f"✅ Agent '{agent_name}' 开始执行任务，Agent ID: {instance_id}，任务完成后将通知你。"
+
+
+@tool
+async def agent_work_history(agent_id: str, length: Annotated[int, Field(strict=True)] = 5) -> str:
+    """查看指定 Agent 的工具调用、返回值和输出。
+    仅当用户主动好奇某个Agent的执行过程或者Agent的运行进展时调用此工具。请你避免擅自调用。
+    如果你的目的是查看Agent的当前运行进展，建议使用 length=5。
+    length=-1 查看全部，正整数查看最新指定条数。
+    该工具用于查询已长时间运行Agent的进度如何，以及回顾已结束运行的Agent。
+    Agent完成任务后会自动提醒你，请不要将此工具作为Agent执行探针，频繁调用检测Agent完成进度。"""
+    from .agents import get_agent_history, _AGENT_STATES
+    runtime = get_current_group_runtime()
+    owned = any(s.get("instance_id") == agent_id and s.get("group_id") == runtime.group_id for states in _AGENT_STATES.values() for s in states)
+    if not owned:
+        return "错误：Agent ID 不存在或不属于当前群。"
+    if length != -1 and length <= 0:
+        return "错误：length 必须为 -1 或正整数。"
+    records = get_agent_history(agent_id, length)
+    if records is None:
+        return "错误：该 Agent 历史已被淘汰。"
+    runtime.conversation.checked_agent_ids.add(agent_id)
+    return json.dumps(records, ensure_ascii=False, default=str)
+
+
+@tool
+async def agent_history_list() -> str:
+    """列出所有正在运行或已完成运行的Agent元信息。最多只显示最新被分发的5个Agent。"""
+    from .agents import list_agent_history, _AGENT_STATES
+    group_id = get_current_group_runtime().group_id
+    owned = {s.get("instance_id") for states in _AGENT_STATES.values() for s in states if s.get("group_id") == group_id}
+    return json.dumps([entry for entry in list_agent_history() if entry["agent_id"] in owned], ensure_ascii=False)
+
+
+@tool
+async def agent_stop(agent_id: str) -> str:
+    """强制停止当前群正在运行的 Agent 并回收运行状态。"""
+    from .agents import get_running_instances, _agent_tasks
+    runtime = get_current_group_runtime()
+    instance = next((s for s in get_running_instances(runtime.group_id) if s.get("instance_id") == agent_id), None)
+    tracked = _agent_tasks.get(agent_id)
+    if instance is None or tracked is None or tracked[1].done():
+        return "错误：该 Agent 没有运行。"
+    if agent_id not in runtime.conversation.checked_agent_ids:
+        return "错误：必须先在本轮 conversation 调用 agent_work_history 查看该 Agent 最新进展，再决定是否停止。"
+    tracked[1].cancel()
+    await asyncio.gather(tracked[1], return_exceptions=True)
+    from .agents import untrack_agent_task
+    untrack_agent_task(agent_id)
+    instance["status"] = "cancelled"
+    instance.pop("result", None)
+    runtime.agent_tasks.discard(tracked[1])
+    return f"已停止 Agent {agent_id} 并回收运行状态。"
 
 
 @tool
@@ -2704,6 +2789,9 @@ CHAT_TOOLS = [
     delete_hook,
     membersearch,
     agent_dispatch,
+    agent_work_history,
+    agent_history_list,
+    agent_stop,
     respond_to_shell_prompt,
     create_character_proxy,
     terminate_character_proxy,

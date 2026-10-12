@@ -796,6 +796,7 @@ async def start_new_conversation(
                 set_current_query_user_id(user_id)
 
             conv_state.is_graph_running = True
+            conv_state.checked_agent_ids.clear()
 
             async def _invoke_graph() -> None:
                 with bind_group_runtime(runtime):

@@ -25,8 +25,9 @@
    - 选择 `open_webpage`：启动一次受限 LLM 分支，使用轻量模型和一次
      `chrome_open` 工具调用；分支可获得同样的桌面/Chrome上下文，工具返回后立即结束
      该 LLM 分支，然后进入 Step 4。
-   - 选择 `finish_report`：启动受限 LLM 分支，用截图和 `view_image` 生成最终报告并结束；
-     如果当前窗口列表包含 Chrome，同时将当前标签页的 `chrome_inspect` 提供给该 LLM。
+   - 选择 `finish_report`：不调用 LLM 或 `view_image`；直接返回完整逐轮记录、最后一次
+     `gui_screenshot` 截图与 `gui_inspect`、`chrome_inspect` 元素检查结果，交给 chat_agent。
+     最终检查失败时附加错误信息，保留已完成的逐轮记录。
    - Jev 返回非法选项时进入 `jev_fallback` 受限 LLM 分支；分支失败按外层错误处理。
 
 3. **Step 3：检查选中窗口并选择目标操作**。
@@ -47,7 +48,7 @@
      `view_image`、一次 `gui_drag`；视觉分析必须提供拖拽起点和终点坐标，第三次调用完成后
      立即结束该分支，进入 Step 4。不得重复截图、视觉分析或拖拽，也不得调用其他工具。
    - 选择 `wait_before_operation`：记录等待动作，然后进入 Step 4。
-   - 选择 `finish_report`：进入截图报告受限 LLM 分支并结束。
+   - 选择 `finish_report`：直接汇集逐轮记录和最终截图、元素检查并结束，不使用模型总结。
    - 选择元素 ID：再次调用 Jev。原生窗口使用 `native_operation`（`click`、
      `set_text`、`focus_key`、`focus_type`）；Chrome 使用 `chrome_operation`
      （`chrome_click`、`chrome_focus`、`chrome_set_text`；只有可编辑 role 才提供
@@ -72,8 +73,25 @@
    - 如果 Jev 连续 3 个 iteration 选择 `wait_before_operation`，下一轮的 criteria 暂时
      移除该选项；再下一轮恢复该选项。中间任何非 wait 选择都会清零连续计数。
 
+   - 完整报告独立保留每一个 iteration：Step 2 的窗口选择及实际选中窗口，Step 3 的
+     Jev 选择、原生元素 role/name 或 CDP 元素 role/name/attributes（含值），以及
+     受限 LLM 分支输入和实际工具输入。坐标点击不保留该分支 LLM 输入，仅记录
+     “该轮点击了坐标(x,y)的元素”。这些报告记录不受最近 3 轮 Jev 上下文限制。
+
 4. **Step 4：执行操作或等待，然后回到 Step 1**。
    - 记录工具或 LLM 分支结果到 `recent_action`，等待 5 秒，再从 Step 1 重新检查桌面；
      不复用旧的元素 ID 或旧的 inspection。
    - `finish_report` 成功返回会结束 Loop；其他分支继续循环。达到最大迭代次数后，
      必须强制进入 `finish_report` 分支生成最终报告，不直接返回轮次错误。
+
+# Agent ID、历史和停止
+
+- Agent ID 为分发时间戳、进程内递增序号和 Agent 类型的哈希；运行状态与完成通知携带 ID。
+- 全局内存历史按 ID 保存列表：整数分发时间戳、元信息字符串、工具输入/返回或错误、
+  最终输出。中断 Agent 不追加最终输出；仅保留最新分发的至多 5 个 Agent。
+- chat_agent 使用 `agent_work_history(agent_id, length=5)` 查看最新进度；`-1` 返回全部
+  工作记录，正整数返回最后指定条数，始终排除前两项时间戳和元信息。
+- `agent_history_list` 列出当前群仍保留且不在运行的历史 Agent ID、元信息及分发时间。
+- `agent_stop` 仅停止当前群正在运行的 Agent，且本轮 conversation 必须先成功查看
+  相同 ID 的工作历史；取消任务并等待清理完成，释放运行状态。conversation 结束
+  或新图运行开始时清空查看记录，不能使用上一轮的查看记录绕过检查。

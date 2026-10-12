@@ -6,9 +6,12 @@ import asyncio
 import json
 import subprocess
 import uuid
+import hashlib
+import time
 from collections.abc import Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
+from functools import wraps
 from typing import Any, Callable, Coroutine, Iterator, Literal, overload
 
 # Handler: async (task: str, user_id: int) -> str
@@ -24,6 +27,8 @@ def _validate_agent_group_id(group_id: int) -> int:
 # Agent state tracking (in-memory)
 # ---------------------------------------------------------------------------
 _AGENT_STATES: dict[str, list[dict]] = {}
+_AGENT_HISTORY: dict[str, list[Any]] = {}
+_AGENT_DISPATCH_SEQ = 0
 _current_agent_instance_id: ContextVar[str | None] = ContextVar(
     "hatsume_current_agent_instance_id",
     default=None,
@@ -58,15 +63,92 @@ def get_current_agent_instance_id(*, required: bool = True) -> str | None:
 def add_agent_instance(name: str, *, group_id: int, **kwargs: Any) -> str:
     """Create a new agent instance and return its instance_id."""
     resolved_group_id = _validate_agent_group_id(group_id)
-    instance_id = f"{name}_{uuid.uuid4().hex[:8]}"
+    global _AGENT_DISPATCH_SEQ
+    _AGENT_DISPATCH_SEQ += 1
+    stamp = int(time.time())
+    digest = hashlib.sha256(f"{stamp}:{_AGENT_DISPATCH_SEQ}:{name}".encode()).hexdigest()[:16]
+    instance_id = digest
     state: dict[str, Any] = {
         "instance_id": instance_id,
         "name": name,
         "group_id": resolved_group_id,
     }
     state.update(kwargs)
+    state["dispatch_timestamp"] = stamp
+    state["agent_type"] = name
     _AGENT_STATES.setdefault(name, []).append(state)
+    _AGENT_HISTORY[instance_id] = [stamp, json.dumps({"agent_type": name, "task": state.get("task", ""), "context": state.get("context", ""), "notified_user_id": state.get("user_id", 0)}, ensure_ascii=False)]
+    _trim_agent_history()
     return instance_id
+
+
+def _trim_agent_history() -> None:
+    if len(_AGENT_HISTORY) <= 5:
+        return
+    ordered = sorted(_AGENT_HISTORY.items(), key=lambda item: int(item[1][0]))
+    for agent_id, _ in ordered[:-5]:
+        _AGENT_HISTORY.pop(agent_id, None)
+
+
+def record_agent_event(agent_id: str, event: Any) -> None:
+    if agent_id in _AGENT_HISTORY:
+        _AGENT_HISTORY[agent_id].append(event)
+
+
+def finish_agent_history(agent_id: str, result: Any) -> None:
+    record_agent_event(agent_id, {"output": str(result)})
+
+
+def get_agent_history(agent_id: str, length: int = 5) -> list[Any] | None:
+    if isinstance(length, bool) or not isinstance(length, int) or (length != -1 and length <= 0):
+        raise ValueError("length must be -1 or a positive integer")
+    records = _AGENT_HISTORY.get(agent_id)
+    if records is None:
+        return None
+    body = records[2:]
+    return json.loads(json.dumps(body if length == -1 else body[-length:], ensure_ascii=False, default=str))
+
+
+def list_agent_history() -> list[dict[str, Any]]:
+    running = {str(s.get("instance_id")) for s in get_unfinished_agent_instances()}
+    result = []
+    for agent_id, records in sorted(_AGENT_HISTORY.items(), key=lambda item: int(item[1][0]), reverse=True):
+        if agent_id in running:
+            continue
+        result.append({"agent_id": agent_id, "dispatch_timestamp": records[0], "metadata": records[1]})
+    return result
+
+
+def begin_agent_tool_record(name: str, args: Any, kwargs: Any) -> dict[str, Any] | None:
+    agent_id = get_current_agent_instance_id(required=False)
+    if agent_id is None or agent_id not in _AGENT_HISTORY:
+        return None
+    event = {"tool": name, "input": json.loads(json.dumps(
+        {"args": args, "kwargs": kwargs}, ensure_ascii=False, default=str
+    ))}
+    record_agent_event(agent_id, event)
+    return event
+
+
+def end_agent_tool_record(event: dict[str, Any] | None, result: Any) -> None:
+    if event is not None:
+        event["result"] = json.loads(json.dumps(result, ensure_ascii=False, default=str))
+
+
+def record_sync_agent_tool(function: Callable[..., Any]) -> Callable[..., Any]:
+    """Record background-shell operations which bypass LangChain tools."""
+    @wraps(function)
+    def recorded(*args: Any, **kwargs: Any) -> Any:
+        event = begin_agent_tool_record(function.__name__, args, kwargs)
+        try:
+            result = function(*args, **kwargs)
+        except BaseException as exc:
+            if event is not None:
+                event["error"] = f"{type(exc).__name__}: {exc}"
+            raise
+        end_agent_tool_record(event, result)
+        return result
+    return recorded
 
 
 def set_agent_state(
@@ -309,6 +391,11 @@ def track_agent_task(
     _agent_tasks[instance_id] = (resolved_group_id, task)
 
     def _forget(done_task: asyncio.Task[Any]) -> None:
+        if done_task.cancelled():
+            for instances in _AGENT_STATES.values():
+                for instance in instances:
+                    if instance.get("instance_id") == instance_id:
+                        instance["status"] = "cancelled"
         current = _agent_tasks.get(instance_id)
         if current is not None and current[1] is done_task:
             _agent_tasks.pop(instance_id, None)
@@ -606,6 +693,12 @@ async def _run_sandbox_computer_use(task: str, user_id: int) -> str:
                     return "该受限 Agent 已经执行过一次工具调用。"
                 if limit_tool_calls:
                     call_state["used"] = True
+                if coordinator.iteration_records:
+                    record = coordinator.iteration_records[-1]
+                    if kind == "screenshot_coordinate_click":
+                        record["coordinate_click"] = f"该轮点击了坐标({kwargs.get('x')},{kwargs.get('y')})的元素"
+                    else:
+                        record.setdefault("llm_tool_inputs", []).append({"branch": kind, "tool": _tool.name, "input": kwargs})
                 return await _tool.ainvoke(kwargs)
 
             limited_tools.append(
@@ -632,9 +725,9 @@ async def _run_sandbox_computer_use(task: str, user_id: int) -> str:
         }.get(kind)
         if branch_instruction:
             llm_state["branch_instruction"] = branch_instruction
-        if context_mode in {"open", "chrome_set_text", "finish_report"}:
+        if context_mode in {"open", "chrome_set_text"}:
             llm_state["screenshot"] = await gui_screenshot.ainvoke({})
-        if context_mode in {"open", "finish_report"}:
+        if context_mode == "open":
             llm_state["gui_inspect"] = await gui_inspect.ainvoke({})
         has_chrome_window = (
             context_mode == "open"
@@ -669,6 +762,8 @@ async def _run_sandbox_computer_use(task: str, user_id: int) -> str:
                 "If branch_instruction is present in the task state, follow it exactly."
             ),
         )
+        if kind != "screenshot_coordinate_click" and coordinator.iteration_records:
+            coordinator.iteration_records[-1].setdefault("llm_inputs", []).append({"branch": kind, "input": llm_state})
         agent_input = {"messages": [HumanMessage(json.dumps(llm_state, ensure_ascii=False))]}
         if stop_after_tool:
             tool_result = await _invoke_agent_until_tool(branch, agent_input)
@@ -777,6 +872,18 @@ async def _run_sandbox_computer_use(task: str, user_id: int) -> str:
         )
 
     async def branch(kind: str, state: dict[str, Any]) -> str:
+        if kind == "finish_report":
+            report = {"task": task, "iterations": state.get("iterations", [])}
+            for key, inspection_tool in (("screenshot", gui_screenshot), ("gui_inspect", gui_inspect)):
+                try:
+                    report[key] = await inspection_tool.ainvoke({})
+                except Exception as exc:
+                    report[key] = {"error": str(exc)}
+            try:
+                report["chrome_inspect"] = await chrome_inspect.ainvoke({})
+            except Exception as exc:
+                report["chrome_inspect"] = {"error": str(exc)}
+            return json.dumps(report, ensure_ascii=False, default=str)
         if kind == "screenshot_coordinate_click":
             return await screenshot_coordinate_click(state)
         if kind == "screenshot_coordinate_drag":
@@ -784,10 +891,9 @@ async def _run_sandbox_computer_use(task: str, user_id: int) -> str:
         tools = {
             "open_application": [gui_launch],
             "open_webpage": [chrome_open],
-            "finish_report": [gui_screenshot, view_image],
             "jev_fallback": [gui_screenshot, view_image],
         }.get(kind, [gui_screenshot, view_image])
-        context_mode = {"open_application": "open", "open_webpage": "open", "finish_report": "finish_report"}.get(kind, "none")
+        context_mode = {"open_application": "open", "open_webpage": "open"}.get(kind, "none")
         model = get_lite_model() if kind in {"open_application", "open_webpage"} else None
         return await bounded(
             kind,
@@ -853,7 +959,7 @@ async def _run_sandbox_computer_use(task: str, user_id: int) -> str:
             chrome_inspect_context=latest_inspection,
         )
 
-    return await SandboxComputerUseCoordinator(
+    coordinator = SandboxComputerUseCoordinator(
         task,
         CoordinatorDeps(
             jev,
@@ -865,7 +971,8 @@ async def _run_sandbox_computer_use(task: str, user_id: int) -> str:
             policy_prompt=SANDBOX_COMPUTER_USE_PROMPT,
         ),
         max_iterations=SANDBOX_COMPUTER_USE_MAX_ITERATIONS,
-    ).run()
+    )
+    return await coordinator.run()
 
 async def _run_coding_agent(task: str, user_id: int) -> str:
     """Execute coding agent task using shell_executor + claude-code-agent skill.
@@ -989,6 +1096,11 @@ async def _run_background_shell(task: str, user_id: int) -> str:
 
     group_id = get_current_group_id()
     instance_id = get_current_agent_instance_id()
+
+    start_background_cmd = record_sync_agent_tool(start_background_cmd)
+    read_background_output = record_sync_agent_tool(read_background_output)
+    kill_background_cmd = record_sync_agent_tool(kill_background_cmd)
+    write_stdin = record_sync_agent_tool(_write_stdin)
 
     # ── Step 1: Parse task with code model ──
     PARSE_PROMPT = """\
@@ -1247,7 +1359,7 @@ Rules:
 
                 if resolution.startswith("FINAL_INPUT:"):
                     final_text = resolution.split(":", 1)[1].strip()
-                    success = _write_stdin(proc, final_text)
+                    success = write_stdin(proc, final_text)
                     if success:
                         last_decision = f"INPUT_SENT:{stdin_description}"
                         check_interval = 15
@@ -1317,7 +1429,7 @@ Rules:
 
                         if resolution.startswith("FINAL_INPUT:"):
                             final_text = resolution.split(":", 1)[1].strip()
-                            _write_stdin(proc, final_text)
+                            write_stdin(proc, final_text)
                             last_decision = f"INPUT_SENT:{stdin_description}"
                             check_interval = 15
                         elif resolution.startswith("KILL"):

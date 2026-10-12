@@ -1464,6 +1464,7 @@ async def finish_conversation_node(state: MessagesState) -> dict:
     _set_graph_running(False)
     _clear_human_queue()
     runtime.conversation.end_requested = False
+    runtime.conversation.checked_agent_ids.clear()
 
     # Container auto-stop is handled by infra's reference counting; finish does
     # not forcefully tear it down here.

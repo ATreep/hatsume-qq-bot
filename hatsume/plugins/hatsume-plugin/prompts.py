@@ -211,7 +211,7 @@ def build_agent_state_prompt() -> str:
             time_str = f"，已运行 {elapsed}s"
         else:
             time_str = ""
-        lines.append(f"- **{name}**: {task}{time_str}")
+        lines.append(f"- **{name}** (Agent ID: {inst.get('instance_id', '')}，状态: {inst.get('status', '')}): {task}{time_str}")
 
     return "\n".join(lines)
 

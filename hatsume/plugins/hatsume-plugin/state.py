@@ -35,6 +35,7 @@ class ConversationState:
     is_chatting: bool = False
     chat_peers: set[str] = field(default_factory=set)
     end_requested: bool = False
+    checked_agent_ids: set[str] = field(default_factory=set)
 
     # Message queues
     idle_queue: list[dict] = field(default_factory=list)
@@ -71,6 +72,7 @@ class ConversationState:
             self.chat_peers.add(session_id)
 
     def end_conversation(self) -> None:
+        self.checked_agent_ids.clear()
         self.is_chatting = False
         self.chat_peers.clear()
         self.end_requested = False

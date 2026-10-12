@@ -47,6 +47,11 @@ class SandboxComputerUseCoordinator:
     step3_llm_result: str | None = None
     step3_history: list[dict[str, Any]] = field(default_factory=list)
 
+    iteration_records: list[dict[str, Any]] = field(default_factory=list)
+
+    async def _finish_report(self, state: dict[str, Any]) -> str:
+        return await self.deps.branch("finish_report", {**state, "iterations": deepcopy(self.iteration_records)})
+
     async def run(self) -> str:
         """Run inspect, route, execute until a report or limit is reached."""
         last_state = self._state(windows=[])
@@ -54,6 +59,7 @@ class SandboxComputerUseCoordinator:
             if self.iteration and not self.wait_selected_this_iteration:
                 self.consecutive_wait_iterations = 0
             self.iteration += 1
+            self.iteration_records.append({"iteration": self.iteration})
             self.wait_option_suppressed = self.suppress_wait_next_iteration
             self.suppress_wait_next_iteration = False
             self.wait_selected_this_iteration = False
@@ -80,6 +86,7 @@ class SandboxComputerUseCoordinator:
                     _window_criteria(windows),
                 )
                 action = answer["choice"]
+                self.iteration_records[-1]["step2"] = {"choice": action, "windows": deepcopy(windows)}
                 print(
                     f"[sandbox_computer_use] iteration={self.iteration} step=2 "
                     f"window_action={action!r} confidence={answer['confidence']:.3f}"
@@ -87,7 +94,7 @@ class SandboxComputerUseCoordinator:
 
                 if action == "finish_report":
                     self._record_non_wait_choice()
-                    return await self.deps.branch("finish_report", state)
+                    return await self._finish_report(state)
                 if action == "open_application":
                     self._record_non_wait_choice()
                     result = await self.deps.branch("open_application", state)
@@ -104,6 +111,7 @@ class SandboxComputerUseCoordinator:
                 window = next(
                     item for item in windows if item["id"] == action
                 )
+                self.iteration_records[-1]["step2"]["selected_window"] = deepcopy(window)
                 if window["kind"] == "chrome":
                     result = await self._handle_chrome(window, inspection)
                 else:
@@ -134,7 +142,7 @@ class SandboxComputerUseCoordinator:
             "forcing finish_report after iteration limit"
         )
         try:
-            return await self.deps.branch("finish_report", forced_state)
+            return await self._finish_report(forced_state)
         except Exception as exc:
             self._record(f"finish_report error: {exc}")
             return self._limit_report()
@@ -182,7 +190,7 @@ class SandboxComputerUseCoordinator:
         if choice == "finish_report":
             self._record_step3_history()
             self._record_non_wait_choice()
-            return await self.deps.branch("finish_report", state)
+            return await self._finish_report(state)
         if choice in {"screenshot_coordinate_click", "screenshot_coordinate_drag"}:
             self._record_non_wait_choice()
             result = await self.deps.branch(choice, state)
@@ -195,6 +203,7 @@ class SandboxComputerUseCoordinator:
             return None
         self._record_non_wait_choice()
         element = _find_element(elements, choice)
+        self.iteration_records[-1]["selected_element"] = {key: deepcopy(element.get(key)) for key in (("role", "name", "attributes") if window["kind"] == "chrome" else ("role", "name"))}
         operation = await self._choose(
             {**state, "selected_element": element},
             "native_operation",
@@ -271,7 +280,7 @@ class SandboxComputerUseCoordinator:
         if choice == "finish_report":
             self._record_step3_history()
             self._record_non_wait_choice()
-            return await self.deps.branch("finish_report", state)
+            return await self._finish_report(state)
         if choice in {"screenshot_coordinate_click", "screenshot_coordinate_drag"}:
             self._record_non_wait_choice()
             result = await self.deps.branch(choice, state)
@@ -284,6 +293,7 @@ class SandboxComputerUseCoordinator:
             return None
         self._record_non_wait_choice()
         element = _find_element(elements, choice)
+        self.iteration_records[-1]["selected_element"] = {key: deepcopy(element.get(key)) for key in (("role", "name", "attributes") if window["kind"] == "chrome" else ("role", "name"))}
         chrome_operations = {
             "chrome_click": "Click the selected Chrome page element.",
             "chrome_focus": "Focus the selected Chrome page element.",
@@ -396,6 +406,8 @@ class SandboxComputerUseCoordinator:
         """Keep the latest Step 3 Jev decisions available to the next choice."""
         choice = str(answer.get("choice", ""))
         confidence = float(answer.get("confidence", 0))
+        if self.iteration_records:
+            self.iteration_records[-1].setdefault("step3", {})[question_id] = choice
         if question_id in {"element_action", "chrome_element_action"}:
             self.step3_decision = {
                 "question_id": question_id,
@@ -433,6 +445,8 @@ class SandboxComputerUseCoordinator:
     def _record(self, result: Any) -> None:
         self.recent_action = _truncate_result(result)
         self.history.append(self.recent_action)
+        if self.iteration_records and "coordinate_click" not in self.iteration_records[-1]:
+            self.iteration_records[-1].setdefault("results", []).append(str(result))
 
     def _record_wait_choice(self) -> None:
         self._record("wait_before_operation")
@@ -453,8 +467,8 @@ class SandboxComputerUseCoordinator:
         await (self.deps.sleep or asyncio.sleep)(5)
 
     def _limit_report(self) -> str:
-        details = "; ".join(self.history[-4:]) or "no action completed"
-        return f"Sandbox computer-use iteration limit reached after {self.iteration} iterations: {details}"
+        return json.dumps({"task": self.task, "iterations": self.iteration_records,
+                           "report_error": self.recent_action}, ensure_ascii=False)
 
 
 def _decode(value: Any) -> Any:
@@ -528,7 +542,7 @@ def _window_criteria(windows: list[dict[str, Any]]) -> dict[str, str]:
     criteria.update({
         "open_application": "Open a new desktop application using the bounded LLM branch.",
         "open_webpage": "Open a new webpage in Chrome using the bounded LLM branch.",
-        "finish_report": "Stop and inspect the current screenshot to write a final report.",
+        "finish_report": "Stop and return the iteration records with a final screenshot and inspection.",
     })
     return criteria
 
@@ -564,7 +578,7 @@ def _element_criteria(
     criteria.update({
         "screenshot_coordinate_click": "Use a screenshot and original-pixel coordinates for the target.",
         "screenshot_coordinate_drag": "Use a screenshot and original-pixel start/end coordinates to drag the target.",
-        "finish_report": "Stop and inspect the current screenshot to write a final report.",
+        "finish_report": "Stop and return the iteration records with a final screenshot and inspection.",
     })
     if include_wait:
         criteria["wait_before_operation"] = (

@@ -54,6 +54,7 @@ class SandboxComputerUseTests(unittest.IsolatedAsyncioTestCase):
         agents_module.set_agent_state = self.set_agent_state
         agents_module.track_agent_task = lambda *_args: None
         agents_module.untrack_agent_task = lambda *_args: None
+        agents_module.finish_agent_history = lambda *_args: None
         self.modules[f"{package}.agents"] = agents_module
 
         nodes_module = ModuleType(f"{package}.nodes")
