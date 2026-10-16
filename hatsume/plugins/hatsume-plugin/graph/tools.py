@@ -1322,7 +1322,7 @@ async def generate_image(prompt: str, image_urls: list[str]) -> str:
 async def shell_executor(shell: str, timeout: int) -> str:
     """
     在 Ubuntu Linux GUI 沙盒中执行 bash shell（当前工作目录 pwd 为 /work，~ 为 /root），并返回输出结果。
-    如果你是初芽，当你需要操作桌面或 Chrome 时必须派发 sandbox_computer_use；该 Agent 可使用 GUI/CDP 工具。
+    如果你是初芽，需要阅读或操作网页时先加载 lightpanda Skill，再派发 coding_agent 执行浏览器任务。
     timeout 为正整数秒，超过该时长会强制终止命令；chat_agent 默认最多允许 60 秒，
     coding_agent 不受该 60 秒限制。
 
@@ -2519,9 +2519,8 @@ async def agent_dispatch(
                 return "该agent正在被其他人占用，请稍后再尝试分发。"
             active_task = str(active_instance.get("task", "")).strip()
             return (
-                "sandbox_computer_use agent 只能单实例运行，禁止并行运行多个 "
-                "sandbox_computer_use agents。\n"
-                f"当前 sandbox_computer_use 任务提示词：{active_task}"
+                "该 Agent 只能单实例运行，禁止并行运行多个实例。\n"
+                f"当前任务提示词：{active_task}"
             )
 
     if has_running_agent_task(agent_name, group_id, task):

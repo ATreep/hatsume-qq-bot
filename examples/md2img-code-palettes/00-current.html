@@ -1,0 +1,1345 @@
+<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width, initial-scale=1"><meta charset="utf-8"><style>/* ═══════════════════════════════════════════════════════════════════════════
+   初芽·樱 — Markdown Theme
+   
+   A warm sakura-inspired theme for 初芽 (Hatsume).
+   Red ponytail → rose accents. JK uniform → dark contrast.
+   Blushes easily → soft pink tones. "Thorny little sun" → warm but crisp.
+   
+   Preserves all selectors from github-markdown-light.css for compatibility
+   with Python markdown's codehilite + tasklist + footnotes extensions.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ---- Base & Reset -------------------------------------------------------- */
+
+.markdown-body {
+  --hm-radius: 24px;
+  -ms-text-size-adjust: 100%;
+  -webkit-text-size-adjust: 100%;
+  margin: 0;
+  color: #4a3340;
+  background-color: #ffeafc;
+  font-family:  "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Helvetica, Arial,
+    sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
+  font-size: 16px;
+  line-height: 1.6;
+  word-wrap: break-word;
+  border-radius: var(--hm-radius);
+  box-shadow:
+    1px 3px 20px rgba(180, 120, 140, 0.08),
+    4px 8px 40px rgba(180, 120, 140, 0.10),
+    0 1px 6px rgba(180, 120, 140, 0.06);
+}
+
+.markdown-body .octicon {
+  display: inline-block;
+  fill: currentColor;
+  vertical-align: text-bottom;
+}
+
+.markdown-body h1:hover .anchor .octicon-link:before,
+.markdown-body h2:hover .anchor .octicon-link:before,
+.markdown-body h3:hover .anchor .octicon-link:before,
+.markdown-body h4:hover .anchor .octicon-link:before,
+.markdown-body h5:hover .anchor .octicon-link:before,
+.markdown-body h6:hover .anchor .octicon-link:before {
+  width: 16px;
+  height: 16px;
+  content: ' ';
+  display: inline-block;
+  background-color: currentColor;
+}
+
+.markdown-body details,
+.markdown-body figcaption,
+.markdown-body figure {
+  display: block;
+}
+
+.markdown-body summary {
+  display: list-item;
+}
+
+.markdown-body [hidden] {
+  display: none !important;
+}
+
+/* ---- Links --------------------------------------------------------------- */
+
+.markdown-body a {
+  background-color: transparent;
+  color: #e6678a;
+  text-decoration: none;
+  transition: color 0.15s ease;
+}
+
+.markdown-body a:active,
+.markdown-body a:hover {
+  outline-width: 0;
+}
+
+.markdown-body a:hover {
+  color: #d4456a;
+  text-decoration: underline;
+}
+
+.markdown-body a:not([href]) {
+  color: inherit;
+  text-decoration: none;
+}
+
+/* ---- Typography ---------------------------------------------------------- */
+
+.markdown-body abbr[title] {
+  border-bottom: none;
+  text-decoration: underline dotted;
+}
+
+.markdown-body b,
+.markdown-body strong {
+  font-weight: 600;
+  color: #3d2a35;
+}
+
+.markdown-body dfn {
+  font-style: italic;
+}
+
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3,
+.markdown-body h4,
+.markdown-body h5,
+.markdown-body h6 {
+  margin-top: 28px;
+  margin-bottom: 18px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.markdown-body h1 {
+  margin: 0.67em 0;
+  padding-bottom: 0.35em;
+  font-size: 2em;
+  color: #d4456a;
+  border-bottom: 2px solid #f5e8ec;
+}
+
+.markdown-body h2 {
+  padding-bottom: 0.3em;
+  font-size: 1.5em;
+  color: #d4456a;
+  border-bottom: 1.5px solid #f5e8ec;
+}
+
+.markdown-body h3 {
+  font-size: 1.25em;
+  color: #4a3340;
+}
+
+.markdown-body h4 {
+  font-size: 1em;
+  color: #4a3340;
+}
+
+.markdown-body h5 {
+  font-size: 0.875em;
+  color: #7a5a6a;
+}
+
+.markdown-body h6 {
+  font-size: 0.85em;
+  color: #7a5a6a;
+  font-style: italic;
+}
+
+.markdown-body mark {
+  background-color: #fff0e8;
+  color: #4a3340;
+  padding: 0.1em 0.2em;
+  border-radius: 3px;
+}
+
+.markdown-body small {
+  font-size: 90%;
+  color: #7a5a6a;
+}
+
+.markdown-body sub,
+.markdown-body sup {
+  font-size: 75%;
+  line-height: 0;
+  position: relative;
+  vertical-align: baseline;
+}
+
+.markdown-body sub {
+  bottom: -0.25em;
+}
+
+.markdown-body sup {
+  top: -0.5em;
+}
+
+.markdown-body p {
+  margin-top: 0;
+  margin-bottom: 12px;
+}
+
+/* ---- Images -------------------------------------------------------------- */
+
+.markdown-body img {
+  border-style: none;
+  max-width: 100%;
+  box-sizing: content-box;
+  border-radius: 8px;
+}
+
+.markdown-body img[align="right"] {
+  padding-left: 20px;
+}
+
+.markdown-body img[align="left"] {
+  padding-right: 20px;
+}
+
+/* ---- Horizontal Rule — decorative --------------------------------------- */
+
+.markdown-body hr {
+  box-sizing: content-box;
+  overflow: hidden;
+  height: 0.25em;
+  padding: 0;
+  margin: 28px 0;
+  background: transparent;
+  border: 0;
+  position: relative;
+}
+
+.markdown-body hr::before {
+  content: "— ♡ —";
+  display: block;
+  text-align: center;
+  color: #e6678a;
+  font-size: 14px;
+  letter-spacing: 4px;
+}
+
+.markdown-body hr::after {
+  display: none;
+}
+
+/* ---- Code (inline) ------------------------------------------------------- */
+
+.markdown-body code,
+.markdown-body kbd,
+.markdown-body pre,
+.markdown-body samp {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    "Liberation Mono", "Fira Code", monospace;
+  font-size: 1em;
+}
+
+.markdown-body tt,
+.markdown-body code {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    "Liberation Mono", "Fira Code", monospace;
+  font-size: 85%;
+  padding: 0.2em 0.45em;
+  margin: 0;
+  background-color: #fdf0f3;
+  color: #b83852;
+  border-radius: 4px;
+}
+
+.markdown-body code br,
+.markdown-body tt br {
+  display: none;
+}
+
+.markdown-body del code {
+  text-decoration: inherit;
+}
+
+.markdown-body pre code {
+  font-size: 100%;
+}
+
+.markdown-body pre > code {
+  padding: 0;
+  margin: 0;
+  word-break: normal;
+  white-space: pre;
+  background: transparent;
+  border: 0;
+  color: inherit;
+}
+
+/* ---- Code Blocks --------------------------------------------------------- */
+
+.markdown-body .highlight {
+  margin-bottom: 18px;
+}
+
+.markdown-body .highlight pre {
+  margin-bottom: 0;
+  word-break: normal;
+}
+
+.markdown-body .highlight pre,
+.markdown-body .codehilite pre,
+.markdown-body pre {
+  padding: 18px;
+  overflow: auto;
+  font-size: 85%;
+  line-height: 1.5;
+  background-color: #2b2428;
+  color: #e8d8dd;
+  border-radius: var(--hm-radius);
+  border: 1px solid #3d343a;
+}
+
+.markdown-body .highlight,
+.markdown-body .codehilite {
+  overflow: hidden;
+  border-radius: var(--hm-radius);
+  background: transparent;
+}
+
+.markdown-body pre code,
+.markdown-body pre tt {
+  display: inline;
+  max-width: auto;
+  padding: 0;
+  margin: 0;
+  overflow: visible;
+  line-height: inherit;
+  word-wrap: normal;
+  background-color: transparent;
+  border: 0;
+  color: inherit;
+}
+
+/* ---- Keyboard ------------------------------------------------------------ */
+
+.markdown-body kbd {
+  display: inline-block;
+  padding: 3px 6px;
+  font: 11px ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    "Liberation Mono", monospace;
+  line-height: 10px;
+  color: #4a3340;
+  vertical-align: middle;
+  background-color: #fdf2f5;
+  border: solid 1px #edd4dc;
+  border-bottom-color: #dcc4cc;
+  border-radius: 5px;
+  box-shadow: inset 0 -1px 0 #edd4dc;
+}
+
+/* ---- Blockquotes — letter-like ------------------------------------------- */
+
+.markdown-body blockquote {
+  margin: 0 0 18px 0;
+  padding: 12px 18px;
+  color: #7a5a6a;
+  background-color: #fef7f9;
+  border-left: 4px solid #d4456a;
+  border-radius: var(--hm-radius);
+}
+
+.markdown-body blockquote > :first-child {
+  margin-top: 0;
+}
+
+.markdown-body blockquote > :last-child {
+  margin-bottom: 0;
+}
+
+/* ---- Lists --------------------------------------------------------------- */
+
+.markdown-body ul,
+.markdown-body ol {
+  margin-top: 0;
+  margin-bottom: 0;
+  padding-left: 2em;
+}
+
+.markdown-body ol ol,
+.markdown-body ul ol {
+  list-style-type: lower-roman;
+}
+
+.markdown-body ul ul ol,
+.markdown-body ul ol ol,
+.markdown-body ol ul ol,
+.markdown-body ol ol ol {
+  list-style-type: lower-alpha;
+}
+
+.markdown-body ul ul,
+.markdown-body ul ol,
+.markdown-body ol ol,
+.markdown-body ol ul {
+  margin-top: 0;
+  margin-bottom: 0;
+}
+
+.markdown-body ul.no-list,
+.markdown-body ol.no-list {
+  padding: 0;
+  list-style-type: none;
+}
+
+.markdown-body ol[type="1"] {
+  list-style-type: decimal;
+}
+
+.markdown-body ol[type="a"] {
+  list-style-type: lower-alpha;
+}
+
+.markdown-body ol[type="i"] {
+  list-style-type: lower-roman;
+}
+
+.markdown-body div > ol:not([type]) {
+  list-style-type: decimal;
+}
+
+.markdown-body li > p {
+  margin-top: 16px;
+}
+
+.markdown-body li + li {
+  margin-top: 0.25em;
+}
+
+.markdown-body dl {
+  padding: 0;
+}
+
+.markdown-body dl dt {
+  padding: 0;
+  margin-top: 16px;
+  font-size: 1em;
+  font-style: italic;
+  font-weight: 600;
+  color: #4a3340;
+}
+
+.markdown-body dl dd {
+  padding: 0 16px;
+  margin-bottom: 16px;
+  margin-left: 0;
+}
+
+/* ---- Tables — soft and rounded ------------------------------------------- */
+
+.markdown-body table {
+  border-spacing: 0;
+  border-collapse: collapse;
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  overflow: auto;
+  margin-bottom: 18px;
+  border-radius: var(--hm-radius);
+  box-shadow: 0 0 0 1px #edd4dc; /* border via shadow for rounded tables */
+}
+
+.markdown-body table th {
+  font-weight: 600;
+  color: #d4456a;
+}
+
+.markdown-body table th,
+.markdown-body table td {
+  padding: 8px 16px;
+  border: 1px solid #edd4dc;
+}
+
+.markdown-body table tr {
+  background-color: #fef9f6;
+  border-top: 1px solid #edd4dc;
+}
+
+.markdown-body table tr:nth-child(2n) {
+  background-color: #fef5f8;
+}
+
+.markdown-body table tr:first-child {
+  background-color: #fdf2f5;
+}
+
+.markdown-body table img {
+  background-color: transparent;
+}
+
+/* ---- Task Lists ---------------------------------------------------------- */
+
+.markdown-body .task-list-item {
+  list-style-type: none;
+}
+
+.markdown-body .task-list-item label {
+  font-weight: 400;
+}
+
+.markdown-body .task-list-item.enabled label {
+  cursor: pointer;
+}
+
+.markdown-body .task-list-item + .task-list-item {
+  margin-top: 3px;
+}
+
+.markdown-body .task-list-item .handle {
+  display: none;
+}
+
+.markdown-body .task-list-item-checkbox {
+  margin: 0 0.2em 0.25em -1.6em;
+  vertical-align: middle;
+  accent-color: #d4456a;
+}
+
+.markdown-body
+  .contains-task-list:dir(rtl)
+  .task-list-item-checkbox {
+  margin: 0 -1.6em 0.25em 0.2em;
+}
+
+/* ---- Footnotes ----------------------------------------------------------- */
+
+.markdown-body .footnotes {
+  font-size: 13px;
+  color: #7a5a6a;
+  border-top: 1.5px solid #edd4dc;
+  margin-top: 32px;
+  padding-top: 16px;
+}
+
+.markdown-body .footnotes ol {
+  padding-left: 16px;
+}
+
+.markdown-body .footnotes li {
+  position: relative;
+}
+
+.markdown-body .footnotes li:target::before {
+  position: absolute;
+  top: -8px;
+  right: -8px;
+  bottom: -8px;
+  left: -24px;
+  pointer-events: none;
+  content: "";
+  border: 2px solid #e6678a;
+  border-radius: 6px;
+}
+
+.markdown-body .footnotes li:target {
+  color: #4a3340;
+}
+
+.markdown-body .footnotes .data-footnote-backref g-emoji {
+  font-family: monospace;
+}
+
+/* ---- Emoji --------------------------------------------------------------- */
+
+.markdown-body .emoji {
+  max-width: none;
+  vertical-align: text-top;
+  background-color: transparent;
+}
+
+.markdown-body g-emoji {
+  font-family: "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol";
+  font-size: 1em;
+  font-style: normal !important;
+  font-weight: 400;
+  line-height: 1;
+  vertical-align: -0.075em;
+}
+
+.markdown-body g-emoji img {
+  width: 1em;
+  height: 1em;
+}
+
+/* ---- Image Frame Spans --------------------------------------------------- */
+
+.markdown-body span.frame {
+  display: block;
+  overflow: hidden;
+}
+
+.markdown-body span.frame > span {
+  display: block;
+  float: left;
+  width: auto;
+  padding: 7px;
+  margin: 13px 0 0;
+  overflow: hidden;
+  border: 1px solid #edd4dc;
+  border-radius: 8px;
+}
+
+.markdown-body span.frame span img {
+  display: block;
+  float: left;
+}
+
+.markdown-body span.frame span span {
+  display: block;
+  padding: 5px 0 0;
+  clear: both;
+  color: #4a3340;
+}
+
+.markdown-body span.align-center {
+  display: block;
+  overflow: hidden;
+  clear: both;
+}
+
+.markdown-body span.align-center > span {
+  display: block;
+  margin: 13px auto 0;
+  overflow: hidden;
+  text-align: center;
+}
+
+.markdown-body span.align-center span img {
+  margin: 0 auto;
+  text-align: center;
+}
+
+.markdown-body span.align-right {
+  display: block;
+  overflow: hidden;
+  clear: both;
+}
+
+.markdown-body span.align-right > span {
+  display: block;
+  margin: 13px 0 0;
+  overflow: hidden;
+  text-align: right;
+}
+
+.markdown-body span.align-right span img {
+  margin: 0;
+  text-align: right;
+}
+
+.markdown-body span.float-left {
+  display: block;
+  float: left;
+  margin-right: 13px;
+  overflow: hidden;
+}
+
+.markdown-body span.float-left span {
+  margin: 13px 0 0;
+}
+
+.markdown-body span.float-right {
+  display: block;
+  float: right;
+  margin-left: 13px;
+  overflow: hidden;
+}
+
+.markdown-body span.float-right > span {
+  display: block;
+  margin: 13px auto 0;
+  overflow: hidden;
+  text-align: right;
+}
+
+/* ---- CSV Data ------------------------------------------------------------ */
+
+.markdown-body .csv-data td,
+.markdown-body .csv-data th {
+  padding: 5px;
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 1;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.markdown-body .csv-data .blob-num {
+  padding: 10px 8px 9px;
+  text-align: right;
+  background: #fef9f6;
+  border: 0;
+}
+
+.markdown-body .csv-data tr {
+  border-top: 0;
+}
+
+.markdown-body .csv-data th {
+  font-weight: 600;
+  background: #fef5f8;
+  border-top: 0;
+}
+
+/* ---- Misc ---------------------------------------------------------------- */
+
+.markdown-body::before {
+  display: table;
+  content: "";
+}
+
+.markdown-body::after {
+  display: table;
+  clear: both;
+  content: "";
+}
+
+.markdown-body > *:first-child {
+  margin-top: 0 !important;
+}
+
+.markdown-body > *:last-child {
+  margin-bottom: 0 !important;
+}
+
+.markdown-body .absent {
+  color: #d4456a;
+}
+
+.markdown-body .anchor {
+  float: left;
+  padding-right: 4px;
+  margin-left: -20px;
+  line-height: 1;
+}
+
+.markdown-body .anchor:focus {
+  outline: none;
+}
+
+.markdown-body p,
+.markdown-body blockquote,
+.markdown-body ul,
+.markdown-body ol,
+.markdown-body dl,
+.markdown-body table,
+.markdown-body pre,
+.markdown-body details {
+  margin-top: 0;
+  margin-bottom: 16px;
+}
+
+.markdown-body sup > a::before {
+  content: "[";
+}
+
+.markdown-body sup > a::after {
+  content: "]";
+}
+
+.markdown-body h1 .octicon-link,
+.markdown-body h2 .octicon-link,
+.markdown-body h3 .octicon-link,
+.markdown-body h4 .octicon-link,
+.markdown-body h5 .octicon-link,
+.markdown-body h6 .octicon-link {
+  color: #4a3340;
+  vertical-align: middle;
+  visibility: hidden;
+}
+
+.markdown-body h1:hover .anchor,
+.markdown-body h2:hover .anchor,
+.markdown-body h3:hover .anchor,
+.markdown-body h4:hover .anchor,
+.markdown-body h5:hover .anchor,
+.markdown-body h6:hover .anchor {
+  text-decoration: none;
+}
+
+.markdown-body h1:hover .anchor .octicon-link,
+.markdown-body h2:hover .anchor .octicon-link,
+.markdown-body h3:hover .anchor .octicon-link,
+.markdown-body h4:hover .anchor .octicon-link,
+.markdown-body h5:hover .anchor .octicon-link,
+.markdown-body h6:hover .anchor .octicon-link {
+  visibility: visible;
+}
+
+.markdown-body h1 tt,
+.markdown-body h1 code,
+.markdown-body h2 tt,
+.markdown-body h2 code,
+.markdown-body h3 tt,
+.markdown-body h3 code,
+.markdown-body h4 tt,
+.markdown-body h4 code,
+.markdown-body h5 tt,
+.markdown-body h5 code,
+.markdown-body h6 tt,
+.markdown-body h6 code {
+  padding: 0 0.2em;
+  font-size: inherit;
+}
+
+/* ---- Forms --------------------------------------------------------------- */
+
+.markdown-body input {
+  font: inherit;
+  margin: 0;
+  overflow: visible;
+  font-family: inherit;
+  font-size: inherit;
+  line-height: inherit;
+  accent-color: #d4456a;
+}
+
+.markdown-body [type="button"],
+.markdown-body [type="reset"],
+.markdown-body [type="submit"] {
+  -webkit-appearance: button;
+}
+
+.markdown-body [type="button"]::-moz-focus-inner,
+.markdown-body [type="reset"]::-moz-focus-inner,
+.markdown-body [type="submit"]::-moz-focus-inner {
+  border-style: none;
+  padding: 0;
+}
+
+.markdown-body [type="button"]:-moz-focusring,
+.markdown-body [type="reset"]:-moz-focusring,
+.markdown-body [type="submit"]:-moz-focusring {
+  outline: 1px dotted #d4456a;
+}
+
+.markdown-body [type="checkbox"],
+.markdown-body [type="radio"] {
+  box-sizing: border-box;
+  padding: 0;
+}
+
+.markdown-body [type="number"]::-webkit-inner-spin-button,
+.markdown-body [type="number"]::-webkit-outer-spin-button {
+  height: auto;
+}
+
+.markdown-body [type="search"] {
+  -webkit-appearance: textfield;
+  outline-offset: -2px;
+}
+
+.markdown-body [type="search"]::-webkit-search-cancel-button,
+.markdown-body [type="search"]::-webkit-search-decoration {
+  -webkit-appearance: none;
+}
+
+.markdown-body ::-webkit-input-placeholder {
+  color: #a09098;
+  opacity: 0.54;
+}
+
+.markdown-body ::-webkit-file-upload-button {
+  -webkit-appearance: button;
+  font: inherit;
+}
+
+.markdown-body ::placeholder {
+  color: #a09098;
+  opacity: 1;
+}
+
+.markdown-body input::-webkit-outer-spin-button,
+.markdown-body input::-webkit-inner-spin-button {
+  margin: 0;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.markdown-body ::-webkit-calendar-picker-indicator {
+  filter: invert(50%);
+}
+
+/* ---- Primer Syntax Classes (GitHub-flavored code highlights) ------------- */
+
+.markdown-body .pl-c {
+  color: #a09098;
+  font-style: italic;
+}
+
+.markdown-body .pl-c1,
+.markdown-body .pl-s .pl-v {
+  color: #d4a0c0;
+}
+
+.markdown-body .pl-e,
+.markdown-body .pl-en {
+  color: #e6678a;
+}
+
+.markdown-body .pl-smi,
+.markdown-body .pl-s .pl-s1 {
+  color: #e8d8dd;
+}
+
+.markdown-body .pl-ent {
+  color: #8cc0a0;
+}
+
+.markdown-body .pl-k {
+  color: #f0a0b8;
+  font-weight: bold;
+}
+
+.markdown-body .pl-s,
+.markdown-body .pl-pds,
+.markdown-body .pl-s .pl-pse .pl-s1,
+.markdown-body .pl-sr,
+.markdown-body .pl-sr .pl-cce,
+.markdown-body .pl-sr .pl-sre,
+.markdown-body .pl-sr .pl-sra {
+  color: #e6b899;
+}
+
+.markdown-body .pl-v,
+.markdown-body .pl-smw {
+  color: #d4a0c0;
+}
+
+.markdown-body .pl-bu {
+  color: #ff8fa0;
+}
+
+.markdown-body .pl-ii {
+  color: #fef9f6;
+  background-color: #b83852;
+}
+
+.markdown-body .pl-c2 {
+  color: #fef9f6;
+  background-color: #d4456a;
+}
+
+.markdown-body .pl-sr .pl-cce {
+  font-weight: bold;
+  color: #8cc0a0;
+}
+
+.markdown-body .pl-ml {
+  color: #e6b899;
+}
+
+.markdown-body .pl-mh,
+.markdown-body .pl-mh .pl-en,
+.markdown-body .pl-ms {
+  font-weight: bold;
+  color: #e6678a;
+}
+
+.markdown-body .pl-mi {
+  font-style: italic;
+  color: #e8d8dd;
+}
+
+.markdown-body .pl-mb {
+  font-weight: bold;
+  color: #e8d8dd;
+}
+
+.markdown-body .pl-md {
+  color: #ff8fa0;
+  background-color: #3d2028;
+}
+
+.markdown-body .pl-mi1 {
+  color: #8cc0a0;
+  background-color: #1d2d25;
+}
+
+.markdown-body .pl-mc {
+  color: #f5c080;
+  background-color: #3d3028;
+}
+
+.markdown-body .pl-mi2 {
+  color: #e8d8dd;
+  background-color: #3d2e35;
+}
+
+.markdown-body .pl-mdr {
+  font-weight: bold;
+  color: #e6678a;
+}
+
+.markdown-body .pl-ba {
+  color: #8a7a82;
+}
+
+.markdown-body .pl-sg {
+  color: #7a6a72;
+}
+
+.markdown-body .pl-corl {
+  text-decoration: underline;
+  color: #e6b899;
+}
+
+/* ---- Catalyst (GitHub details/summary polyfill) -------------------------- */
+
+.markdown-body [data-catalyst] {
+  display: block;
+}
+
+/* ---- 2026 refinement: quiet cat-girl details ---------------------------- */
+
+/* Keep the card calm: most of the personality lives in small accents and
+   readable spacing instead of large ornaments or heavy shadows. */
+.markdown-body {
+  --hm-ink: #553b49;
+  --hm-muted: #8b7180;
+  --hm-accent: #cf6f8e;
+  --hm-accent-strong: #b95678;
+  --hm-quote-accent: rgba(207, 111, 142, 0.72);
+  --hm-surface: rgba(255, 250, 253, 0.72);
+  --hm-soft: #fff1f5;
+  --hm-border: #efdce4;
+  --hm-glow: rgba(255, 184, 207, 0.18);
+  --hm-glow-soft: rgba(245, 205, 220, 0.12);
+  --hm-shine: rgba(255, 255, 255, 0.48);
+
+  color: var(--hm-ink);
+  background-color: var(--hm-surface);
+  background-image:
+    radial-gradient(circle at 94% 4%, var(--hm-glow) 0, transparent 24%),
+    radial-gradient(circle at 4% 96%, var(--hm-glow-soft) 0, transparent 28%),
+    linear-gradient(125deg, var(--hm-shine) 0%, rgba(255, 255, 255, 0) 36%);
+  background-size: auto, auto, auto;
+  background-position: center, center, center;
+  background-attachment: local;
+  border: 1px solid var(--hm-border);
+  border-radius: var(--hm-radius);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.78),
+    0 8px 24px rgba(157, 96, 119, 0.10);
+}
+
+.markdown-body h1,
+.markdown-body h2 {
+  color: var(--hm-accent-strong);
+  border-bottom-color: var(--hm-border);
+  text-shadow: 0 1px 10px rgba(207, 111, 142, 0.10);
+}
+
+.markdown-body h3,
+.markdown-body h4,
+.markdown-body strong,
+.markdown-body b {
+  color: var(--hm-ink);
+}
+
+.markdown-body h5,
+.markdown-body h6,
+.markdown-body small,
+.markdown-body blockquote,
+.markdown-body .footnotes {
+  color: var(--hm-muted);
+}
+
+.markdown-body > h1:first-of-type::before {
+  content: "ฅ ";
+  color: var(--hm-accent);
+  font-size: 0.68em;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  vertical-align: 0.08em;
+  opacity: 0.72;
+}
+
+.markdown-body a {
+  color: var(--hm-accent-strong);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+}
+
+.markdown-body a:hover {
+  color: var(--hm-accent);
+}
+
+.markdown-body blockquote {
+  position: relative;
+  margin-top: 22px;
+  margin-bottom: 22px;
+  padding: 18px 28px 19px 52px;
+  line-height: 1.7;
+  background-color: var(--hm-soft);
+  background-image: linear-gradient(
+    118deg,
+    var(--hm-glow-soft) 0%,
+    rgba(255, 255, 255, 0) 68%
+  );
+  border: 1px solid var(--hm-border);
+  box-shadow: none;
+}
+
+.markdown-body blockquote::before {
+  content: "“";
+  position: absolute;
+  left: 20px;
+  top: 50%;
+  color: var(--hm-quote-accent);
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 2.6rem;
+  font-weight: 700;
+  line-height: 1;
+  opacity: 0.72;
+  transform: translateY(-56%);
+}
+
+/* One shared radius keeps every content panel visually related to the card. */
+.markdown-body :is(blockquote, table, pre, .highlight pre, .footnotes, details) {
+  border-radius: var(--hm-radius);
+}
+
+.markdown-body mark,
+.markdown-body tt,
+.markdown-body code {
+  background-color: var(--hm-soft);
+}
+
+.markdown-body table {
+  border: 1px solid var(--hm-border);
+  border-collapse: separate;
+  border-spacing: 0;
+  box-shadow: none;
+  overflow: hidden;
+}
+
+.markdown-body table th,
+.markdown-body table td {
+  border-color: var(--hm-border);
+  border-width: 0 1px 1px 0;
+}
+
+.markdown-body .highlight pre,
+.markdown-body .codehilite pre,
+.markdown-body pre {
+  border-color: var(--hm-border);
+  background-color: color-mix(in srgb, var(--hm-soft) 72%, transparent);
+}
+
+.markdown-body table tr > :last-child {
+  border-right: 0;
+}
+
+.markdown-body table tbody tr:last-child > * {
+  border-bottom: 0;
+}
+
+.markdown-body table th {
+  color: var(--hm-accent-strong);
+}
+
+.markdown-body table tr,
+.markdown-body table tr:first-child {
+  background-color: var(--hm-surface);
+}
+
+.markdown-body table tr:nth-child(2n) {
+  background-color: var(--hm-soft);
+}
+
+@media (max-width: 767px) {
+  .markdown-body {
+    box-shadow: 0 5px 16px rgba(157, 96, 119, 0.09);
+  }
+}
+
+@media (prefers-color-scheme: dark) {
+  .markdown-body {
+    --hm-ink: #eadde3;
+    --hm-muted: #b6a4ae;
+    --hm-accent: #f0a0b8;
+    --hm-accent-strong: #f3afc3;
+    --hm-quote-accent: rgba(240, 160, 184, 0.68);
+    --hm-surface: rgba(45, 34, 42, 0.72);
+    --hm-soft: #3a2833;
+    --hm-border: #513847;
+    --hm-glow: rgba(240, 130, 166, 0.10);
+    --hm-glow-soft: rgba(183, 112, 145, 0.08);
+    --hm-shine: rgba(255, 220, 232, 0.06);
+
+    background-color: var(--hm-surface);
+    border-color: var(--hm-border);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 230, 240, 0.10),
+      0 8px 24px rgba(0, 0, 0, 0.28);
+  }
+
+  .markdown-body blockquote {
+    background-color: var(--hm-soft);
+  }
+
+  .markdown-body blockquote::after {
+    background: linear-gradient(
+      180deg,
+      var(--hm-quote-accent),
+      rgba(240, 160, 184, 0.22)
+    );
+    box-shadow: 0 0 10px rgba(240, 160, 184, 0.12);
+  }
+
+  .markdown-body table tr,
+  .markdown-body table tr:first-child {
+    background-color: var(--hm-surface);
+  }
+
+  .markdown-body table tr:nth-child(2n),
+  .markdown-body mark,
+  .markdown-body tt,
+  .markdown-body code {
+    background-color: var(--hm-soft);
+  }
+}
+/* 初芽·樱 — Code Syntax Highlighting Theme */
+/* Dark warm background with sakura-tinted tokens */
+
+.codehilite { background: #2b2428; color: #e8d8dd; border-radius: 12px; }
+.codehilite .hll { background-color: #3d2e35; }
+
+/* Comment — muted mauve, italic */
+.codehilite .c   { color: #8a7a82; font-style: italic; }
+.codehilite .ch  { color: #8a7a82; font-style: italic; }
+.codehilite .cm  { color: #8a7a82; font-style: italic; }
+.codehilite .cp  { color: #b8908a; }
+.codehilite .cpf { color: #8a7a82; font-style: italic; }
+.codehilite .c1  { color: #8a7a82; font-style: italic; }
+.codehilite .cs  { color: #8a7a82; font-style: italic; }
+
+/* Error */
+.codehilite .err { border: 1px solid #ff6b8a; color: #ff8fa0; }
+
+/* Keyword — sakura pink */
+.codehilite .k  { color: #f0a0b8; font-weight: bold; }
+.codehilite .kc { color: #f0a0b8; font-weight: bold; }
+.codehilite .kd { color: #f0a0b8; font-weight: bold; }
+.codehilite .kn { color: #f0a0b8; font-weight: bold; }
+.codehilite .kp { color: #e090a8; }
+.codehilite .kr { color: #f0a0b8; font-weight: bold; }
+.codehilite .kt { color: #e090a8; }
+
+/* Operator */
+.codehilite .o  { color: #c0a8b8; }
+.codehilite .ow { color: #d0b0c0; font-weight: bold; }
+
+/* Literal.Number — soft lavender */
+.codehilite .m  { color: #d4a0c0; }
+.codehilite .mb { color: #d4a0c0; }
+.codehilite .mf { color: #d4a0c0; }
+.codehilite .mh { color: #d4a0c0; }
+.codehilite .mi { color: #d4a0c0; }
+.codehilite .mo { color: #d4a0c0; }
+.codehilite .il { color: #d4a0c0; }
+
+/* Literal.String — warm peach */
+.codehilite .s  { color: #e6b899; }
+.codehilite .sa { color: #e6b899; }
+.codehilite .sb { color: #e6b899; }
+.codehilite .sc { color: #e6b899; }
+.codehilite .dl { color: #e6b899; }
+.codehilite .sd { color: #e6b899; font-style: italic; }
+.codehilite .s2 { color: #e6b899; }
+.codehilite .se { color: #f0c0a0; font-weight: bold; }
+.codehilite .sh { color: #e6b899; }
+.codehilite .si { color: #e8a8c0; }
+.codehilite .sx { color: #e6b899; }
+.codehilite .sr { color: #e8a8c0; }
+.codehilite .s1 { color: #e6b899; }
+.codehilite .ss { color: #d4a0c0; }
+
+/* Name — varied warm tones */
+.codehilite .na { color: #c8b090; }
+.codehilite .nb { color: #d4a0c0; }
+.codehilite .nc { color: #f5c080; font-weight: bold; }
+.codehilite .no { color: #e09090; }
+.codehilite .nd { color: #e0a0c0; }
+.codehilite .ni { color: #d0b8c8; font-weight: bold; }
+.codehilite .ne { color: #e88090; font-weight: bold; }
+.codehilite .nf { color: #e6678a; }
+.codehilite .nl { color: #c8b090; }
+.codehilite .nn { color: #f5c080; font-weight: bold; }
+.codehilite .nt { color: #f0a0b8; font-weight: bold; }
+.codehilite .nv { color: #d4a0c0; }
+.codehilite .bp { color: #d4a0c0; }
+.codehilite .fm { color: #e6678a; }
+.codehilite .vc { color: #d4a0c0; }
+.codehilite .vg { color: #d4a0c0; }
+.codehilite .vi { color: #d4a0c0; }
+.codehilite .vm { color: #d4a0c0; }
+
+/* Generic */
+.codehilite .gd { color: #ff8fa0; background-color: #3d2028; }
+.codehilite .ge { font-style: italic; }
+.codehilite .gr { color: #ff6b8a; }
+.codehilite .gh { color: #f0a0b8; font-weight: bold; }
+.codehilite .gi { color: #8cc0a0; background-color: #1d2d25; }
+.codehilite .go { color: #8a7a82; }
+.codehilite .gp { color: #e090a8; font-weight: bold; }
+.codehilite .gs { font-weight: bold; }
+.codehilite .gu { color: #e0a0c0; font-weight: bold; }
+.codehilite .gt { color: #e88090; }
+
+/* Text.Whitespace */
+.codehilite .w { color: #4a3540; }
+
+/* Line numbers */
+.codehilite pre { line-height: 125%; }
+td.linenos .normal { color: inherit; background-color: transparent; padding-left: 5px; padding-right: 5px; }
+span.linenos { color: inherit; background-color: transparent; padding-left: 5px; padding-right: 5px; }
+td.linenos .special { color: #e8d8dd; background-color: #3d2e35; padding-left: 5px; padding-right: 5px; }
+span.linenos.special { color: #e8d8dd; background-color: #3d2e35; padding-left: 5px; padding-right: 5px; }
+</style><style>html,body{margin:0;background:#fff3f7}body{position:relative;isolation:isolate;box-sizing:border-box;padding:16px;overflow-x:hidden;scrollbar-gutter:stable both-edges}body::before{content:'';position:fixed;inset:-30%;z-index:0;pointer-events:none;background-image:radial-gradient(ellipse 8px 6px at 38px 44px,rgba(202,119,151,.095) 0 96%,transparent 100%),radial-gradient(circle at 24px 28px,rgba(202,119,151,.095) 0 3px,transparent 3.5px),radial-gradient(circle at 34px 23px,rgba(202,119,151,.095) 0 3px,transparent 3.5px),radial-gradient(circle at 45px 23px,rgba(202,119,151,.095) 0 3px,transparent 3.5px),radial-gradient(circle at 54px 29px,rgba(202,119,151,.095) 0 3px,transparent 3.5px);background-size:120px 108px;background-position:0 0;transform:rotate(45deg)}.markdown-body{position:relative;z-index:1;box-sizing:border-box;min-width:0;width:100%;max-width:none;margin:12px 0;padding:clamp(24px,5vw,45px)}@media(max-width:767px){.markdown-body{padding:24px 20px}}@media(prefers-color-scheme:dark){html,body{background:#1a1418}body::before{background-image:radial-gradient(ellipse 8px 6px at 38px 44px,rgba(244,170,194,.065) 0 96%,transparent 100%),radial-gradient(circle at 24px 28px,rgba(244,170,194,.065) 0 3px,transparent 3.5px),radial-gradient(circle at 34px 23px,rgba(244,170,194,.065) 0 3px,transparent 3.5px),radial-gradient(circle at 45px 23px,rgba(244,170,194,.065) 0 3px,transparent 3.5px),radial-gradient(circle at 54px 29px,rgba(244,170,194,.065) 0 3px,transparent 3.5px)}}
+.markdown-body pre,
+.markdown-body pre code,
+.markdown-body .highlight pre,
+.markdown-body .highlight pre code {
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
+</style></head><body><article class="markdown-body"><h1>代码配色预览</h1>
+<p>同一段 Python 示例，比较注释、关键字、字符串、数字与普通变量的辨识度。</p>
+<div class="codehilite"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">dataclasses</span><span class="w"> </span><span class="kn">import</span> <span class="n">dataclass</span>
+
+<span class="c1"># 筛选高分项目，并生成一条消息</span>
+<span class="nd">@dataclass</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">Project</span><span class="p">:</span>
+    <span class="n">name</span><span class="p">:</span> <span class="nb">str</span>
+    <span class="n">score</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">0.0</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">summarize</span><span class="p">(</span><span class="n">items</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">Project</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+    <span class="n">threshold</span> <span class="o">=</span> <span class="mf">85.5</span>
+    <span class="n">selected</span> <span class="o">=</span> <span class="p">[</span>
+        <span class="n">item</span><span class="o">.</span><span class="n">name</span> <span class="k">for</span> <span class="n">item</span> <span class="ow">in</span> <span class="n">items</span>
+        <span class="k">if</span> <span class="n">item</span><span class="o">.</span><span class="n">score</span> <span class="o">&gt;=</span> <span class="n">threshold</span>
+    <span class="p">]</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">selected</span><span class="p">:</span>
+        <span class="k">return</span> <span class="s2">"暂无符合条件的项目"</span>
+    <span class="k">return</span> <span class="sa">f</span><span class="s2">"已选 </span><span class="si">{</span><span class="nb">len</span><span class="p">(</span><span class="n">selected</span><span class="p">)</span><span class="si">}</span><span class="s2"> 项："</span> <span class="o">+</span> <span class="s2">", "</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">selected</span><span class="p">)</span>
+
+
+<span class="n">projects</span> <span class="o">=</span> <span class="p">[</span><span class="n">Project</span><span class="p">(</span><span class="s2">"Hatsume"</span><span class="p">,</span> <span class="mf">96.0</span><span class="p">)]</span>
+<span class="nb">print</span><span class="p">(</span><span class="n">summarize</span><span class="p">(</span><span class="n">projects</span><span class="p">))</span>
+</code></pre></div>
+
+<p>行内代码：<code>threshold = 85.5</code> · 浅色卡片 / Python</p></article></body></html>

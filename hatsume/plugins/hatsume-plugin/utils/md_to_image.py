@@ -226,6 +226,7 @@ def _format_links(links: list[str]) -> str:
 
 
 _cached_css: str | None = None
+_cached_light_code_css: str | None = None
 _cached_katex: tuple[str, str, str, str] | None = None  # css, js, mhchem, mathtex
 
 
@@ -255,6 +256,15 @@ async def _get_css() -> str:
             pygments_css = await _read(tmpl / "pygments-default.css")
             _cached_css = github_css + pygments_css
     return _cached_css
+
+
+async def _get_light_code_css() -> str:
+    """Load the bundled light code palette independently of runtime data assets."""
+    global _cached_light_code_css
+    if _cached_light_code_css is None:
+        palette = await _read(Path(__file__).parent / "styles" / "berry-candy-code.css")
+        _cached_light_code_css = "@media (prefers-color-scheme: light){" + palette + "}"
+    return _cached_light_code_css
 
 
 async def _get_katex() -> tuple[str, str, str, str] | None:
@@ -297,6 +307,9 @@ async def _markdown_to_html(md_text: str) -> str:
 
     needs_katex = "math/tex" in html_body
     css = await _get_css()
+    dark_mode = _is_dark_mode()
+    if not dark_mode:
+        css += await _get_light_code_css()
 
     extra = ""
     if needs_katex:
@@ -338,7 +351,7 @@ async def _markdown_to_html(md_text: str) -> str:
         "radial-gradient(circle at 45px 23px,rgba(244,170,194,.065) 0 3px,transparent 3.5px),"
         "radial-gradient(circle at 54px 29px,rgba(244,170,194,.065) 0 3px,transparent 3.5px)}}"
         + _CODE_WRAP_CSS
-        + (_DARK_MODE_CSS if _is_dark_mode() else "") +
+        + (_DARK_MODE_CSS if dark_mode else "") +
         "</style>"
         "</head>"
         "<body>"

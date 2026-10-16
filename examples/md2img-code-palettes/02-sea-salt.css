@@ -1,0 +1,109 @@
+/* 海盐蓝: light-mode code palette; preview override after the existing theme. */
+.markdown-body .codehilite,
+.markdown-body .highlight { background: transparent; color: #233348; }
+.markdown-body pre,
+.markdown-body .codehilite pre,
+.markdown-body .highlight pre { background: #f0f5fc; color: #233348; border-color: #cad9ec; }
+.markdown-body pre code,
+.markdown-body pre tt { background: transparent; color: inherit; }
+.markdown-body .codehilite .n,
+.markdown-body .codehilite .nx,
+.markdown-body .codehilite .p,
+.markdown-body .codehilite .w { color: #233348;  }
+.markdown-body .codehilite .c,
+.markdown-body .codehilite .ch,
+.markdown-body .codehilite .cm,
+.markdown-body .codehilite .cp,
+.markdown-body .codehilite .cpf,
+.markdown-body .codehilite .c1,
+.markdown-body .codehilite .cs,
+.markdown-body .codehilite .go { color: #56677c; font-style: italic; }
+.markdown-body .codehilite .k,
+.markdown-body .codehilite .kc,
+.markdown-body .codehilite .kd,
+.markdown-body .codehilite .kn,
+.markdown-body .codehilite .kp,
+.markdown-body .codehilite .kr,
+.markdown-body .codehilite .kt,
+.markdown-body .codehilite .ow,
+.markdown-body .codehilite .gh,
+.markdown-body .codehilite .gp,
+.markdown-body .codehilite .nt { color: #5743a5; font-weight: bold; }
+.markdown-body .codehilite .s,
+.markdown-body .codehilite .sa,
+.markdown-body .codehilite .sb,
+.markdown-body .codehilite .sc,
+.markdown-body .codehilite .dl,
+.markdown-body .codehilite .sd,
+.markdown-body .codehilite .s2,
+.markdown-body .codehilite .se,
+.markdown-body .codehilite .sh,
+.markdown-body .codehilite .si,
+.markdown-body .codehilite .sx,
+.markdown-body .codehilite .sr,
+.markdown-body .codehilite .s1,
+.markdown-body .codehilite .ss { color: #12634e;  }
+.markdown-body .codehilite .nf,
+.markdown-body .codehilite .fm,
+.markdown-body .codehilite .na,
+.markdown-body .codehilite .nl,
+.markdown-body .codehilite .nd,
+.markdown-body .codehilite .gu { color: #185e9c;  }
+.markdown-body .codehilite .m,
+.markdown-body .codehilite .mb,
+.markdown-body .codehilite .mf,
+.markdown-body .codehilite .mh,
+.markdown-body .codehilite .mi,
+.markdown-body .codehilite .mo,
+.markdown-body .codehilite .il,
+.markdown-body .codehilite .nb,
+.markdown-body .codehilite .bp,
+.markdown-body .codehilite .nv,
+.markdown-body .codehilite .vc,
+.markdown-body .codehilite .vg,
+.markdown-body .codehilite .vi,
+.markdown-body .codehilite .vm,
+.markdown-body .codehilite .no { color: #99461e;  }
+.markdown-body .codehilite .nc,
+.markdown-body .codehilite .nn,
+.markdown-body .codehilite .ne,
+.markdown-body .codehilite .ni { color: #8c2f5c; font-weight: bold; }
+.markdown-body .codehilite .o { color: #233348;  }
+.markdown-body .codehilite .err,
+.markdown-body .codehilite .gr,
+.markdown-body .codehilite .gt,
+.markdown-body .codehilite .gd { color: #5743a5;  }
+.markdown-body .codehilite .gi { color: #12634e;  }
+.markdown-body .codehilite .hll { background-color: #cad9ec; }
+.markdown-body .codehilite .gd { background-color: #fce9ed; }
+.markdown-body .codehilite .gi { background-color: #e4f3e8; }
+.markdown-body .codehilite .ge { font-style: italic; }
+.markdown-body .codehilite .gs { font-weight: bold; }
+.markdown-body .highlight .pl-c,
+.markdown-body .highlight .pl-ba,
+.markdown-body .highlight .pl-sg { color: #56677c; }
+.markdown-body .highlight .pl-k,
+.markdown-body .highlight .pl-mh,
+.markdown-body .highlight .pl-ms,
+.markdown-body .highlight .pl-mdr { color: #5743a5; }
+.markdown-body .highlight .pl-s,
+.markdown-body .highlight .pl-pds,
+.markdown-body .highlight .pl-sr,
+.markdown-body .highlight .pl-ml,
+.markdown-body .highlight .pl-corl { color: #12634e; }
+.markdown-body .highlight .pl-e,
+.markdown-body .highlight .pl-en { color: #185e9c; }
+.markdown-body .highlight .pl-c1,
+.markdown-body .highlight .pl-v,
+.markdown-body .highlight .pl-smw { color: #99461e; }
+.markdown-body .highlight .pl-ent { color: #8c2f5c; }
+.markdown-body .highlight .pl-smi,
+.markdown-body .highlight .pl-s1,
+.markdown-body .highlight .pl-mi,
+.markdown-body .highlight .pl-mb { color: #233348; }
+.markdown-body .highlight .pl-bu,
+.markdown-body .highlight .pl-ii,
+.markdown-body .highlight .pl-c2,
+.markdown-body .highlight .pl-md { color: #5743a5; }
+.markdown-body .highlight .pl-mi1 { color: #12634e; }
+.markdown-body .highlight .pl-mc { color: #99461e; }

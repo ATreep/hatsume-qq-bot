@@ -1507,16 +1507,7 @@ register_agent(
     ),
     handler=_run_coding_agent,
 )
-register_agent(
-    name="sandbox_computer_use",
-    description=(
-        "沙盒桌面与网站自动化专用 Agent。仅当用户要求注册账号、自动化操作网站或控制沙盒 GUI 时，"
-        "才通过此 Agent 执行。如果用户的需求可以使用脚本解决，必须优先使用 coding_agent。"
-        "该 Agent 全局只能同时运行一个实例，派发前先检查当前 Agent 状态。"
-        "你需要将所有必要的信息告诉此 Agent，如要填写的信息、网站URL、账号名、密码、秘钥等。"
-    ),
-    handler=_run_sandbox_computer_use,
-)
+# Desktop automation registration is temporarily disabled; retain its implementation.
 register_agent(
     name="background_shell",
     description=(

@@ -62,6 +62,7 @@ from ..utils import (
     message_to_json,
     strip_thinking_tags,
 )
+from .chat_loop import ChatLoopDelegationMiddleware
 from .tools import (
     get_chat_tools,
     get_current_group_id,
@@ -1293,6 +1294,7 @@ async def ai_node(state: MessagesState) -> dict:
 
         set_shell_executor_limit(3)  # chat_agent: 3 calls per round, timeout <= 60s
         invocation_messages = agent_messages
+        loop_middleware = ChatLoopDelegationMiddleware(len(agent_messages))
         active_mcp_tools: list[Any] = []
         for attempt in range(2):
             t_pass_start = time.monotonic()
@@ -1300,12 +1302,15 @@ async def ai_node(state: MessagesState) -> dict:
                 model_chosen,
                 tools=get_chat_tools() + active_mcp_tools,
                 system_prompt=sys_prompt,
+                middleware=[loop_middleware],
             )
             retrying_agent = chat_agent.with_retry(stop_after_attempt=5)
             try:
                 response = await retrying_agent.ainvoke(
                     {"messages": invocation_messages},  # type: ignore
-                    {"recursion_limit": 20},
+                    # Allow seven tool rounds plus the reminder node and
+                    # subsequent delegation / send_text tool rounds.
+                    {"recursion_limit": 40},
                 )
             except Exception:
                 raise

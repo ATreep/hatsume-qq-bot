@@ -10,6 +10,7 @@ from typing import Any
 from .model_config import ModelConfigError, ModelConfigStore
 
 MODEL_HELP = """/model 或 /model list — 查看所有模型角色
+/model reload — 立即重新读取并校验 models.yml 和 providers.yml
 /model <model> — 切换高级模型（使用当前供应商/API）
 /model use <role> <provider> <model> [--api <api>]
 /model options <role> <key> <value> — null 删除该选项
@@ -73,7 +74,12 @@ async def model_command(store: ModelConfigStore, text: str) -> str:
         return MODEL_HELP
     if not parts or parts == ["list"]:
         return _display_roles(store)
-    if len(parts) == 1 and parts[0] not in ("use", "options", "check"):
+    if parts == ["reload"]:
+        # The store reads and validates both YAML files on every snapshot;
+        # model factories do the same when creating the next client.
+        roles = _display_roles(store)
+        return "✅ models.yml 和 providers.yml 已重新读取并校验，下一次调用使用最新配置。\n" + roles
+    if len(parts) == 1 and parts[0] not in ("use", "options", "check", "reload"):
         _, roles = store.snapshot()
         if "advance" not in roles:
             raise ModelConfigError(

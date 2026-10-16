@@ -54,6 +54,7 @@ Provider ID 使用字母、数字、`_`、`-`。模型 ID 直接使用供应商�
 /model
 /model list
 /model help
+/model reload
 /model use advance my-provider your-model-id --api openai_responses
 /model use lite my-provider another-model --api openai_chat_completions
 /model use coding google your-google-model --api google_genai
@@ -69,6 +70,8 @@ Provider ID 使用字母、数字、`_`、`-`。模型 ID 直接使用供应商�
 切换模型、供应商或 API 会清除旧模型的选项，避免把不支持的 reasoning、token 限制或 Google thinking 配置传给新模型。重复选择完全相同的配置会保留选项。`options ... null` 删除对应选项。
 
 `check` 只适用于聊天角色，会发送一条短请求，可能产生供应商费用；最长等待 30 秒。结果不回显模型回复或原始 SDK 错误。
+
+直接编辑 YAML 后，可执行 `/model reload` 立即重新读取并校验 `models.yml` 和 `providers.yml`，显示最新角色配置。格式或配置不兼容时返回错误；命令不会覆盖文件或发送模型请求。新建客户端使用最新配置，已经创建的客户端继续使用原有快照。
 
 ```text
 /provider list
