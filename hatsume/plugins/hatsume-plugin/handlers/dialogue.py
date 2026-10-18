@@ -629,7 +629,7 @@ def _start_conv_for_trigger(
     """Start a new conversation for an external trigger when not currently chatting.
 
     Uses bot.send_group_msg() to target the specific group directly.
-    trigger_type: "agent", "timer", or "hook" — controls user_id=None
+    trigger_type: "agent", "timer", "hook", or "sandbox_channel" — controls user_id=None
     behavior. Agent and Hook triggers use user_id=None when user_id==0 (no
     specific user to notify). Timer triggers always pass the effective user_id.
     """
@@ -643,7 +643,7 @@ def _start_conv_for_trigger(
     target_bot = bot if bot is not None else group_runtime_registry.get_bot(group_id)
     conv_state = runtime.conversation
 
-    async def _send_to_group(msg, reply_to_message_id=None) -> bool:
+    async def _send_to_group(msg, reply_to_message_id=None) -> int | bool:
         if msg == "[CONVERSATION END]":
             conv_state.end_conversation()
             return False
@@ -661,7 +661,7 @@ def _start_conv_for_trigger(
     conv_state.ai_answer = _send_to_group
 
     effective_user_id: int | None = user_id
-    if trigger_type in {"agent", "hook"} and user_id == 0:
+    if trigger_type in {"agent", "hook", "sandbox_channel"} and user_id == 0:
         effective_user_id = None
 
     async def _run() -> None:
@@ -967,8 +967,12 @@ async def _send_group_ai_message(
     reply_to_message_id: int | None = None,
     *,
     record: bool = True,
-) -> bool:
-    """Send one AI response directly to a group with reply fallback."""
+) -> int | bool:
+    """Send one AI response directly to a group with reply fallback.
+
+    Returns the platform message ID when known, ``True`` when sent without an
+    ID, and ``False`` when there was nothing to send.
+    """
     runtime = group_runtime_registry.get_or_create(group_id)
     async with runtime.outbound_send_lock:
         segments, force_message = await _build_ai_response_segments(
@@ -1010,15 +1014,16 @@ async def _send_group_ai_message(
             print(f"❌ Failed to cache sent images: group={group_id} err={exc}")
             image_paths = []
 
+        message_id = _sent_message_id(send_result)
         if record:
             _record_bot_message(
                 group_id,
                 build_bot_record_content(segments, image_paths),
                 reply_to_message_id=reply_to_message_id,
-                platform_message_id=_sent_message_id(send_result),
+                platform_message_id=message_id,
                 created_at=time.time(),
             )
-        return True
+        return message_id if message_id is not None else True
 
 
 async def handle_ai_message(
@@ -1027,8 +1032,12 @@ async def handle_ai_message(
     group_id: int,
     retry: int = 0,
     reply_to_message_id: int | None = None,
-) -> bool:
-    """Send an AI response, retrying up to five times, and report success."""
+) -> int | bool:
+    """Send an AI response, retrying up to five times.
+
+    Returns the sent message ID when known, ``True`` when sent without an ID,
+    and ``False`` on failure.
+    """
     if retry >= 5:
         try:
             await _send_group_ai_message(
@@ -1055,7 +1064,7 @@ async def handle_ai_message(
             msg,
             reply_to_message_id=reply_to_message_id,
         )
-        if not sent:
+        if sent is False:
             await _send_group_ai_message(
                 bot,
                 group_id,
@@ -1063,7 +1072,7 @@ async def handle_ai_message(
                 record=False,
             )
             return False
-        return True
+        return sent
     except Exception as e:
         print("Send error: ", str(e))
         traceback.print_exc()
@@ -1120,14 +1129,6 @@ async def user_chat_handle(bot: Bot, event: GroupMessageEvent, user_chat_matcher
         await _dispatch_message_hooks(bot, event)
         # ── Intent Classifier (fire-and-forget sidecar) ──
         asyncio.create_task(on_message_incoming(event))
-        from ..character_proxy import activate_character_proxy_peer
-
-        activate_character_proxy_peer(
-            conv_state,
-            message=event.original_message,
-            sender_id=event.user_id,
-            session_id=event.get_session_id(),
-        )
 
         session_id = event.get_session_id()
         if session_id not in conv_state.chat_peers:
@@ -1175,7 +1176,7 @@ async def user_chat_handle(bot: Bot, event: GroupMessageEvent, user_chat_matcher
                 from ..graph.tools import configure_tool_callbacks as configure_tools
 
                 async def ai_cb(msg, reply_to_message_id=None):
-                    await handle_ai_message(
+                    return await handle_ai_message(
                         msg,
                         bot,
                         group_id=event.group_id,

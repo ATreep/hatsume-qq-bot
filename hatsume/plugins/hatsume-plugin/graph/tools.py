@@ -208,7 +208,7 @@ _shell_executor_budget: contextvars.ContextVar[_ShellExecutorBudget | None] = (
 def set_shell_executor_limit(max_calls: int | None) -> None:
     """Set the shell_executor budget for the current agent invocation.
 
-    Call with ``max_calls=3`` before invoking chat_agent (3 calls, at most 60s each).
+    Call with ``max_calls=3`` before invoking 初芽 (3 calls, at most 60s each).
     Call with ``max_calls=None`` before invoking coding_agent (no call/timeout cap).
     Replaces the current shared budget and resets its call counter to 0.
     """
@@ -714,6 +714,13 @@ async def view_image(image_url: str, prompt: str = "") -> str:
     return description or "❌ 图片读取失败：模型未返回描述。"
 
 
+def _message_id_suffix(send_result: Any) -> str:
+    """Format the sent message ID returned by the answer callback, if any."""
+    if isinstance(send_result, bool) or not isinstance(send_result, int):
+        return "message_id：未知"
+    return f"message_id：{send_result}"
+
+
 @tool
 async def send_text(
     text: str,
@@ -723,7 +730,6 @@ async def send_text(
 ) -> str:
     """向当前群发送文字，并可附带回复、记忆和表情控制参数。
 
-    复杂任务只允许在开始时发送一次任务开始提示，并在全部完成后发送一次最终结果；
     任务进行中禁止调用本工具。每轮 ai_node 最多调用两次。
     调用时必须传入非空的 memories 列表，至少包含一条记忆；为空时工具会返回错误且不会发送消息。
     CQ at 标记必须包含在 text 中，且每个标记只能指定一个 QQ 用户；不能 @ 全体成员。
@@ -785,15 +791,17 @@ async def send_text(
 
     try:
         if reply_to_message_id is not None:
-            await answer(
+            send_result = await answer(
                 Message(segments),
                 reply_to_message_id=reply_to_message_id,
             )
         else:
-            await answer(Message(segments))
+            send_result = await answer(Message(segments))
     except Exception as error:
         print(f"❌ send_text failed: {error}")
         return f"文字发送失败：{error}"
+    if send_result is False:
+        return "文字发送失败：消息未能发送。"
 
     from ..config import BOT_QQ_ID
     from ..state import peer_session_id
@@ -880,7 +888,7 @@ async def send_text(
         except Exception as error:
             print(f"❌ send_text face failed: {error}")
 
-    return "文字已成功发送给用户。"
+    return f"文字已成功发送给用户，{_message_id_suffix(send_result)}。"
 
 
 @tool
@@ -959,7 +967,7 @@ async def send_image(image_url: str) -> str:
 
     try:
         if runtime.conversation.ai_answer:
-            await runtime.conversation.ai_answer(MessageSegment.image(url))
+            send_result = await runtime.conversation.ai_answer(MessageSegment.image(url))
         else:
             return "❌ 错误：无法发送图片（发送通道未就绪）。"
     except Exception as e:
@@ -970,7 +978,9 @@ async def send_image(image_url: str) -> str:
         if downloaded_path is not None:
             downloaded_path.unlink(missing_ok=True)
 
-    return "图片已成功发送给用户。"
+    if send_result is False:
+        return "❌ 图片发送失败：消息未能发送。"
+    return f"图片已成功发送给用户，{_message_id_suffix(send_result)}。"
 
 
 @tool
@@ -1050,7 +1060,9 @@ async def send_video(video_url: str) -> str:
 
     try:
         if runtime.conversation.ai_answer:
-            await runtime.conversation.ai_answer(MessageSegment.video(file=url))
+            send_result = await runtime.conversation.ai_answer(
+                MessageSegment.video(file=url)
+            )
         else:
             return "❌ 错误：无法发送视频（发送通道未就绪）。"
     except Exception as e:
@@ -1061,7 +1073,9 @@ async def send_video(video_url: str) -> str:
         if downloaded_path is not None:
             downloaded_path.unlink(missing_ok=True)
 
-    return "视频已成功发送给用户。"
+    if send_result is False:
+        return "❌ 视频发送失败：消息未能发送。"
+    return f"视频已成功发送给用户，{_message_id_suffix(send_result)}。"
 
 
 def _download_http_media_to_tmp(media_url: str, prefix: str) -> Path:
@@ -1133,13 +1147,15 @@ async def send_voice(voice_url: str) -> str:
             return "❌ 错误：无法发送声音（发送通道未就绪）。"
         audio_data = await asyncio.to_thread(file_path.read_bytes)
         encoded = base64.b64encode(audio_data).decode("ascii")
-        await runtime.conversation.ai_answer(
+        send_result = await runtime.conversation.ai_answer(
             MessageSegment.record(file=f"base64://{encoded}")
         )
     except Exception as error:
         print(f"❌ send_voice failed: {error}")
         return f"❌ 声音发送失败：{error}"
-    return "声音已成功发送给用户。"
+    if send_result is False:
+        return "❌ 声音发送失败：消息未能发送。"
+    return f"声音已成功发送给用户，{_message_id_suffix(send_result)}。"
 
 
 _FILE_STREAM_CHUNK_SIZE = 64 * 1024
@@ -1323,13 +1339,14 @@ async def shell_executor(shell: str, timeout: int) -> str:
     """
     在 Ubuntu Linux GUI 沙盒中执行 bash shell（当前工作目录 pwd 为 /work，~ 为 /root），并返回输出结果。
     如果你是初芽，需要阅读或操作网页时先加载 lightpanda Skill，再派发 coding_agent 执行浏览器任务。
-    timeout 为正整数秒，超过该时长会强制终止命令；chat_agent 默认最多允许 60 秒，
+    timeout 为正整数秒，超过该时长会强制终止命令；初芽默认最多允许 60 秒，
     coding_agent 不受该 60 秒限制。
 
     ## 约束：
     - 此工具无法执行交互式命令，如安装包时必须使用 `apt install -y` 或 `apt install --assume-yes`。
     - 只有你自己可以访问沙盒，用户无法访问沙盒。
     - 禁止将沙盒中的路径告诉用户。你必须通过描述、调用工具或上传到 GitHub 仓库的方式向用户展示沙盒中的文件。
+    - 除重要文件外，请将你的所有产物创建在 /tmp 中。
     """
     budget = _shell_executor_budget.get()
     max_timeout = budget.max_timeout if budget is not None else 60
@@ -1337,7 +1354,7 @@ async def shell_executor(shell: str, timeout: int) -> str:
         return "❌ timeout 必须是正整数秒。"
     if max_timeout is not None and timeout > max_timeout:
         return (
-            "❌ chat_agent 的 shell_executor timeout 最大为 60 秒，命令未执行。"
+            "❌ 初芽的 shell_executor timeout 最大为 60 秒，命令未执行。"
             "请将耗时任务完整派发给 coding_agent。"
         )
     if budget is not None and not budget.reserve():
@@ -2142,15 +2159,19 @@ async def create_heartbeat_hook(
     timeout_seconds: HookTimeoutSeconds = 15,
     notified_user_ids: list[int] | None = None,
 ) -> str:
-    """注册当前群的持久化 heartbeat Hook。
+    """注册当前群的持久化 Heartbeat Hook。
 
-    当用要求「帮我监听某个外部事件」时，必须使用此类型 Hook，而不是消息匹配 Hook。
+    只有初芽可以调用此工具创建 Heartbeat Hook。
+    只有当用户 **明确** 声明有创建 Hook 的动机时，才允许调用此工具。
+
+    只有当用户要求初芽持续监听某个外部事件时，使用此类型 Hook，
+    而不是消息匹配 Hook 或 Sandbox Channel。
     例如：
     - 当你收到来自 XXX 的邮件时，向我发送提醒
     - 当网站 XXX 上有新文章时，及时邮件通知我
 
-    调用前必须加载 `hook-authoring` Skill，让 coding_agent 在
-    `data/hatsume-plugin/hooks/` 写好可执行脚本并以验证模式试跑。
+    调用前必须加载 `heartbeat-hook-authoring` Skill，让 coding_agent 在
+    `/work/hatsume/data/hatsume-plugin/hooks/` 写好可执行脚本并以验证模式试跑。
     普通情况下必须拒绝无意义、应使用 Timer、或无法拆成快速增量检查的请求；
     只有管理员明确坚持时可以绕过这个语义拒绝。无论谁请求，程序都强制
     interval_seconds >= 300、1 <= timeout_seconds <= 60，且每群最多 5 个启用
@@ -2159,9 +2180,10 @@ async def create_heartbeat_hook(
     notified_user_ids 用于指定事件发生后需要被提醒的群成员 QQ 号；不需要指定时传空值
     或空列表。仅传入明确需要被通知的用户，不要把群号或机器人 QQ 号放入此列表。
 
-    脚本 exit 0 表示无事件；exit 10 且 stdout 非空表示触发 chat_agent。
-    注册验证不会注入事件，也不得推进脚本游标。用户要求「群里有人说某类话时
-    反应」时不要写脚本，改用 `create_message_hook`。
+    脚本 exit 0 表示无事件；exit 10 且 stdout 非空表示触发初芽。
+    注册验证不会注入事件，也不得推进脚本游标。用户要求「群里有人说某类话时反应」时不要写脚本，改用 `create_message_hook`。
+    如果是独立沙盒服务事件需要立即通知初芽，应使用 Sandbox Channel；
+    如果是固定时间或日历周期提醒，应使用 Timer。
     """
     runtime = get_current_group_runtime()
     requester_id = runtime.conversation.current_query_user_id
@@ -2217,11 +2239,12 @@ async def create_message_hook(
 ) -> str:
     """注册一个「用户消息匹配」触发方式的持久化 Hook。
 
-    当用户要求「群里有人说某类话时反应」时，必须使用此类型 Hook，而不是 heartbeat Hook。
+    只有初芽可以创建此类 Hook。当用户要求「群里有人说某类话时反应」时，必须使用此类型 Hook，
+    而不是 Heartbeat Hook 或 Sandbox Channel。
 
     与 heartbeat Hook 不同，此类型不运行脚本、不注册 APScheduler 间隔：
     每当当前群收到新消息（不含机器人自己发送的消息）时，只要发送者匹配 match_user_id 且消息纯文本命中
-    match_pattern 正则，就立即把 prompt 与命中的消息注入本群 chat_agent。
+    match_pattern 正则，就立即把 prompt 与命中的消息注入本群初芽。
     触发群号即当前群（Hook 所属群）。match_user_id 传 0 表示不限制触发人；
     match_pattern 使用 Python 正则语法，长度不超过 200 字符。
     触发成功后该成员会被加入本群会话 chat_peers，其后续消息继续参与对话。
@@ -2681,68 +2704,6 @@ async def respond_to_shell_prompt(
 
 
 @tool
-async def create_character_proxy(
-    proxied_user_id: int,
-    during_time: int = 180,
-) -> str:
-    """
-    开始为指定用户代理发言。
-    开启后，其他用户 @ 该用户时，你也会收到通知。
-    仅当用户明确要求你代替自己回复其他群成员时调用。
-
-    Args:
-        proxied_user_id: 被代理群成员的 QQ 用户 ID。
-        during_time: 代理持续时间，单位为分钟，默认 180 分钟，最长 1440 分钟。
-    """
-    if during_time <= 0 or during_time > 24 * 60:
-        return "代理持续时间必须大于 0 分钟且不能超过 1440 分钟。"
-
-    from ..character_proxy import (
-        activate_character_proxy,
-        generate_character_profile,
-        get_character_proxy,
-        schedule_character_proxy_termination,
-    )
-    from ..utils import get_group_member_name
-
-    group_id = get_current_group_id()
-    if get_character_proxy() is not None:
-        return "角色代理已经开启；当前状态下只能先终止它。"
-    if group_id is None:
-        return "无法确定当前群，未开启角色代理。"
-
-    user_name = await get_group_member_name(
-        group_runtime_registry.get_bot(group_id),
-        group_id,
-        proxied_user_id,
-    )
-    profile = await generate_character_profile(proxied_user_id, user_name)
-    activate_character_proxy(
-        user_id=proxied_user_id,
-        user_name=user_name,
-        behavior_prompt=profile.behavior_prompt,
-        aliases=profile.aliases,
-        during_time=during_time,
-    )
-    schedule_character_proxy_termination(during_time)
-    return f"已为 {user_name} 开启角色代理，将在 {during_time} 分钟后自动停止。"
-
-
-@tool
-def terminate_character_proxy() -> str:
-    """终止对当前用户的代理发言。
-    结束后，其他用户 @ 该用户时你将不会收到通知。
-    仅当用户明确要求停止角色代理时调用。
-    """
-    from ..character_proxy import terminate_character_proxy_state
-
-    previous = terminate_character_proxy_state()
-    if previous is None:
-        return "当前没有开启角色代理。"
-    return f"已停止 {previous.user_name} 的角色代理。"
-
-
-@tool
 def end_conversation() -> str:
     """结束当前对话。
 
@@ -2792,22 +2753,12 @@ CHAT_TOOLS = [
     agent_history_list,
     agent_stop,
     respond_to_shell_prompt,
-    create_character_proxy,
-    terminate_character_proxy,
     end_conversation,
     # {"type": "web_search"}
 ]
 
 def get_chat_tools() -> list[Any]:
-    """Expose exactly one character-proxy lifecycle tool for current state."""
-    from ..character_proxy import get_character_proxy
-
-    unavailable = (
-        terminate_character_proxy
-        if get_character_proxy() is None
-        else create_character_proxy
-    )
+    """Return all available chat tools."""
     from ..mcp.tools import get_mcp_management_tools
 
-    builtins = [tool_item for tool_item in CHAT_TOOLS if tool_item is not unavailable]
-    return builtins + get_mcp_management_tools()
+    return CHAT_TOOLS + get_mcp_management_tools()

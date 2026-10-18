@@ -12,11 +12,13 @@ import requests
 # calls require these fields to be sent back on later turns.
 import langchain_core.messages as _lc_messages
 import langchain_openai.chat_models.base as _openai_base
+from langchain_core.embeddings import Embeddings
 from langchain_core.language_models import BaseChatModel
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_openai import ChatOpenAI
 
 from .model_config import get_model_config_store
-from .model_factory import create_embedding_model, get_model
+from .model_factory import entry_label, get_model, run_with_failover
+from .model_factory import get_embedding_model as get_role_embedding_model
 
 _orig_convert_dict = _openai_base._convert_dict_to_message
 _orig_convert_msg = _openai_base._convert_message_to_dict
@@ -81,13 +83,25 @@ def get_view_image_model() -> BaseChatModel:
     return get_model("vision")
 
 
-def get_typesafe_model() -> BaseChatModel:
-    """Build the transport for the separate System One /decisions API."""
-    settings = get_model_config_store().resolve("systemone")
+def _systemone_transport(settings: dict[str, Any]) -> ChatOpenAI:
     return ChatOpenAI(
         base_url=settings["base_url"], model=settings["model"],
         api_key=settings["api_key"], use_responses_api=False,
+        timeout=settings.get("timeout"),
     )
+
+
+def get_typesafe_model() -> BaseChatModel:
+    """Build the transport for the separate System One /decisions API."""
+    return _systemone_transport(get_model_config_store().resolve("systemone"))
+
+
+def get_systemone_chain() -> list[tuple[str, float | None, ChatOpenAI]]:
+    """System One transports in failover order: (label, timeout, model)."""
+    return [
+        (entry_label(settings), settings.get("timeout"), _systemone_transport(settings))
+        for settings in get_model_config_store().resolve_chain("systemone")
+    ]
 
 
 def get_jev_model() -> BaseChatModel:
@@ -102,8 +116,8 @@ def get_code_model(reasoning_effort: ReasoningEffort | None = None) -> BaseChatM
     return get_model("coding", reasoning_effort=reasoning_effort)
 
 
-def get_embedding_model() -> OpenAIEmbeddings:
-    return create_embedding_model(get_model_config_store().resolve("embedding"))
+def get_embedding_model() -> Embeddings:
+    return get_role_embedding_model("embedding")
 
 
 async def _resolve_image_srcs(images: list[str]) -> list[str]:
@@ -140,32 +154,46 @@ async def generate_image_for_sensenova(
     model: str | None = None,
 ) -> str:
     """Generate or edit an image via SenseNova and return its temporary URL."""
-    settings = get_model_config_store().resolve("image_sensenova")
+    chain = get_model_config_store().resolve_chain("image_sensenova")
+    if model:
+        # An explicit model ID names a model of the primary provider only.
+        chain[0]["model"] = model
 
     image_sources = await _resolve_image_srcs(images or [])
-    payload: dict[str, Any] = {
-        "model": model or settings["model"],
-        "prompt": prompt,
-        "n": 1,
-        "size": "auto",
-        "watermark": False,
-        "prompt_extend": True,
-        "response_format": "url",
-    }
-    if image_sources:
-        payload["images"] = [{"image_url": src} for src in image_sources]
     endpoint = "edits" if image_sources else "generations"
 
-    response = await asyncio.to_thread(
-        requests.post,
-        f"{settings['base_url'].rstrip('/')}/images/{endpoint}",
-        headers={"Authorization": f"Bearer {settings['api_key']}"},
-        json=payload,
-        timeout=300,
-    )
-    response.raise_for_status()
+    async def request(settings: dict[str, Any]) -> str:
+        payload: dict[str, Any] = {
+            "model": settings["model"],
+            "prompt": prompt,
+            "n": 1,
+            "size": "auto",
+            "watermark": False,
+            "prompt_extend": True,
+            "response_format": "url",
+        }
+        if image_sources:
+            payload["images"] = [{"image_url": src} for src in image_sources]
+        response = await asyncio.to_thread(
+            requests.post,
+            f"{settings['base_url'].rstrip('/')}/images/{endpoint}",
+            headers={"Authorization": f"Bearer {settings['api_key']}"},
+            json=payload,
+            timeout=settings.get("timeout", 300),
+        )
+        response.raise_for_status()
 
-    image_url = response.json()["data"][0]["url"]
-    if not isinstance(image_url, str) or not image_url.startswith(("http://", "https://")):
-        raise ValueError("SenseNova image response missing URL")
-    return image_url
+        image_url = response.json()["data"][0]["url"]
+        if not isinstance(image_url, str) or not image_url.startswith(("http://", "https://")):
+            raise ValueError("SenseNova image response missing URL")
+        return image_url
+
+    # requests honours the per-entry timeout itself; a worker thread cannot be
+    # interrupted by asyncio.wait_for, so no outer timeout is applied here.
+    return await run_with_failover(
+        [
+            (entry_label(settings), None, lambda settings=settings: request(settings))
+            for settings in chain
+        ],
+        "image model",
+    )

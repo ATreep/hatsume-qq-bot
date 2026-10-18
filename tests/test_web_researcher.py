@@ -48,7 +48,7 @@ class WebResearcherTests(unittest.IsolatedAsyncioTestCase):
         modules = {}
         for name in [package, f"{package}.graph"]:
             module = ModuleType(name)
-            module.__path__ = []
+            module.__path__ = [str(ROOT / "graph" if name.endswith(".graph") else ROOT)]
             modules[name] = module
         modules[f"{package}.graph.tools"] = SimpleNamespace(
             web_search=web_search,

@@ -38,10 +38,11 @@ from ..group_runtime import (
 )
 from ..models import (
     get_advance_model,
-    get_intent_model,
     get_lite_model,
     get_mini_model,
+    get_systemone_chain,
 )
+from ..model_factory import run_with_failover
 
 from ..prompts import (
     AUXILIARY_COMPACTION_PROMPT,
@@ -63,6 +64,7 @@ from ..utils import (
     strip_thinking_tags,
 )
 from .chat_loop import ChatLoopDelegationMiddleware
+from .context import build_context_middleware
 from .tools import (
     get_chat_tools,
     get_current_group_id,
@@ -70,11 +72,6 @@ from .tools import (
     query_memory,
     reset_capture_flag,
     set_shell_executor_limit,
-)
-from .systemone import (
-    build_systemone_body,
-    get_choice_answer,
-    post_systemone,
 )
 
 JSON_CODE_FENCE_PATTERN = re.compile(
@@ -510,17 +507,32 @@ def _build_systemone_body(
 
 
 async def _post_systemone(
-    model: Any,
+    chain: list[tuple[str, float | None, Any]],
     state: Any,
     questions: Mapping[str, Any],
     route = "/systemone"
 ) -> Any:
-    return await model.root_async_client.post(
-        route,
-        cast_to=object,
-        body=_build_systemone_body(
-            getattr(model, "model_name", ""), state, questions
-        ),
+    """POST to each configured System One transport until one succeeds."""
+
+    async def post(label: str, model: Any) -> Any:
+        print(f"[llm] invoke systemone: {label} ({route})")
+        started = time.monotonic()
+        response = await model.root_async_client.post(
+            route,
+            cast_to=object,
+            body=_build_systemone_body(
+                getattr(model, "model_name", ""), state, questions
+            ),
+        )
+        print(f"[llm] done systemone: {label} in {time.monotonic() - started:.1f}s")
+        return response
+
+    return await run_with_failover(
+        [
+            (label, timeout, lambda label=label, model=model: post(label, model))
+            for label, timeout, model in chain
+        ],
+        f"System One {route}",
     )
 
 
@@ -1071,19 +1083,14 @@ async def ai_node(state: MessagesState) -> dict:
         )
     else:
         try:
-            from ..character_proxy import message_mentions_character_proxy
-
-            chat_end_bypassed = chat_end_bypassed or message_mentions_character_proxy(
-                last_content
-            )
             # Jev is a System One model: send the current state and a closed
             # Choice question pair to its ``/systemone`` endpoint.  The model
             # does not generate JSON text, so both typed answers can be
             # consumed directly without parsing generated prose.
-            jev_model: Any = get_intent_model()
+            jev_chain = get_systemone_chain()
             filtered_last_human_msg = _without_image_url_parts([last_human_msg])[0]
             recent_messages = _without_bootstrap_role_prompt(
-                state["messages"][-6:]
+                state['messages'][-6:]
             )
             jev_state = {
                 "current_message": _message_content_to_text(
@@ -1093,7 +1100,7 @@ async def ai_node(state: MessagesState) -> dict:
             }
 
             jev_response = await _post_systemone(
-                jev_model,
+                jev_chain,
                 jev_state,
                 {
                     "chat_intent": {
@@ -1138,10 +1145,10 @@ async def ai_node(state: MessagesState) -> dict:
             ):
                 print(
                     "[jev_judge] Response skipped: confidence "
-                    f"{float(chat_intent_confidence):.2f} of “{chat_intent_choice}” is below 0.40"
+                    f'{float(chat_intent_confidence):.2f} of "{chat_intent_choice}" is below 0.40'
                 )
                 return {"messages": []}
-            chat_intent_reason = f"Jev 选择“{chat_intent_choice}”"
+            chat_intent_reason = f'Jev 选择"{chat_intent_choice}"'
             if chat_intent_confidence is not None:
                 chat_intent_reason += f"，置信度 {float(chat_intent_confidence):.2f}"
             chat_intent_result = ChatIntentJudgeResult(
@@ -1204,17 +1211,6 @@ async def ai_node(state: MessagesState) -> dict:
     if admin_mode_enabled:
         sys_prompt += build_admin_mode_prompt(ADMIN_QQ_ID)
         print("[admin] Enabled ADMIN MODE")
-
-    from ..character_proxy import (
-        build_active_character_proxy_role_prompt,
-        get_character_proxy,
-    )
-
-    character_proxy = get_character_proxy()
-    if character_proxy is not None:
-        sys_prompt += "\n\n" + build_active_character_proxy_role_prompt(
-            character_proxy
-        )
 
     # Inject available skills into system prompt
     skill_mgr = get_skill_manager()
@@ -1295,6 +1291,7 @@ async def ai_node(state: MessagesState) -> dict:
         set_shell_executor_limit(3)  # chat_agent: 3 calls per round, timeout <= 60s
         invocation_messages = agent_messages
         loop_middleware = ChatLoopDelegationMiddleware(len(agent_messages))
+        context_middleware = build_context_middleware(model_chosen)
         active_mcp_tools: list[Any] = []
         for attempt in range(2):
             t_pass_start = time.monotonic()
@@ -1302,7 +1299,7 @@ async def ai_node(state: MessagesState) -> dict:
                 model_chosen,
                 tools=get_chat_tools() + active_mcp_tools,
                 system_prompt=sys_prompt,
-                middleware=[loop_middleware],
+                middleware=[loop_middleware, *context_middleware],
             )
             retrying_agent = chat_agent.with_retry(stop_after_attempt=5)
             try:
@@ -1315,13 +1312,12 @@ async def ai_node(state: MessagesState) -> dict:
             except Exception:
                 raise
             response_messages = response.get("messages", [])
-            if (
-                len(response_messages) >= len(invocation_messages)
-                and response_messages[:len(invocation_messages)] == invocation_messages
-            ):
-                new_messages = response_messages[len(invocation_messages):]
-            else:
-                new_messages = response_messages
+            # Positional prefixes are invalid once compaction replaces history.
+            previous_ids = {message.id for message in invocation_messages}
+            new_messages = [
+                message for message in response_messages
+                if message.id not in previous_ids
+            ]
             for message in new_messages:
                 message_type = (
                     message.get("type", message.get("role"))

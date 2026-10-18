@@ -31,7 +31,6 @@ from .handlers.tools import (
     handle_provider,
     handle_mcp,
     handle_poke,
-    handle_proxy_command,
     handle_resetsandbox,
     handle_shell,
     handle_timer,
@@ -60,6 +59,31 @@ init_memory_system()
 configure_activated_group_callback(sync_auto_response_for_group)
 init_hook_system()
 
+# Initialize sandbox-to-chat_agent channel socket server
+_sandbox_channel_server = None
+
+async def _init_sandbox_channel() -> None:
+    """Initialize the Sandbox Channel socket server on bot startup."""
+    global _sandbox_channel_server
+    from .hooks import init_sandbox_channel as init_sandbox_channel_fn
+    try:
+        _sandbox_channel_server = await init_sandbox_channel_fn()
+    except Exception as exc:
+        print(f"⚠️ Failed to initialize Sandbox Channel: {exc}")
+        import traceback
+        traceback.print_exc()
+
+async def _shutdown_sandbox_channel() -> None:
+    """Stop the Sandbox Channel socket server on bot shutdown."""
+    global _sandbox_channel_server
+    if _sandbox_channel_server is not None:
+        try:
+            await _sandbox_channel_server.stop()
+            print("✅ Sandbox Channel socket server stopped")
+        except Exception as exc:
+            print(f"⚠️ Error stopping Sandbox Channel: {exc}")
+        _sandbox_channel_server = None
+
 async def _handle_bot_connect(bot: Bot) -> None:
     """Learn target-group routes before recovering background injections."""
     await group_runtime_registry.discover_bot_groups(bot)
@@ -81,6 +105,8 @@ async def _handle_bot_disconnect(bot: Bot) -> None:
 # been learned. External triggers can then select the Bot for their target group.
 nonebot.get_driver().on_bot_connect(_handle_bot_connect)
 nonebot.get_driver().on_bot_disconnect(_handle_bot_disconnect)
+nonebot.get_driver().on_startup(_init_sandbox_channel)
+nonebot.get_driver().on_shutdown(_shutdown_sandbox_channel)
 nonebot.get_driver().on_shutdown(group_runtime_registry.shutdown)
 
 
@@ -176,7 +202,6 @@ aps_cmd = on_command(
 )
 autoresponse_cmd = on_command("autoresponse", rule=lambda event: str(event.get_user_id()) == ADMIN_QQ_ID, priority=10, block=True)
 dsbalance_cmd = on_command("dsbalance", priority=10, block=True)
-proxy_cmd = on_command("proxy", priority=10, block=True)
 todo_cmd = on_command("todo", priority=10, block=True)
 gui_screenshot_cmd = on_command(
     "guiscreenshot",
@@ -283,11 +308,6 @@ async def _(bot: Bot, event: GroupMessageEvent, args: Message = CommandArg()):
 @dsbalance_cmd.handle()
 async def _(event: GroupMessageEvent, args: Message = CommandArg()):
     await handle_dsbalance(event, dsbalance_cmd, args)
-
-
-@proxy_cmd.handle()
-async def _(event: GroupMessageEvent, args: Message = CommandArg()):
-    await handle_proxy_command(event, proxy_cmd, args)
 
 
 @todo_cmd.handle()

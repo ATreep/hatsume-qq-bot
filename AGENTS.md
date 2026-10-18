@@ -1,107 +1,186 @@
+# 关于 AGENTS.md 的记录规则
+此文件仅记录 **源码中没有提及或表达的项目规则**，此文件中的规则仅作为项目补充说明，帮助 AI Agents 快速了解项目。
+
 # 关于 venv
 无论任何时候，禁止修改此项目的虚拟环境 .venv 目录内的任何文件。
 如果你需要使用 pytest 测试，请使用本地的 python 环境进行测试，不要尝试查看或运行 .venv 环境。
 
-# sandbox_computer_use agent LOOP
+# 文档同步
 
-每次修改 `sandbox_computer_use` 的 Loop 逻辑，都必须同步更新本节。Loop 只保留
-以下四个 Step；Jev 负责结构化选择，受限 LLM 分支负责需要自然语言理解、截图
-分析或输入内容生成的操作，具体实现以代码为准：
+实现或修改代码时，必须同步更新 `docs/` 中的相关文档。
 
-1. **Step 1：检查桌面状态**。
-   - 调用 `gui_inspect(application="", max_nodes=200)`，通过 AT-SPI 扫描整个桌面；
-     该检查本身不调用 Jev 或 LLM。
-   - 从返回的元素中整理出可见应用窗口；对 Chrome 窗口额外调用
-     `chrome_inspect`，附加当前标签页 URL 和标题。
-   - 检查失败由外层 Loop 记录为错误；未达到迭代上限时直接开始下一轮 Step 1。
+# 项目专业术语
 
-2. **Step 2：选择要操作的窗口**。
-   - 将任务、窗口列表、最近一次操作等状态提交给 Jev 的 `window_action` 选择题；
-     Jev 只能从窗口 ID、`open_application`、`open_webpage`、`finish_report` 中选择。
-   - 选择窗口 ID：进入 Step 3。
-   - 选择 `open_application`：启动一次受限 LLM 分支，使用轻量模型和一次
-     `gui_launch` 工具调用；分支可获得截图、桌面检查和 Chrome 检查上下文，工具返回后
-     立即结束该 LLM 分支，然后进入 Step 4。
-   - 选择 `open_webpage`：启动一次受限 LLM 分支，使用轻量模型和一次
-     `chrome_open` 工具调用；分支可获得同样的桌面/Chrome上下文，工具返回后立即结束
-     该 LLM 分支，然后进入 Step 4。
-   - 选择 `finish_report`：不调用 LLM 或 `view_image`；直接返回完整逐轮记录、最后一次
-     `gui_screenshot` 截图与 `gui_inspect`、`chrome_inspect` 元素检查结果，交给 chat_agent。
-     最终检查失败时附加错误信息，保留已完成的逐轮记录。
-   - Jev 返回非法选项时进入 `jev_fallback` 受限 LLM 分支；分支失败按外层错误处理。
+- `chat_agent` 只作为项目源码中的实现名称使用。
+- 编写发送给 `chat_agent` 的系统提示词、工具描述、运行时提示词、Skill 或其他模型可见文本时，必须把
+  `chat_agent` 称为“初芽”。初芽不知道自己的源码实现名是 `chat_agent`，只知道自己叫“初芽”。
+- 编写发送给 `coding_agent` 或其他子 Agent 的提示词时，也使用“初芽”指代接收结果和发起任务的主 Agent；
+  只有需要引用源码符号、文件路径、日志字段或调试接口时，才保留反引号中的 `chat_agent`。
 
-3. **Step 3：检查选中窗口并选择目标操作**。
-   - 对原生窗口调用 `gui_inspect(application=...)`，对 Chrome 窗口调用
-     `chrome_inspect(target_id=...)`；元素用于生成 Jev 的 criteria，传给 Jev 的
-     `inspection` 元数据不再包含完整 `elements` 列表；窗口状态保留最近一次 `gui_inspect`
-     返回的应用根 `app_id`，供坐标拖拽激活目标窗口。
-   - 日志需打印每个 Step 3 选择题实际提交给 Jev 的完整 criteria 值。
-   - 原生窗口提交 `element_action`，Chrome 提交 `chrome_element_action`；每个元素的
-     criteria 文本由 `nodeName` 与 `nodeValue` 拼接（兼容旧检查结果时回退到 `role` 与
-     `name`）。Chrome criteria 还附加元素的 `role`、`value` 和 DOM `attributes`（包含属性值），
-     不附加 Accessibility `properties`。Jev 再从元素 ID、`screenshot_coordinate_click`、`wait_before_operation`、
-     `finish_report`、`screenshot_coordinate_drag` 中选择。
-   - 选择 `screenshot_coordinate_click`：严格依次调用一次 `gui_screenshot`、一次
-     `view_image`、一次 `gui_click_coordinates`；第三次调用完成后立即结束该分支，进入
-     Step 4。不得重复截图、视觉分析或坐标点击，也不得调用其他工具。
-   - 选择 `screenshot_coordinate_drag`：严格依次调用一次 `gui_screenshot`、一次
-     `view_image`、一次 `gui_drag`；视觉分析必须提供拖拽起点和终点坐标，第三次调用完成后
-     立即结束该分支，进入 Step 4。不得重复截图、视觉分析或拖拽，也不得调用其他工具。
-   - 选择 `wait_before_operation`：记录等待动作，然后进入 Step 4。
-   - 选择 `finish_report`：直接汇集逐轮记录和最终截图、元素检查并结束，不使用模型总结。
-   - 选择元素 ID：再次调用 Jev。原生窗口使用 `native_operation`（`click`、
-     `set_text`、`focus_key`、`focus_type`）；Chrome 使用 `chrome_operation`
-     （`chrome_click`、`chrome_focus`、`chrome_set_text`；只有可编辑 role 才提供
-     `chrome_set_text`）。直接点击/聚焦调用对应工具；
-     文本输入、按键和输入生成使用一次受限 LLM 分支，工具返回后立即结束该分支并进入 Step 4。
-   - `chrome_set_text` 分支使用轻量模型，并附加截图与最新 Chrome 检查；分支必须实际调用
-     一次 `chrome_set_text`，由 Chrome CDP 先选中现有内容再通过 `Input.insertText` 输入并校验值，
-     并在刷新检查后按 `backendNodeId` 重新绑定当前元素 ID，避免检查刷新使旧 ID 失效，
-     以便受控输入框收到真实输入事件。原生输入分支使用代码模型；除
-     `screenshot_coordinate_click` 分支固定执行上述三次调用，其他受限分支最多执行一次工具调用。
-     Jev 返回非法选项时使用 `jev_fallback` 分支。
-   - 受限分支在工具节点返回后关闭 LLM 流；关闭流时出现的 `GraphInterrupt` 视为内部
-     停止信号，保留已返回的工具结果，不能把本次操作重新抛回外层 Loop。
-   - Chrome 元素执行 `chrome_set_text` 后，下一轮暂时从 criteria 移除刚编辑的同一元素，
-     并在 state 中提示选择提交/搜索控件，促使 Jev 选择搜索按钮等后续控件；该排除只
-     持续一轮。
-   - 每次完成的 Step 3 都会追加到 state 的 `step3_history`，上下文保留最近 3 个
-     iteration 的元素/操作选择；如果操作是 `chrome_set_text`，该次受限 LLM 的返回值也
-     会记录在对应条目中。若操作实际点击了 AT-SPI 或 CDP 元素，对应条目还记录
-     `clicked_element` 的 `role`、`value`、`description`、`name` 与 `application`，供后续
-     Jev 决策参考。`step3_decision` 与 `step3_llm_result` 继续提供最新一条记录。
-   - 如果 Jev 连续 3 个 iteration 选择 `wait_before_operation`，下一轮的 criteria 暂时
-     移除该选项；再下一轮恢复该选项。中间任何非 wait 选择都会清零连续计数。
+# 建议频繁 git commit
 
-   - 完整报告独立保留每一个 iteration：Step 2 的窗口选择及实际选中窗口，Step 3 的
-     Jev 选择、原生元素 role/name 或 CDP 元素 role/name/attributes（含值），以及
-     受限 LLM 分支输入和实际工具输入。坐标点击不保留该分支 LLM 输入，仅记录
-     “该轮点击了坐标(x,y)的元素”。这些报告记录不受最近 3 轮 Jev 上下文限制。
+当你完成一次任务修改时，请及时进行一次 `git commit`，但无需 push。
 
-4. **Step 4：执行操作或等待，然后回到 Step 1**。
-   - 记录工具或 LLM 分支结果到 `recent_action`，等待 5 秒，再从 Step 1 重新检查桌面；
-     不复用旧的元素 ID 或旧的 inspection。
-   - `finish_report` 成功返回会结束 Loop；其他分支继续循环。达到最大迭代次数后，
-     必须强制进入 `finish_report` 分支生成最终报告，不直接返回轮次错误。
+
+
+# Global Skills (全局技能)
+
+**定义**: Global Skill 是一个无群组隔离的技能（Skill），保存在 `data/hatsume-plugin/skills/` 目录的根目录下，对所有群组通用。
+
+**特点**：
+- 路径：`data/hatsume-plugin/skills/<skill_name>.md`
+- 无群组隔离（与群组特定技能相对）
+- 所有群组的初芽都可以加载使用
+- 用于教学/通用工具，如”如何发送Sandbox Channel”
+
+**用途**:
+- 教程和指南（如调用API、使用特定工具）
+- 公共代码片段和工具库
+- 跨群组共享的最佳实践
+
+# Sandbox Channel (沙箱通道系统)
+
+Sandbox Channel 允许在沙箱中运行的代码或服务通过 Unix Domain Socket 与初芽通信。
+
+**机制**：
+- 沙箱代码连接到 `/tmp/hatsume_channel.sock` Unix 域套接字
+- 发送 JSON 格式的 Sandbox Channel 消息
+- 机器人接收并将消息注入到初芽的消息队列
+- 如果初芽运行中则直接加入队列，否则触发新对话
+
+**Sandbox Channel 消息结构**（简化，仅chat_injection模式）:
+```json
+{
+  "timestamp": 1634567890.5,
+  "group_id": 123456789,
+  "content": "消息内容",
+  "user_id": 0,
+  "agent_name": "service_name",
+  "priority": "normal"
+}
+```
+
+详见 `docs/sandbox-channel.md` 和全局技能 `sandbox-channel-guide.md`
+
+
+# 初芽触发事件分类（源码标识：`chat_agent`）
+
+初芽的输入来源必须按“来源类型”和“图内触发标记”区分记录。图内系统消息使用
+`hatsume/plugins/hatsume-plugin/graph/nodes.py` 中的
+`SYSTEM_TRIGGER_KEY = "_hatsume_system_trigger"` 标记；标记值通常是
+`agent`、`timer`、`hook`、`group_increase` 或 `sandbox_channel`。普通用户消息没有这个标记。
+
+## 1. 普通群消息（human message）
+
+- 入口：`user_chat_handle()`，由 `user_chat`、`start_chat_by_at`、`start_chat_by_mentioned`
+  等 NoneBot 消息处理器进入。
+- 消息先进入当前群的 `human_queue`；只有发送者已经是 `chat_peers`，或通过 `@` 入口激活会话后，
+  才会启动或继续 LangGraph 对话。
+- 这是用户输入，不属于系统触发事件，不添加 `_hatsume_system_trigger`。
+- 消息匹配 Hook 在普通消息处理前执行，因此同一条群消息可能同时保留为普通用户输入，并触发一个或多个
+  `message_match` Hook。
+
+## 2. 持久化 Hook
+
+Hook 数据保存在 `hooks/hooks.db`，数据库字段 `trigger_type` 目前只有两种值：
+
+### 2.1 Heartbeat Hook（`trigger_type="heartbeat"`）
+
+- 由 APScheduler 按 `interval_seconds` 周期执行；间隔不得小于 300 秒，只对已启用且有 Bot 路由的群注册任务。
+- 执行脚本返回退出码 `10` 且 stdout 非空时，才表示“有事件”，调用 `inject_hook()` 注入。
+- 退出码 `0` 且 stdout 为空表示本轮无事件；超时、非法输出、其他退出码只记录失败，不注入对话。
+- 事件进入会话时使用 `_hatsume_system_trigger="hook"`；活跃会话追加到 `human_queue`，非活跃会话以
+  `trigger_type="hook"` 启动新对话。
+
+### 2.2 Message-match Hook（`trigger_type="message_match"`）
+
+- 在每条群文本消息进入普通聊天逻辑前检查，扫描文本前 2,000 个字符。
+- 使用 `match_pattern` 正则匹配，可用 `match_user_id` 限定触发人；`0` 表示不限定触发人。
+- 命中后构造包含群号、发送者、正则和原文的事件说明，并复用 `inject_hook()`，因此图内标记同样是
+  `_hatsume_system_trigger="hook"`。
+- 一条消息可以命中多个启用的 Message-match Hook；单个 Hook 的失败不能阻断其他 Hook 或普通聊天。
+
+两种 Hook 在图内都显示为 `hook`，需要通过数据库的 `trigger_type`、Hook 名称和事件说明区分具体来源。
+
+## 3. 定时任务（Timer）
+
+### 3.1 用户创建的 timer-v2 任务
+
+- 创建工具：`create_daily_timer`、`create_weekly_timer`、`create_monthly_timer`、`create_at_timer`。
+- `schedule_type` 分别为 `daily`、`weekly`、`monthly`、`at`；每个计划拆成可持久化、可幂等处理的
+  schedule point。
+- 到期后调用 `inject_timer()`，图内标记为 `_hatsume_system_trigger="timer"`。
+- `user_id > 0` 时附带被通知用户信息；`user_id=0` 时不要求 @ 用户。活跃会话直接入队，非活跃会话以
+  `trigger_type="timer"` 启动。
+- 重启恢复时只补偿容忍窗口内最近一次到期点，已经处理的 occurrence 不重复执行。
+
+### 3.2 内部 Auto-response 定时任务
+
+- `task_type="auto_response"`，由系统为已激活群生成未来的随机 exact-time 任务。
+- 同样通过 `inject_timer()`、`_hatsume_system_trigger="timer"` 进入会话，但 `user_id` 固定为 `0`。
+- 群未激活、没有路由、处于免打扰时间或已有活跃会话时会跳过本次发送，并同步下一次计划。
+
+Timer 的 `schedule_type` 与 Hook 的 `trigger_type` 是不同层级的字段，不要把 `timer`、`heartbeat` 或
+`message_match` 混写。
+
+## 4. Sandbox Channel
+
+- 外部沙盒程序通过 `/tmp/hatsume_channel.sock` 发送一行 JSON，由
+  `SandboxChannelMessage` 校验后交给 `handle_sandbox_channel_message()`。
+- 活跃图运行时，消息通过 `make_system_trigger_message(..., "sandbox_channel")` 追加到
+  `human_queue`，携带 `_hatsume_system_trigger="sandbox_channel"`；非活跃会话启动时使用
+  `trigger_type="sandbox_channel"`。
+- 这类消息的来源应记录为 Sandbox Channel，不要误记为普通用户消息、Heartbeat Hook 或 Timer。
+- 发送协议、字段和错误响应详见 `docs/sandbox-channel.md` 与
+  `data/hatsume-plugin/skills/sandbox-channel-guide.md`。
+
+## 5. Agent 执行返回
+
+- `agent_dispatch()` 创建后台 Agent 实例，状态经历 `running`、`done` 或 `cancelled`；成功或异常都会形成
+  一条最终结果记录。
+- Agent 完成后由 `inject_agent_notification()` 将 Agent 名称、Agent ID、原始任务、派发背景和执行结果
+  组合成系统消息。
+- 活跃会话把结果追加到 `human_queue`，并使用 `_hatsume_system_trigger="agent"`；非活跃会话以
+  `trigger_type="agent"` 启动新对话。
+- 同一结果在当前会话队列中不会重复注入。主初芽负责读取结果、决定是否调用发送工具并向用户汇报；
+  后台 Agent 本身不直接向 QQ 用户发送回复。
+- `agent_work_history()` 只读取 Agent 的工具调用和输出历史，不会产生新的初芽触发事件。
+
+## 6. 群成员加入
+
+- 入口：`GroupIncreaseNoticeEvent` → `handle_group_increase()`。
+- 仅对已激活群处理；活跃会话追加带 `_hatsume_system_trigger="group_increase"` 的欢迎消息，非活跃会话以
+  `trigger_type="group_increase"` 启动。
+- 该事件使用新成员 QQ 号和头像生成欢迎提示，属于系统通知，不属于普通群消息或 Agent 返回。
+
+## 7. 其他内部标记与非初芽事件
+
+- `start_new_conversation()` 的 `system_trigger_type` 默认值为 `system_task`，供未归类的内部启动调用使用；
+  新增调用点必须明确写出实际来源，不能默认丢失分类。
+- `PokeNotifyEvent` 当前只触发随机图片发送，不进入初芽会话队列，因此不记录为上述任何一种
+  初芽触发类型。
+- `ai_node` 完成本轮模型调用只是一次普通图执行结果，不等同于“Agent 执行返回”；只有
+  `agent_dispatch()` 创建的后台 Agent 完成后回注，才使用 `agent` 触发分类。
+
 
 # Agent ID、历史和停止
 
 - Agent ID 为分发时间戳、进程内递增序号和 Agent 类型的哈希；运行状态与完成通知携带 ID。
 - 全局内存历史按 ID 保存列表：整数分发时间戳、元信息字符串、工具输入/返回或错误、
   最终输出。中断 Agent 不追加最终输出；仅保留最新分发的至多 5 个 Agent。
-- chat_agent 使用 `agent_work_history(agent_id, length=5)` 查看最新进度；`-1` 返回全部
+- 初芽使用 `agent_work_history(agent_id, length=5)` 查看最新进度；`-1` 返回全部
   工作记录，正整数返回最后指定条数，始终排除前两项时间戳和元信息。
 - `agent_history_list` 列出当前群仍保留且不在运行的历史 Agent ID、元信息及分发时间。
 - `agent_stop` 仅停止当前群正在运行的 Agent，且本轮 conversation 必须先成功查看
   相同 ID 的工作历史；取消任务并等待清理完成，释放运行状态。conversation 结束
   或新图运行开始时清空查看记录，不能使用上一轮的查看记录绕过检查。
 
-# chat_agent 工具循环
+# 初芽工具循环
 
-- 每次 `ai_node` 调用独立统计 chat_agent 已完成的工具轮次，一条带工具调用的 AIMessage
+- 每次 `ai_node` 调用独立统计初芽已完成的工具轮次，一条带工具调用的 AIMessage
   计为一轮；同轮多个工具不重复计数，历史对话不计入，MCP 动态工具加载后的第二次
   调用延续当前计数。
 - 第 7 轮工具返回后、下次模型调用前，插入一次 HumanMessage：
   `[SYSTEM] 你不应该调用太多次工具，请你立即将当前任务分发给 Agent，然后使用 send_text 工具向用户说明情况。`
-- 提醒仅注入一次；任务分发与用户通知由模型继续执行。chat_agent 的递归限制为 40，
+- 提醒仅注入一次；任务分发与用户通知由模型继续执行。初芽的递归限制为 40，
   为计数中间件和提醒后的工具调用保留执行空间。

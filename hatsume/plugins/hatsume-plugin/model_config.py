@@ -40,6 +40,7 @@ OPTION_KEYS = {
     ),
     "openai_embeddings": frozenset({"chunk_size", "dimensions"}),
 }
+ENTRY_KEYS = frozenset({"provider", "api", "model", "options"})
 DEFAULT_ROOT = Path(__file__).resolve().parents[3] / "data" / "hatsume-plugin"
 
 
@@ -84,6 +85,51 @@ def validate_options(api: str, options: Any) -> dict[str, Any]:
     if "thinking_budget" in options and "thinking_level" in options:
         raise ModelConfigError("Choose thinking_budget or thinking_level, not both.")
     return copy.deepcopy(options)
+
+
+def validate_timeout(value: Any) -> float:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or value <= 0
+    ):
+        raise ModelConfigError("timeout must be a positive number of seconds.")
+    return value
+
+
+def _validate_entry(role: str, item: Any, providers: dict, label: str) -> None:
+    if not isinstance(item, dict) or not ENTRY_KEYS <= set(item) <= ENTRY_KEYS | {
+        "timeout"
+    }:
+        raise ModelConfigError(
+            f"{label} requires provider, api, model and options (timeout optional)."
+        )
+    provider, api, model = item["provider"], item["api"], item["model"]
+    if not isinstance(provider, str) or provider not in providers:
+        raise ModelConfigError(f"{label} references an unknown provider.")
+    if (
+        not isinstance(api, str)
+        or api not in ROLE_APIS[role]
+        or api not in providers[provider]["supported_apis"]
+    ):
+        raise ModelConfigError(f"{label} uses an API unsupported by the role or provider.")
+    if (
+        not isinstance(model, str)
+        or not model.strip()
+        or model != model.strip()
+        or any(char.isspace() for char in model)
+    ):
+        raise ModelConfigError(f"{label} needs a model ID without whitespace.")
+    validate_options(api, item["options"])
+    if "timeout" in item:
+        validate_timeout(item["timeout"])
+
+
+def role_entries(item: dict) -> list[dict]:
+    """Return the primary entry followed by its fallbacks, in invocation order."""
+    primary = {key: value for key, value in item.items() if key != "fallbacks"}
+    return [primary, *item.get("fallbacks", [])]
 
 
 def _validate(providers: Any, roles: Any) -> None:
@@ -132,34 +178,17 @@ def _validate(providers: Any, roles: Any) -> None:
     for role, item in roles.items():
         if role not in ROLE_APIS:
             raise ModelConfigError("Unknown model role.")
-        if not isinstance(item, dict) or set(item) != {
-            "provider",
-            "api",
-            "model",
-            "options",
-        }:
+        if not isinstance(item, dict):
             raise ModelConfigError(
                 f"Role {role} requires provider, api, model and options."
             )
-        provider, api, model = item["provider"], item["api"], item["model"]
-        if not isinstance(provider, str) or provider not in providers:
-            raise ModelConfigError(f"Role {role} references an unknown provider.")
-        if (
-            not isinstance(api, str)
-            or api not in ROLE_APIS[role]
-            or api not in providers[provider]["supported_apis"]
-        ):
-            raise ModelConfigError(
-                f"Role {role} uses an API unsupported by the role or provider."
-            )
-        if (
-            not isinstance(model, str)
-            or not model.strip()
-            or model != model.strip()
-            or any(char.isspace() for char in model)
-        ):
-            raise ModelConfigError(f"Role {role} needs a model ID without whitespace.")
-        validate_options(api, item["options"])
+        fallbacks = item.get("fallbacks", [])
+        if not isinstance(fallbacks, list):
+            raise ModelConfigError(f"Role {role} fallbacks must be a list.")
+        primary = {key: value for key, value in item.items() if key != "fallbacks"}
+        _validate_entry(role, primary, providers, f"Role {role}")
+        for index, fallback in enumerate(fallbacks, start=1):
+            _validate_entry(role, fallback, providers, f"Role {role} fallback {index}")
 
 
 class ModelConfigStore:
@@ -235,23 +264,36 @@ class ModelConfigStore:
                 }
             return copy.deepcopy(providers), copy.deepcopy(roles)
 
-    def resolve(self, role: str, *, require_key: bool = True) -> dict:
+    def resolve_chain(
+        self, role: str, *, require_key: bool = True, primary_only: bool = False
+    ) -> list[dict]:
+        """Resolve the primary entry and its fallbacks, in failover order."""
         with self._lock:
             providers, roles = self._load()
             if role not in roles:
                 raise ModelConfigError(
                     f"Role {role} is not configured. Use /model use {role} <provider> <model>."
                 )
-            result = copy.deepcopy(roles[role])
-            connection = providers[result["provider"]]
-            if require_key and not connection["api_key"].strip():
-                raise ModelConfigError(
-                    f"Provider {result['provider']} has no API key; set it directly in providers.yml."
+            entries = role_entries(copy.deepcopy(roles[role]))
+            chain = []
+            for entry in entries[:1] if primary_only else entries:
+                connection = providers[entry["provider"]]
+                if require_key and not connection["api_key"].strip():
+                    raise ModelConfigError(
+                        f"Provider {entry['provider']} has no API key; set it directly in providers.yml."
+                    )
+                chain.append(
+                    entry
+                    | {
+                        "base_url": connection["base_url"],
+                        "api_key": connection["api_key"],
+                    }
                 )
-            return result | {
-                "base_url": connection["base_url"],
-                "api_key": connection["api_key"],
-            }
+            return chain
+
+    def resolve(self, role: str, *, require_key: bool = True) -> dict:
+        """Resolve only the primary entry of a role."""
+        return self.resolve_chain(role, require_key=require_key, primary_only=True)[0]
 
     def provider_connection(self, name: str) -> dict:
         with self._lock:
@@ -296,7 +338,11 @@ class ModelConfigStore:
             providers, roles = self._load()
             if name not in providers:
                 raise ModelConfigError("Unknown provider.")
-            used = [role for role, item in roles.items() if item["provider"] == name]
+            used = [
+                role
+                for role, item in roles.items()
+                if any(entry["provider"] == name for entry in role_entries(item))
+            ]
             if used:
                 raise ModelConfigError(
                     "Provider is still used by roles: " + ", ".join(used)
@@ -304,57 +350,116 @@ class ModelConfigStore:
             del providers[name]
             self._write(self.providers_path, "providers", providers)
 
+    @staticmethod
+    def _entry(roles: dict, role: str, fallback: int | None) -> dict:
+        """Return the primary entry, or a 1-based fallback entry, for mutation."""
+        if role not in roles:
+            raise ModelConfigError("Model role is not configured.")
+        if fallback is None:
+            return roles[role]
+        fallbacks = roles[role].get("fallbacks", [])
+        if not 1 <= fallback <= len(fallbacks):
+            raise ModelConfigError(f"Role {role} has no fallback {fallback}.")
+        return fallbacks[fallback - 1]
+
+    @staticmethod
+    def _pick_api(
+        role: str, providers: dict, provider: str, api: str | None, previous: Any
+    ) -> str:
+        if role not in ROLE_APIS or provider not in providers:
+            raise ModelConfigError("Unknown model role or provider.")
+        if api is not None:
+            return api
+        available = ROLE_APIS[role].intersection(providers[provider]["supported_apis"])
+        if previous and previous["provider"] == provider and previous["api"] in available:
+            return previous["api"]
+        if len(available) == 1:
+            return next(iter(available))
+        raise ModelConfigError(
+            "Specify --api; the provider has multiple or no compatible APIs."
+        )
+
+    @staticmethod
+    def _new_entry(previous: Any, provider: str, api: str, model: str) -> dict:
+        # Model/API switches reset options: settings for the previous model
+        # (e.g. reasoning support) must not silently leak into a new model.
+        unchanged = previous and (
+            previous["provider"],
+            previous["api"],
+            previous["model"],
+        ) == (provider, api, model)
+        options = previous["options"] if unchanged else {}
+        return {"provider": provider, "api": api, "model": model, "options": options}
+
     def use_model(
         self, role: str, provider: str, model: str, api: str | None = None
     ) -> None:
         with self._lock:
             providers, roles = self._load()
-            if role not in ROLE_APIS or provider not in providers:
-                raise ModelConfigError("Unknown model role or provider.")
-            available = ROLE_APIS[role].intersection(
-                providers[provider]["supported_apis"]
-            )
             previous = roles.get(role)
-            if api is None:
-                if (
-                    previous
-                    and previous["provider"] == provider
-                    and previous["api"] in available
-                ):
-                    api = previous["api"]
-                elif len(available) == 1:
-                    api = next(iter(available))
-                else:
-                    raise ModelConfigError(
-                        "Specify --api; the provider has multiple or no compatible APIs."
-                    )
-            # Model/API switches reset options: settings for the previous model
-            # (e.g. reasoning support) must not silently leak into a new model.
-            unchanged = previous and (
-                previous["provider"],
-                previous["api"],
-                previous["model"],
-            ) == (provider, api, model)
-            options = previous["options"] if unchanged else {}
-            roles[role] = {
-                "provider": provider,
-                "api": api,
-                "model": model,
-                "options": options,
-            }
+            api = self._pick_api(role, providers, provider, api, previous)
+            entry = self._new_entry(previous, provider, api, model)
+            # The timeout and failover chain belong to the role, not the model.
+            for key in ("timeout", "fallbacks"):
+                if previous and key in previous:
+                    entry[key] = previous[key]
+            roles[role] = entry
             _validate(providers, roles)
             self._write(self.models_path, "roles", roles)
 
-    def set_option(self, role: str, key: str, value: Any) -> None:
+    def add_fallback(
+        self, role: str, provider: str, model: str, api: str | None = None
+    ) -> None:
         with self._lock:
             providers, roles = self._load()
             if role not in roles:
-                raise ModelConfigError("Model role is not configured.")
-            options = roles[role]["options"]
+                raise ModelConfigError(
+                    f"Configure the primary model first: /model use {role} <provider> <model>."
+                )
+            api = self._pick_api(role, providers, provider, api, roles[role])
+            roles[role].setdefault("fallbacks", []).append(
+                self._new_entry(None, provider, api, model)
+            )
+            _validate(providers, roles)
+            self._write(self.models_path, "roles", roles)
+
+    def remove_fallback(self, role: str, fallback: int) -> None:
+        with self._lock:
+            providers, roles = self._load()
+            self._entry(roles, role, fallback)
+            fallbacks = roles[role]["fallbacks"]
+            del fallbacks[fallback - 1]
+            if not fallbacks:
+                del roles[role]["fallbacks"]
+            _validate(providers, roles)
+            self._write(self.models_path, "roles", roles)
+
+    def set_option(
+        self, role: str, key: str, value: Any, *, fallback: int | None = None
+    ) -> None:
+        with self._lock:
+            providers, roles = self._load()
+            options = self._entry(roles, role, fallback)["options"]
             if value is None:
                 options.pop(key, None)
             else:
                 options[key] = value
+            _validate(providers, roles)
+            self._write(self.models_path, "roles", roles)
+
+    def set_timeout(
+        self, role: str, value: Any, *, fallback: int | None = None
+    ) -> None:
+        with self._lock:
+            providers, roles = self._load()
+            entry = self._entry(roles, role, fallback)
+            if value is None:
+                entry.pop("timeout", None)
+            else:
+                entry["timeout"] = validate_timeout(value)
+            if "fallbacks" in entry:
+                # Keep the chain last so models.yml stays easy to read.
+                entry["fallbacks"] = entry.pop("fallbacks")
             _validate(providers, roles)
             self._write(self.models_path, "roles", roles)
 

@@ -10,6 +10,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Thread
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock
 from urllib.parse import unquote, urlparse
 
@@ -20,7 +21,12 @@ from nonebot.adapters.onebot.v11 import MessageSegment
 
 SOURCE = Path(__file__).resolve().parents[1] / "hatsume/plugins/hatsume-plugin/graph/tools.py"
 TREE = ast.parse(SOURCE.read_text())
-NAMES = {"_download_http_media_to_tmp", "send_image", "send_video"}
+NAMES = {
+    "_download_http_media_to_tmp",
+    "_message_id_suffix",
+    "send_image",
+    "send_video",
+}
 CODE = compile(
     ast.Module(
         body=[node for node in TREE.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in NAMES],
@@ -62,11 +68,13 @@ class SendHttpMediaTests(unittest.IsolatedAsyncioTestCase):
             "base64": base64,
             "uuid": uuid,
             "Path": Path,
+            "Any": Any,
             "unquote": unquote,
             "urlparse": urlparse,
             "requests": requests,
             "traceback": __import__("traceback"),
             "_langchain_tool": tool,
+            "tool": tool,
             "MessageSegment": MessageSegment,
             "get_current_group_runtime": lambda: self.runtime,
             "ensure_container_running": self.ready,
@@ -115,6 +123,24 @@ class SendHttpMediaTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(segment.type, "video")
         self.assertTrue(segment.data["file"].startswith("base64://"))
         self.assertEqual(base64.b64decode(segment.data["file"][9:]), MEDIA)
+
+    async def test_image_and_video_return_sent_message_id(self):
+        self.sender.return_value = 13579
+        origin = f"http://127.0.0.1:{self.server.server_port}"
+        image = await self.namespace["send_image"].ainvoke(
+            {"image_url": origin + "/picture.png"}
+        )
+        video = await self.namespace["send_video"].ainvoke(
+            {"video_url": origin + "/clip.mp4"}
+        )
+        self.assertIn("message_id：13579", image)
+        self.assertIn("message_id：13579", video)
+
+    async def test_unknown_message_id_is_reported(self):
+        self.sender.return_value = True
+        origin = f"http://127.0.0.1:{self.server.server_port}/picture.png"
+        result = await self.namespace["send_image"].ainvoke({"image_url": origin})
+        self.assertIn("message_id：未知", result)
 
 
 if __name__ == "__main__":

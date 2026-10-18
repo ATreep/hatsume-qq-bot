@@ -47,8 +47,6 @@ class GroupRuntime:
     replyable_message_ids: set[int] = field(default_factory=set)
     replyable_senders: dict[int, int] = field(default_factory=dict)
 
-    character_proxy: Any = None
-    character_proxy_termination_handle: asyncio.TimerHandle | None = None
     skill_manager: Any = None
     mcp_requested_tools: list[tuple[str, str]] = field(default_factory=list)
     mcp_active_tools: list[Any] = field(default_factory=list)
@@ -217,9 +215,6 @@ class GroupRuntimeRegistry:
             if state._debounce_cancel is not None:
                 state._debounce_cancel.set()
                 state._debounce_cancel = None
-            if runtime.character_proxy_termination_handle is not None:
-                runtime.character_proxy_termination_handle.cancel()
-                runtime.character_proxy_termination_handle = None
             task = state._graph_task
             if isinstance(task, asyncio.Task) and not task.done():
                 task.cancel()

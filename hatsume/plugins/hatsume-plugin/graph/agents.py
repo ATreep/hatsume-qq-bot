@@ -505,8 +505,9 @@ async def _invoke_agent_until_tool(
     """Run an agent until its tool node returns, without a follow-up model call."""
     from langchain_core.messages import AIMessage, ToolMessage
     from langgraph.errors import GraphInterrupt
+    from langgraph.graph.message import add_messages
 
-    streamed_messages: list[Any] = []
+    streamed_messages: list[Any] = list(agent_input.get("messages", []))
     stream = agent.astream(
         agent_input,
         {"recursion_limit": recursion_limit},
@@ -521,7 +522,7 @@ async def _invoke_agent_until_tool(
                     continue
                 messages = update.get("messages")
                 if isinstance(messages, list):
-                    streamed_messages.extend(messages)
+                    streamed_messages = add_messages(streamed_messages, messages)
                 if node_name != "tools" or not isinstance(messages, list):
                     continue
                 for message in reversed(messages):
@@ -568,53 +569,6 @@ def _get_coding_agent_tools() -> list[Any]:
     ]
 
 
-def _get_sandbox_computer_use_tools() -> list[Any]:
-    """Build the isolated desktop and browser toolset."""
-    from .tools import (
-        chrome_click,
-        chrome_focus,
-        chrome_inspect,
-        chrome_open,
-        chrome_set_text,
-        gui_click,
-        gui_click_coordinates,
-        gui_drag,
-        gui_focus,
-        gui_inspect,
-        gui_key,
-        gui_launch,
-        gui_screenshot,
-        gui_set_text,
-        gui_type,
-        load_skill,
-        shell_executor,
-        view_image,
-        web_search,
-    )
-
-    return [
-        web_search,
-        gui_inspect,
-        gui_click,
-        gui_click_coordinates,
-        gui_drag,
-        gui_focus,
-        gui_set_text,
-        gui_key,
-        gui_type,
-        gui_launch,
-        gui_screenshot,
-        chrome_open,
-        chrome_inspect,
-        chrome_click,
-        chrome_focus,
-        chrome_set_text,
-        view_image,
-        shell_executor,
-        load_skill,
-    ]
-
-
 async def _run_web_researcher(task: str, user_id: int) -> str:
     """Search the web with one tool and return results via agent_dispatch."""
     from langchain.agents import create_agent
@@ -626,11 +580,15 @@ async def _run_web_researcher(task: str, user_id: int) -> str:
     from .tools import shell_executor, skill_loader, web_search
     from .tools import set_shell_executor_limit
 
+    from .context import build_context_middleware
+
     set_shell_executor_limit(3)
+    model = get_lite_model()
     researcher = create_agent(
-        get_lite_model(),
+        model,
         tools=[web_search, shell_executor, skill_loader],
         system_prompt=WEB_RESEARCHER_PROMPT,
+        middleware=build_context_middleware(model),
     )
     response = await researcher.with_retry(stop_after_attempt=3).ainvoke(
         {"messages": [HumanMessage(task)]},
@@ -644,335 +602,7 @@ async def _run_web_researcher(task: str, user_id: int) -> str:
     return "网络研究未返回报告。"
 
 
-async def _run_sandbox_computer_use(task: str, user_id: int) -> str:
-    """Operate the shared GUI sandbox with Jev-controlled routing."""
-    from langchain.agents import create_agent
-    from langchain.messages import AIMessage, HumanMessage, ToolMessage
-    from tenacity import stop_after_attempt
 
-    from ..config import SANDBOX_COMPUTER_USE_MAX_ITERATIONS
-    from ..models import get_code_model, get_jev_model, get_lite_model
-    from ..prompts import SANDBOX_COMPUTER_USE_PROMPT
-    from ..skills import get_skill_manager
-    from .sandbox_computer_use import CoordinatorDeps, SandboxComputerUseCoordinator
-    from .systemone import post_systemone
-    from .tools import set_shell_executor_limit
-    from .tools import (
-        chrome_click, chrome_focus, chrome_inspect, chrome_open, chrome_set_text,
-        gui_click, gui_click_coordinates, gui_drag, gui_inspect, gui_key, gui_launch,
-        gui_screenshot, gui_set_text, gui_type, view_image,
-    )
-
-    async def jev(state: dict[str, Any], questions: dict[str, Any]) -> Any:
-        return await post_systemone(get_jev_model(), state, questions)
-
-    async def inspect_gui(application: str = "") -> Any:
-        return await gui_inspect.ainvoke({"application": application})
-
-    async def inspect_chrome(target_id: str = "") -> Any:
-        return await chrome_inspect.ainvoke({"target_id": target_id})
-
-    async def bounded(
-        kind: str,
-        state: dict[str, Any],
-        tools: list[Any],
-        *,
-        model: Any | None = None,
-        context_mode: str = "none",
-        limit_tool_calls: bool = True,
-        stop_after_tool: bool = False,
-        chrome_inspect_context: Any | None = None,
-    ) -> str:
-        from langchain_core.tools import StructuredTool
-
-        call_state = {"used": False}
-        limited_tools = []
-        for original_tool in tools:
-            async def limited_call(_tool=original_tool, **kwargs: Any) -> Any:
-                if limit_tool_calls and call_state["used"]:
-                    return "该受限 Agent 已经执行过一次工具调用。"
-                if limit_tool_calls:
-                    call_state["used"] = True
-                if coordinator.iteration_records:
-                    record = coordinator.iteration_records[-1]
-                    if kind == "screenshot_coordinate_click":
-                        record["coordinate_click"] = f"该轮点击了坐标({kwargs.get('x')},{kwargs.get('y')})的元素"
-                    else:
-                        record.setdefault("llm_tool_inputs", []).append({"branch": kind, "tool": _tool.name, "input": kwargs})
-                return await _tool.ainvoke(kwargs)
-
-            limited_tools.append(
-                StructuredTool.from_function(
-                    coroutine=limited_call,
-                    name=original_tool.name,
-                    description=original_tool.description,
-                    args_schema=original_tool.args_schema,
-                )
-            )
-        llm_state = {**state, "task": task}
-        branch_instruction = {
-            "chrome_set_text": (
-                "必须调用 chrome_set_text 恰好一次并实际完成输入。"
-                "element_id 必须使用 state 中 element_id 的当前 ID；"
-                "text 必须是从 task 提取出的最终输入文字，不要只返回说明或把工具调用留给下一轮。"
-            ),
-            "set_text": (
-                "必须调用 set_text 工具恰好一次。text 要从 task 提取为最终输入文字，"
-                "不要只返回说明。"
-            ),
-            "focus_key": "必须调用 focus_key 工具恰好一次，并从 task 提取要发送的按键。",
-            "focus_type": "必须调用 focus_type 工具恰好一次，并从 task 提取要输入的最终文字。",
-        }.get(kind)
-        if branch_instruction:
-            llm_state["branch_instruction"] = branch_instruction
-        if context_mode in {"open", "chrome_set_text"}:
-            llm_state["screenshot"] = await gui_screenshot.ainvoke({})
-        if context_mode == "open":
-            llm_state["gui_inspect"] = await gui_inspect.ainvoke({})
-        has_chrome_window = (
-            context_mode == "open"
-            or any(
-                isinstance(window, dict) and window.get("kind") == "chrome"
-                for window in (state.get("windows", []) or [])
-            )
-        )
-        if context_mode in {"chrome_set_text"} or has_chrome_window:
-            if chrome_inspect_context is not None:
-                llm_state["chrome_inspect"] = chrome_inspect_context
-            else:
-                try:
-                    llm_state["chrome_inspect"] = await chrome_inspect.ainvoke({})
-                except Exception as exc:
-                    llm_state["chrome_inspect"] = f"Chrome inspect unavailable: {exc}"
-        selected_model = model or get_code_model()
-        model_name = getattr(selected_model, "model_name", None) or getattr(
-            selected_model, "model", None
-        ) or ("lite_model" if model is not None else "code_model")
-        print(
-            f"[sandbox_computer_use] entering bounded_llm kind={kind!r} "
-            f"model={model_name!r} context_mode={context_mode!r} "
-            f"tools={[tool.name for tool in limited_tools]!r}"
-        )
-        branch = create_agent(
-            selected_model,
-            limited_tools,
-            system_prompt=(
-                f"{SANDBOX_COMPUTER_USE_PROMPT}\n\n"
-                f"Complete only branch: {kind}.\n"
-                "If branch_instruction is present in the task state, follow it exactly."
-            ),
-        )
-        if kind != "screenshot_coordinate_click" and coordinator.iteration_records:
-            coordinator.iteration_records[-1].setdefault("llm_inputs", []).append({"branch": kind, "input": llm_state})
-        agent_input = {"messages": [HumanMessage(json.dumps(llm_state, ensure_ascii=False))]}
-        if stop_after_tool:
-            tool_result = await _invoke_agent_until_tool(branch, agent_input)
-            if tool_result is not None:
-                print(
-                    f"[sandbox_computer_use] bounded_llm stopped after tool kind={kind!r}"
-                )
-                return tool_result
-            response = await branch.with_retry(stop_after_attempt=3).ainvoke(
-                agent_input,
-                {"recursion_limit": 20},
-            )
-        else:
-            response = await branch.with_retry(stop_after_attempt=3).ainvoke(
-                agent_input,
-                {"recursion_limit": 20},
-            )
-        print(f"[sandbox_computer_use] bounded_llm completed kind={kind!r} model={model_name!r}")
-        for message in reversed(response.get("messages", [])):
-            if isinstance(message, AIMessage) and not message.tool_calls:
-                text = _extract_visible_agent_text(message.content)
-                if text:
-                    return text
-            if isinstance(message, ToolMessage):
-                return str(message.content)
-            return f"{kind} branch completed without a textual result."
-
-    def screenshot_path(value: Any) -> str:
-        """Extract the sandbox screenshot path returned by gui_screenshot."""
-        decoded = value
-        if isinstance(value, str):
-            try:
-                decoded = json.loads(value)
-            except json.JSONDecodeError:
-                decoded = value
-        path = decoded.get("path") if isinstance(decoded, dict) else decoded
-        if not isinstance(path, str) or not path.strip():
-            raise RuntimeError(f"截图工具未返回有效路径：{value!r}")
-        path = path.strip()
-        return path if path.startswith(("file://", "http://", "https://")) else f"file://{path}"
-
-    async def screenshot_coordinate_click(state: dict[str, Any]) -> str:
-        """Run the coordinate branch as exactly screenshot -> vision -> click."""
-        screenshot = await gui_screenshot.ainvoke({})
-        image_url = screenshot_path(screenshot)
-        vision = await view_image.ainvoke({
-            "image_url": image_url,
-            "prompt": (
-                "分析这张原始桌面截图，定位 task 指定的目标控件。"
-                "只返回可供 gui_click_coordinates 使用的 JSON："
-                "{\"x\":整数,\"y\":整数,\"button\":\"left|right|middle\",\"clicks\":1或2}。"
-                "原点是截图左上角，单位是原始截图像素；找不到或不能确定时返回简短错误。"
-                f"\n任务：{task}"
-            ),
-        })
-        return await bounded(
-            "screenshot_coordinate_click",
-            {
-                **state,
-                "screenshot": screenshot,
-                "image_url": image_url,
-                "vision_result": vision,
-                "branch_instruction": (
-                    "必须调用 gui_click_coordinates 恰好一次。"
-                    "只根据 vision_result 提取 x、y、button、clicks，不要调用其他工具或返回说明。"
-                ),
-            },
-            [gui_click_coordinates],
-            model=get_lite_model(),
-            stop_after_tool=True,
-        )
-
-    async def screenshot_coordinate_drag(state: dict[str, Any]) -> str:
-        """Run the drag branch as exactly screenshot -> vision -> drag."""
-        screenshot = await gui_screenshot.ainvoke({})
-        image_url = screenshot_path(screenshot)
-        selected_window = state.get("selected_window") or {}
-        app_id = str(selected_window.get("app_id") or "")
-        vision = await view_image.ainvoke({
-            "image_url": image_url,
-            "prompt": (
-                "分析这张原始桌面截图，定位 task 指定的拖拽目标。"
-                "只返回可供 gui_drag 使用的 JSON："
-                "{\"start_x\":整数,\"start_y\":整数,\"end_x\":整数,"
-                "\"end_y\":整数,\"speed\":正数}。"
-                "必须提供拖拽起点和终点；原点是截图左上角，单位是原始截图像素；"
-                "找不到或不能确定时返回简短错误。"
-                f"\n任务：{task}\napp_id：{app_id}"
-            ),
-        })
-        return await bounded(
-            "screenshot_coordinate_drag",
-            {
-                **state,
-                "screenshot": screenshot,
-                "image_url": image_url,
-                "vision_result": vision,
-                "branch_instruction": (
-                    "必须调用 gui_drag 恰好一次。使用 state.selected_window.app_id 作为 app_id，"
-                    "只根据 vision_result 提取起点、终点和 speed，不要调用其他工具或返回说明。"
-                ),
-            },
-            [gui_drag],
-            model=get_lite_model(),
-            stop_after_tool=True,
-        )
-
-    async def branch(kind: str, state: dict[str, Any]) -> str:
-        if kind == "finish_report":
-            report = {"task": task, "iterations": state.get("iterations", [])}
-            for key, inspection_tool in (("screenshot", gui_screenshot), ("gui_inspect", gui_inspect)):
-                try:
-                    report[key] = await inspection_tool.ainvoke({})
-                except Exception as exc:
-                    report[key] = {"error": str(exc)}
-            try:
-                report["chrome_inspect"] = await chrome_inspect.ainvoke({})
-            except Exception as exc:
-                report["chrome_inspect"] = {"error": str(exc)}
-            return json.dumps(report, ensure_ascii=False, default=str)
-        if kind == "screenshot_coordinate_click":
-            return await screenshot_coordinate_click(state)
-        if kind == "screenshot_coordinate_drag":
-            return await screenshot_coordinate_drag(state)
-        tools = {
-            "open_application": [gui_launch],
-            "open_webpage": [chrome_open],
-            "jev_fallback": [gui_screenshot, view_image],
-        }.get(kind, [gui_screenshot, view_image])
-        context_mode = {"open_application": "open", "open_webpage": "open"}.get(kind, "none")
-        model = get_lite_model() if kind in {"open_application", "open_webpage"} else None
-        return await bounded(
-            kind,
-            state,
-            tools,
-            model=model,
-            context_mode=context_mode,
-            stop_after_tool=kind in {"open_application", "open_webpage"},
-        )
-
-    async def native_action(operation: str, element: dict[str, Any], task_text: str) -> str:
-        element_id = str(element["id"])
-        if operation == "click":
-            return await gui_click.ainvoke({"element_id": element_id})
-        tools = {"set_text": [gui_set_text], "focus_key": [gui_key], "focus_type": [gui_type]}[operation]
-        return await bounded(
-            operation,
-            {"task": task_text, "element": element, "element_id": element_id},
-            tools,
-            stop_after_tool=True,
-        )
-
-    async def chrome_action(operation: str, element: dict[str, Any], task_text: str) -> str:
-        element_id = str(element["id"])
-        if operation == "chrome_click":
-            return await chrome_click.ainvoke({"element_id": element_id})
-        if operation == "chrome_focus":
-            return await chrome_focus.ainvoke({"element_id": element_id})
-        latest_inspection = await chrome_inspect.ainvoke({})
-        latest_data = latest_inspection
-        if isinstance(latest_inspection, str):
-            try:
-                latest_data = json.loads(latest_inspection)
-            except json.JSONDecodeError:
-                latest_data = None
-        latest_elements = (
-            latest_data.get("elements", [])
-            if isinstance(latest_data, dict)
-            else []
-        )
-        refreshed_element = next(
-            (
-                candidate for candidate in latest_elements
-                if isinstance(candidate, dict)
-                and candidate.get("backendNodeId") == element.get("backendNodeId")
-            ),
-            None,
-        )
-        if isinstance(refreshed_element, dict) and refreshed_element.get("id"):
-            element = {**element, **refreshed_element}
-            element_id = str(element["id"])
-            print(
-                f"[sandbox_computer_use] refreshed Chrome element id "
-                f"{str(element_id)!r} by backendNodeId={element.get('backendNodeId')!r}"
-            )
-        return await bounded(
-            operation,
-            {"task": task_text, "element": element, "element_id": element_id},
-            [chrome_set_text],
-            model=get_lite_model(),
-            context_mode="chrome_set_text",
-            stop_after_tool=True,
-            chrome_inspect_context=latest_inspection,
-        )
-
-    coordinator = SandboxComputerUseCoordinator(
-        task,
-        CoordinatorDeps(
-            jev,
-            inspect_gui,
-            inspect_chrome,
-            native_action,
-            chrome_action,
-            branch,
-            policy_prompt=SANDBOX_COMPUTER_USE_PROMPT,
-        ),
-        max_iterations=SANDBOX_COMPUTER_USE_MAX_ITERATIONS,
-    )
-    return await coordinator.run()
 
 async def _run_coding_agent(task: str, user_id: int) -> str:
     """Execute coding agent task using shell_executor + claude-code-agent skill.
@@ -986,16 +616,39 @@ async def _run_coding_agent(task: str, user_id: int) -> str:
     from langchain.agents import create_agent
     from langchain.messages import HumanMessage
     from tenacity import AsyncRetrying, stop_after_attempt, wait_exponential_jitter
+    from textwrap import dedent
 
     from ..models import get_code_model
     from ..prompts import CODING_AGENT_PROMPT, build_skill_prompt
+    from ..group_runtime import get_current_group_id
     from .tools import set_shell_executor_limit
     from ..skills import get_skill_manager
+    from .context import build_context_middleware
+    from langgraph.graph.message import add_messages
 
+    model = get_code_model()
+    group_id = get_current_group_id()
     coding_agent = create_agent(
-        get_code_model(),
+        model,
         _get_coding_agent_tools(),
-        system_prompt=CODING_AGENT_PROMPT + "\n\n" + build_skill_prompt(get_skill_manager().list_skills()),
+        system_prompt=(
+            CODING_AGENT_PROMPT
+            + dedent(
+                f"""
+                ## 关于 Sandbox Channel
+                当前 QQ 群号：{group_id}。
+                发送 Sandbox Channel 时，将 JSON 的 `group_id` 设置为整数 {group_id}，通过 `/tmp/hatsume_channel.sock` 发送以换行结尾的单行 JSON。
+                仅当沙盒程序需要在任务结束前或独立运行期间立即通知初芽时使用 Sandbox Channel；本次 coding_agent 的最终报告会自动返回初芽，不要重复发送。
+                当你选择使用了 Sandbox Channel 后，你应该在最后的输出中说明这一点。
+                详细用法可加载 `sandbox-channel-guide` 技能。
+                """
+            )
+            + build_skill_prompt(get_skill_manager().list_skills())
+        ),
+        middleware=build_context_middleware(
+            model,
+            preserve_system_human=True,
+        ),
     )
 
     set_shell_executor_limit(None)  # coding_agent: no call count or timeout cap
@@ -1012,16 +665,17 @@ async def _run_coding_agent(task: str, user_id: int) -> str:
             reraise=True,
         ):
             with attempt:
-                streamed_messages.clear()
+                input_messages = [HumanMessage(task)]
+                streamed_messages = list(input_messages)
                 async for event in coding_agent.astream(
-                    {"messages": [HumanMessage(task)]},
+                    {"messages": input_messages},
                     {"recursion_limit": 400},
                     stream_mode="updates",
                 ):
                     # Each event is {node_name: {state_update}}
                     for _node_name, update in event.items():
                         if isinstance(update, dict) and "messages" in update:
-                            streamed_messages.extend(update["messages"])
+                            streamed_messages = add_messages(streamed_messages, update["messages"])
 
         # Extract final AI content from the last message
         if streamed_messages:
@@ -1078,6 +732,8 @@ async def _run_background_shell(task: str, user_id: int) -> str:
     import uuid
 
     from langchain.messages import HumanMessage, SystemMessage
+    from langchain.agents import create_agent
+    from .context import build_context_middleware, offload_tool_output
     from ..models import get_code_model
     from ..prompts import (
         BACKGROUND_SHELL_DECISION_PROMPT,
@@ -1158,6 +814,14 @@ Rules:
     if not cmd.strip():
         return "background_shell: no command found in task."
 
+    decision_agent = create_agent(
+        code_model,
+        tools=[],
+        system_prompt=BACKGROUND_SHELL_DECISION_PROMPT,
+        middleware=build_context_middleware(code_model),
+    )
+    decision_messages: list[Any] = []
+
     # ── Step 2: Spawn background process ──
     proc_id = f"bgshell_{uuid.uuid4().hex[:8]}"
     await ensure_container_running(group_id)
@@ -1218,24 +882,25 @@ Rules:
                 break
 
             # ── Ask code model for decision ──
+            recent_output = await asyncio.to_thread(offload_tool_output, new_output)
             decision_prompt = (
                 f"## 任务描述\n{task}\n\n"
                 f"## 终止条件\n{description}\n\n"
-                f"## 当前命令的完整输出（包括历史输出与新增输出）\n"
-                + "```\n" + (full_output if full_output.strip() else "(无历史输出)") + "\n```\n"
-                + "\n\n## 当前命令新增输出\n"
-                + "```\n" + (new_output if new_output.strip() else "(无新输出)") + "\n```\n"
+                f"## 当前命令新增输出（历史输出见之前的消息或摘要）\n"
+                + "```\n" + (recent_output if recent_output.strip() else "(无新输出)") + "\n```\n"
                 + f"\n\n## 状态\n"
                 f"- 已耗时: {elapsed}s / {total_timeout}s\n"
                 f"- 进程状态: {'运行中' if proc_alive else '已结束'}\n"
+                f"- 上次操作: {last_decision or '(首次检查)'}\n"
             )
 
             print(f"BG Shell Check Point: \n{decision_prompt}")
 
-            decision_response = await code_model.ainvoke([
-                SystemMessage(BACKGROUND_SHELL_DECISION_PROMPT),
-                HumanMessage(decision_prompt),
-            ])
+            decision_response = await decision_agent.ainvoke(
+                {"messages": [*decision_messages, HumanMessage(decision_prompt)]}
+            )
+            decision_messages = decision_response["messages"]
+            decision_response = decision_messages[-1]
             decision = _extract_visible_agent_text(decision_response.content).upper()
 
             print(f"BG Shell Agent Decision: {decision}")
@@ -1266,7 +931,7 @@ Rules:
                     f"任务：{task[:300]}\n"
                     f"Agent 仍在后台运行中（已耗时 {elapsed}s / {total_timeout}s）。\n"
                     f"以下是命令的输出：\n\n"
-                    f"{full_output}"
+                    f"{await asyncio.to_thread(offload_tool_output, full_output)}"
                 )
                 print("Injecting command intermediate output to graph")
                 inject_agent_notification(
@@ -1307,7 +972,7 @@ Rules:
                     f"[SHELL_STDIN_REQUEST]\n"
                     f"request_id: {request_id}\n"
                     f"description: {stdin_description}\n"
-                    f"context: {new_output}\n"
+                    f"context: {recent_output}\n"
                     f"timeout: {stdin_timeout}s\n"
                     f"[/SHELL_STDIN_REQUEST]\n"
                     f"(SYSTEM) Agent 'background_shell' 进程正在等待输入，请将输入提示告知用户并向用户请求相关的输入信息。\n"
@@ -1482,7 +1147,7 @@ Rules:
         f"任务：{task[:300]}\n"
         f"总耗时：{elapsed}s\n"
         f"结果：{result_text}\n\n"
-        f"完整输出：\n{full_output}"
+        f"输出：\n{await asyncio.to_thread(offload_tool_output, full_output)}"
     )
     return final_msg
 
@@ -1492,7 +1157,7 @@ register_agent(
     name="web_researcher",
     description=(
         "用于网络热点与名词搜索的 Agent。"
-        "chat_agent 需要搜索网络时必须通过 agent_dispatch 派发给此 Agent，"
+        "初芽需要搜索网络时必须通过 agent_dispatch 派发给此 Agent，"
         "仅当用户只提供了关键词或问题时，才调用此 Agent 进行网络搜索。若用户提供了URL或网站域名，则应首选 coding_agent。"
         "task 应包含完整问题、关键词、时间范围及所需来源；完成后返回带来源链接的报告。"
     ),
@@ -1503,7 +1168,9 @@ register_agent(
     description=(
         "涉及编码、重构、分支合并、程序或依赖的安装、代码阅读与分析、文档检索与查阅、项目配置修改、Git/GitHub 操作等复杂任务，"
         "必须调用 coding_agent 完成，禁止自行通过其他工具（如 shell_executor）直接执行这些操作。"
-        "你需要将所有必要的信息告诉此 Agent。此 Agent 可以自行操作沙盒或者创建、删除与读取必要的 Skills。"
+        "你需要将所有必要的信息告诉此 Agent。此 Agent 可以自行操作沙盒或者创建、删除与读取必要的 Skills；"
+        "当沙盒程序需要即时发送进度、结果、失败或独立服务事件时，可以使用 Sandbox Channel 将消息推送给初芽。"
+        "Coding Agent 的最终报告会自动返回初芽，不要重复发送；持续轮询应由初芽创建 Heartbeat Hook，Coding Agent 只编写和验证脚本，不负责注册。"
     ),
     handler=_run_coding_agent,
 )

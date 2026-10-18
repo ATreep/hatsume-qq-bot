@@ -28,11 +28,9 @@ SOURCE = (
 )
 TREE = ast.parse(SOURCE.read_text())
 NAMES = {
-    "_format_tool_input",
-    "_wrap_tool_ainvoke",
-    "tool",
     "_download_http_media_to_tmp",
     "_download_voice_to_sandbox",
+    "_message_id_suffix",
     "send_voice",
 }
 CODE = compile(
@@ -55,7 +53,9 @@ class VoiceCase(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.sender = AsyncMock()
         self.runtime = SimpleNamespace(
-            group_id=123456, conversation=SimpleNamespace(ai_answer=self.sender)
+            group_id=123456,
+            send_voice_count=0,
+            conversation=SimpleNamespace(ai_answer=self.sender),
         )
         self.ready = AsyncMock()
         self.namespace = {
@@ -69,6 +69,7 @@ class VoiceCase(unittest.IsolatedAsyncioTestCase):
             "requests": requests,
             "urlparse": urlparse,
             "_langchain_tool": tool,
+            "tool": tool,
             "MessageSegment": MessageSegment,
             "get_current_group_runtime": lambda: self.runtime,
             "ensure_container_running": self.ready,
@@ -103,6 +104,16 @@ class SendVoiceFileTests(VoiceCase):
     async def test_encoded_file_uri_and_uppercase_mp3(self):
         self.assertIn("成功", await self.send(self.audio("声音 clip.MP3").as_uri()))
         self.assert_record()
+
+    async def test_returns_sent_message_id(self):
+        self.sender.return_value = 987654
+        result = await self.send(self.audio("clip.mp3").as_uri())
+        self.assertIn("message_id：987654", result)
+
+    async def test_unsent_message_reports_failure(self):
+        self.sender.return_value = False
+        result = await self.send(self.audio("clip.mp3").as_uri())
+        self.assertIn("声音发送失败", result)
 
     async def test_non_mp3_retains_original_file_and_reports_path(self):
         path = self.audio("clip.wav")

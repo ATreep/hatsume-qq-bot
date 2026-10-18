@@ -5,6 +5,12 @@ roles:
     api: openai_responses
     model: gpt-4.1
     options: {}
+    timeout: 120
+    fallbacks:
+      - provider: openai
+        api: openai_chat_completions
+        model: gpt-4.1-mini
+        options: {}
   lite:
     provider: openai
     api: openai_chat_completions

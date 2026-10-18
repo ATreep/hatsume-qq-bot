@@ -1,10 +1,17 @@
-"""Persistent per-group Hook management and lifecycle."""
+"""Persistent per-group Hook management and lifecycle.
+
+This module provides:
+1. Persistent hook storage and scheduling (HookStore, executor)
+2. Sandbox-to-chat_agent Unix domain socket channel (sandbox_channel, sandbox_channel_handler)
+"""
 
 from __future__ import annotations
 
 from collections.abc import Iterable
 
 from .store import HookStore
+from .sandbox_channel import SandboxChannelMessage, SandboxChannelSocketServer, get_or_create_sandbox_channel_server
+from .sandbox_channel_handler import setup_sandbox_channel_handler
 
 _store: HookStore | None = None
 
@@ -52,9 +59,30 @@ async def shutdown_hooks() -> None:
 
 __all__ = [
     "HookStore",
+    "SandboxChannelMessage",
+    "SandboxChannelSocketServer",
     "get_store",
+    "get_or_create_sandbox_channel_server",
+    "setup_sandbox_channel_handler",
     "init_hook_system",
+    "init_sandbox_channel",
     "pause_hooks_for_groups",
     "restore_hooks",
     "shutdown_hooks",
 ]
+
+
+async def init_sandbox_channel(socket_path: str = "/tmp/hatsume_channel.sock") -> SandboxChannelSocketServer:
+    """Initialize the Sandbox Channel socket server and start it.
+
+    Args:
+        socket_path: Path to Unix domain socket (default: /tmp/hatsume_channel.sock)
+
+    Returns:
+        The initialized SandboxChannelSocketServer instance.
+    """
+    server = get_or_create_sandbox_channel_server(socket_path)
+    setup_sandbox_channel_handler(server)
+    await server.start()
+    print(f"🪝 [sandbox_channel] Socket server started (socket={socket_path})")
+    return server

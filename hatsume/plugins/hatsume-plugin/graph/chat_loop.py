@@ -19,19 +19,32 @@ class ChatLoopDelegationMiddleware(AgentMiddleware):
     def __init__(self, initial_message_count: int) -> None:
         self.initial_message_count = initial_message_count
         self.reminder_id = f"chat-loop-delegation-{uuid4().hex}"
+        self._seen_messages: set[str | int] = set()
+        self._started = False
+        self._rounds = 0
+        self._reminded = False
 
     def before_model(self, state: Any, runtime: Any) -> dict[str, Any] | None:
-        messages = state["messages"][self.initial_message_count:]
+        messages = state["messages"]
+        if not self._started:
+            self._seen_messages.update(
+                message.id or id(message)
+                for message in messages[:self.initial_message_count]
+            )
+            self._started = True
         # One AI message can request multiple tools: count rounds, not tools.
-        rounds = sum(
-            1 for message in messages
-            if message.type == "ai" and getattr(message, "tool_calls", None)
-        )
-        print(f"[chat_agent] completed_tool_rounds={rounds}", flush=True)
-        if rounds < CHAT_LOOP_DELEGATION_ROUNDS or any(
-            message.id == self.reminder_id for message in messages
-        ):
+        # Keep the count outside history: compaction can remove earlier rounds.
+        for message in messages:
+            key = message.id or id(message)
+            if key in self._seen_messages:
+                continue
+            self._seen_messages.add(key)
+            if message.type == "ai" and getattr(message, "tool_calls", None):
+                self._rounds += 1
+        print(f"[chat_agent] completed_tool_rounds={self._rounds}", flush=True)
+        if self._rounds < CHAT_LOOP_DELEGATION_ROUNDS or self._reminded:
             return None
+        self._reminded = True
         return {"messages": [HumanMessage(
             content=CHAT_LOOP_DELEGATION_MESSAGE,
             id=self.reminder_id,
