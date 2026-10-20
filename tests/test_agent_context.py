@@ -78,20 +78,41 @@ class ContextTests(unittest.IsolatedAsyncioTestCase):
         async def shell_executor(shell: str, timeout: int = 30) -> str:
             """Read a fixture log."""
             return "BEGIN\n" + "log line\n" * 2500 + "END"
-        async def web_search(query: str) -> str:
-            """Search a fixture index."""
+        async def tinyfish_search(query: str, purpose: str) -> str:
+            """Search a fixture index through TinyFish."""
             return "Sources\n" + "source details\n" * 2500 + "https://example.test/docs"
+        async def tinyfish_fetch_content(urls: list[str], purpose: str) -> str:
+            """Fetch a fixture page through TinyFish."""
+            return "Fetched source details"
+        async def web_search(query: str) -> str:
+            """Search a fixture index for the coding agent."""
+            return await tinyfish_search(query, "Coding task")
         async def skill_loader(name: str) -> str:
             """Read a fixture skill."""
             return "skill instructions"
         tools = SimpleNamespace(
-            shell_executor=tool(shell_executor), web_search=tool(web_search),
+            shell_executor=tool(shell_executor),
+            web_search=tool(web_search),
+            tinyfish_search=tool("mcp__tinyfish__search")(tinyfish_search),
+            tinyfish_fetch_content=tool("mcp__tinyfish__fetch_content")(tinyfish_fetch_content),
             skill_loader=tool(skill_loader), set_shell_executor_limit=lambda limit: None,
             _agent_notification_callback=None,
         )
         for name in ("generate_image", "search_image", "skill_create", "skill_download", "skill_remove"):
             setattr(tools, name, tools.skill_loader)
         sys.modules[f"{PACKAGE}.graph.tools"] = tools
+        async def discover_tools(_name):
+            return [SimpleNamespace(name="search"), SimpleNamespace(name="fetch_content")]
+        sys.modules[f"{PACKAGE}.mcp"] = ModuleType(f"{PACKAGE}.mcp")
+        sys.modules[f"{PACKAGE}.mcp.manager"] = SimpleNamespace(
+            get_mcp_manager=lambda: SimpleNamespace(discover_tools=discover_tools),
+        )
+        sys.modules[f"{PACKAGE}.mcp.tools"] = SimpleNamespace(
+            make_dynamic_tools=lambda _server, _infos: [
+                tools.tinyfish_search,
+                tools.tinyfish_fetch_content,
+            ],
+        )
         sys.modules[f"{PACKAGE}.models"] = SimpleNamespace(get_code_model=lambda: model, get_lite_model=lambda: model)
         sys.modules[f"{PACKAGE}.prompts"] = SimpleNamespace(
             CODING_AGENT_PROMPT="Complete coding work", WEB_RESEARCHER_PROMPT="Research sources",
@@ -104,7 +125,7 @@ class ContextTests(unittest.IsolatedAsyncioTestCase):
     async def test_coding_and_research_handlers_compact_and_archive(self):
         for handler_name, tool_name, args in (
             ("_run_coding_agent", "shell_executor", {"shell": "read log"}),
-            ("_run_web_researcher", "web_search", {"query": "docs"}),
+            ("_run_web_researcher", "mcp__tinyfish__search", {"query": "docs", "purpose": "Find docs"}),
         ):
             with self.subTest(handler=handler_name):
                 model = self.model(

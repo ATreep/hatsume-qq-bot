@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
 from urllib.parse import urlsplit, urlunsplit
 
+import httpx
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.types import CallToolResult
@@ -73,10 +74,14 @@ async def _session(config: MCPServerConfig) -> AsyncIterator[ClientSession]:
 
     from mcp.client.streamable_http import streamable_http_client
 
-    async with streamable_http_client(_expand(config.url)) as (read, write, _):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-            yield session
+    headers = {key: _expand(value) for key, value in config.headers.items()}
+    async with httpx.AsyncClient(headers=headers) as http_client:
+        async with streamable_http_client(
+            _expand(config.url), http_client=http_client
+        ) as (read, write, _):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                yield session
 
 
 class MCPConnection:

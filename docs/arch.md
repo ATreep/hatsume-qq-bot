@@ -43,7 +43,7 @@ flowchart LR
 | 长期记忆检索 | 每轮自动检索或 find_memory | 只检索当前群；SQLite LIKE 优先，临时 BM25 与 Milvus/BGE-M3 补足 | graph/tools.py、memory/engine.py、memory/vector_store.py、memory/tokenizer.py |
 | 群内角色代理 | create_character_proxy、/proxy；群成员 @ 被代理用户或在对话中提到其昵称/外号 | 每群至多一个 RAM 代理；画像、外号和超时互不共享 | character_proxy.py、handlers/dialogue.py、graph/nodes.py |
 | 记忆协调与清理 | 显式协调命令、启动、每日 04:30 | 按当前 SQLite `group_id` 只读补齐 Milvus；同步清理 150 天前的 SQLite/Milvus 记录 | memory/engine.py、memory/vector_store.py、scripts/migrate_memory_vectors.py |
-| 联网搜索 | agent_dispatch(web_researcher, ...) | 专用研究 Agent 仅持有 web_search；Keenable 搜索失败或空结果时回退 DuckDuckGo。chat_agent 不直接持有网络搜索工具 | graph/agents.py、graph/tools.py |
+| 联网搜索 | agent_dispatch(web_researcher, ...) | 专用研究 Agent 仅持有 TinyFish MCP 的 `search` 与 `fetch_content`，先搜索再抓取来源页面。chat_agent 不直接持有网络搜索工具 | graph/agents.py、graph/tools.py、mcp/client.py |
 | QQ 头像 | get_avatar | 返回指定 QQ 号的头像 URL | graph/tools.py、`utils/__init__.py` |
 | 股票报价查询 | query_stock_quote | 调用外部美股模拟盘 Tracker API 查询单股实时报价（价格、涨跌幅、成交量等） | graph/tools.py、config.py |
 | 股票代码搜索 | stock_search | 模糊搜索全部股票列表，按名称、代码或板块过滤，返回最多 10 条结果 | graph/tools.py、config.py |
@@ -549,7 +549,7 @@ sequenceDiagram
     N->>N: 当前 human_queue 或新对话
 ~~~
 
-- web_researcher 使用轻量模型，工具列表严格为 `[web_search]`，不持有 Shell、浏览器、Skill 或派发工具。通过既有 agent_dispatch 的群属实例、后台任务和通知流程返回带来源链接的研究报告；chat_agent 的网络搜索统一派发给此 Agent。
+- web_researcher 使用轻量模型，工具列表严格为 TinyFish MCP 的 `[search, fetch_content]` 加必要的 Shell/Skill 辅助工具；通过既有 agent_dispatch 的群属实例、后台任务和通知流程返回带来源链接的研究报告；chat_agent 的网络搜索统一派发给此 Agent。
 - coding_agent 使用代码模型，可调用 shell_executor、Skill 工具、网页与 Pexels 图片搜索、图片生成；它的 Shell 调用次数与 timeout 均不设上限，命令仍按调用时指定的正整数 timeout 终止。
 - Shell 预算通过 ContextVar 绑定每次调用上下文，同轮 chat_agent 的并行工具共享三次计数。chat_agent 的单次 timeout 上限为 60 秒；未绑定预算时也采用 60 秒上限。coding_agent 在自己的后台任务中设置不限次数与 timeout 的预算，不改变父聊天任务的限制。非法 timeout 不消耗调用次数，也不启动命令。
 - background_shell 先把任务解析为单条命令、终止条件和总超时，然后后台启动进程并增量读取日志。

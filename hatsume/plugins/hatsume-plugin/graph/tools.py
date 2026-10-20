@@ -25,7 +25,6 @@ import requests
 from langchain_core.tools import tool as _langchain_tool
 from nonebot.adapters.onebot.v11 import Message, MessageSegment
 from langchain_community.tools import DuckDuckGoSearchRun
-from langchain_keenable import KeenableSearch, KeenableFetch
 from pydantic import BaseModel, Field
 
 from ..infra import (
@@ -421,7 +420,7 @@ def search_history_messages(
 
 
 def _format_search_results(results: list[dict[str, Any]]) -> str:
-    """Format Keenable search JSON results into readable text for the model.
+    """Format structured search results into readable text for the model.
 
     Each result becomes a numbered entry with its URL and a summary line
     (snippet preferred, falling back to description). Entries without a title
@@ -446,7 +445,7 @@ def _format_search_results(results: list[dict[str, Any]]) -> str:
 
 
 def _fallback_duckduckgo(query: str) -> str:
-    """Run DuckDuckGo when the primary Keenable provider is unusable."""
+    """Run DuckDuckGo for the coding agent's standalone search tool."""
     try:
         results = str(DuckDuckGoSearchRun().run(query)).strip()
         if results:
@@ -470,13 +469,6 @@ def web_search(query: str) -> str:
     禁止将 URL 直接作为关键字搜索。
     """
     print("Search the web: ", query)
-    try:
-        results = _format_search_results(KeenableSearch().run(query))
-        if results:
-            return results
-        print("Search provider failed: Keenable")
-    except Exception:
-        print("Search provider failed: Keenable")
     return _fallback_duckduckgo(query)
 
 

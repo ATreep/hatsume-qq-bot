@@ -18,19 +18,30 @@ ROOT = Path(__file__).resolve().parents[1] / "hatsume/plugins/hatsume-plugin"
 
 class SearchModel(FakeMessagesListChatModel):
     def bind_tools(self, tools, **kwargs):
-        if [item.name for item in tools] != ["web_search", "shell_executor", "skill_loader"]:
-            raise AssertionError("Researcher must expose web_search, shell_executor, and skill_loader")
+        if [item.name for item in tools] != [
+            "mcp__tinyfish__search",
+            "mcp__tinyfish__fetch_content",
+            "shell_executor",
+            "skill_loader",
+        ]:
+            raise AssertionError(
+                "Researcher must expose TinyFish search/fetch plus shell_executor and skill_loader"
+            )
         return self
 
 
 class WebResearcherTests(unittest.IsolatedAsyncioTestCase):
     async def test_researcher_searches_and_returns_visible_report(self):
         calls = []
-        @tool
-        def web_search(query: str) -> str:
-            """Search the fixture index."""
+        @tool("mcp__tinyfish__search")
+        def tinyfish_search(query: str, purpose: str) -> str:
+            """Search the fixture index through TinyFish."""
             calls.append(query)
             return "GNOME AT-SPI documentation https://gnome.pages.gitlab.gnome.org/at-spi2-core/libatspi/"
+        @tool("mcp__tinyfish__fetch_content")
+        def tinyfish_fetch_content(urls: list[str], purpose: str) -> str:
+            """Fetch fixture pages through TinyFish."""
+            return ""
         @tool
         def shell_executor(shell: str, timeout: int) -> str:
             """Run a shell command in the fixture sandbox."""
@@ -41,7 +52,7 @@ class WebResearcherTests(unittest.IsolatedAsyncioTestCase):
             return ""
         report = "参考 GNOME AT-SPI 文档：https://gnome.pages.gitlab.gnome.org/at-spi2-core/libatspi/"
         model = SearchModel(responses=[
-            AIMessage(content="", tool_calls=[{"name": "web_search", "args": {"query": "GNOME AT-SPI"}, "id": "q1"}]),
+            AIMessage(content="", tool_calls=[{"name": "mcp__tinyfish__search", "args": {"query": "GNOME AT-SPI", "purpose": "Find accessibility documentation"}, "id": "q1"}]),
             AIMessage(content=report),
         ])
         package = "researcher_test_plugin"
@@ -51,10 +62,19 @@ class WebResearcherTests(unittest.IsolatedAsyncioTestCase):
             module.__path__ = [str(ROOT / "graph" if name.endswith(".graph") else ROOT)]
             modules[name] = module
         modules[f"{package}.graph.tools"] = SimpleNamespace(
-            web_search=web_search,
             shell_executor=shell_executor,
             skill_loader=skill_loader,
             set_shell_executor_limit=lambda _limit: None,
+        )
+        manager = SimpleNamespace(
+            discover_tools=lambda _name: _discover_tinyfish_tools(),
+        )
+        async def _discover_tinyfish_tools():
+            return [SimpleNamespace(name="search"), SimpleNamespace(name="fetch_content")]
+        modules[f"{package}.mcp"] = ModuleType(f"{package}.mcp")
+        modules[f"{package}.mcp.manager"] = SimpleNamespace(get_mcp_manager=lambda: manager)
+        modules[f"{package}.mcp.tools"] = SimpleNamespace(
+            make_dynamic_tools=lambda _server, _infos: [tinyfish_search, tinyfish_fetch_content],
         )
         modules[f"{package}.models"] = SimpleNamespace(get_lite_model=lambda: model)
         modules[f"{package}.prompts"] = SimpleNamespace(WEB_RESEARCHER_PROMPT="实际搜索并返回来源")

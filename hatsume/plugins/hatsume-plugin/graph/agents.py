@@ -570,23 +570,34 @@ def _get_coding_agent_tools() -> list[Any]:
 
 
 async def _run_web_researcher(task: str, user_id: int) -> str:
-    """Search the web with one tool and return results via agent_dispatch."""
+    """Research the web with TinyFish MCP search and fetch tools."""
     from langchain.agents import create_agent
     from langchain.messages import AIMessage, HumanMessage
     from tenacity import stop_after_attempt
 
     from ..models import get_lite_model
     from ..prompts import WEB_RESEARCHER_PROMPT
-    from .tools import shell_executor, skill_loader, web_search
+    from .tools import shell_executor, skill_loader
     from .tools import set_shell_executor_limit
+    from ..mcp.manager import get_mcp_manager
+    from ..mcp.tools import make_dynamic_tools
 
     from .context import build_context_middleware
 
     set_shell_executor_limit(3)
     model = get_lite_model()
+    infos = await get_mcp_manager().discover_tools("tinyfish")
+    requested_names = {"search", "fetch_content"}
+    tinyfish_infos = [item for item in infos if item.name in requested_names]
+    missing = requested_names - {item.name for item in tinyfish_infos}
+    if missing:
+        raise RuntimeError(
+            "TinyFish MCP is missing required tools: " + ", ".join(sorted(missing))
+        )
+    tinyfish_tools = make_dynamic_tools("tinyfish", tinyfish_infos)
     researcher = create_agent(
         model,
-        tools=[web_search, shell_executor, skill_loader],
+        tools=[*tinyfish_tools, shell_executor, skill_loader],
         system_prompt=WEB_RESEARCHER_PROMPT,
         middleware=build_context_middleware(model),
     )
@@ -1159,6 +1170,7 @@ register_agent(
         "用于网络热点与名词搜索的 Agent。"
         "初芽需要搜索网络时必须通过 agent_dispatch 派发给此 Agent，"
         "仅当用户只提供了关键词或问题时，才调用此 Agent 进行网络搜索。若用户提供了URL或网站域名，则应首选 coding_agent。"
+        "此 Agent 通过 TinyFish MCP 的 search 与 fetch_content 工具先搜索再读取来源页面。"
         "task 应包含完整问题、关键词、时间范围及所需来源；完成后返回带来源链接的报告。"
     ),
     handler=_run_web_researcher,
