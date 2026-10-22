@@ -258,7 +258,7 @@ stateDiagram-v2
 - 合法 reply 目标与被 @ 的成员同时会成为本群 chat_peers 成员；`peer_session_id()` 定义在 `state.py`，`hooks/message_trigger.py` 与 `graph/nodes.py` 共用同一实现，`graph/` 不反向导入 `hooks/`。
 - 普通对话启动时捕获显式 Bot 与目标群号，后续 LangGraph 回调通过 `send_group_msg` 定向发送，不依赖 NoneBot matcher 的 `current_bot/current_event` 临时上下文。
 - 发送失败最多尝试五次，每次间隔三秒。
-- ai_node 每次调用 chat_agent 都注入运行数据 faces/ 中可用的情绪名和 `[hatsumeface:情绪]` 标记说明，不再使用随机或冷却 gate；模型输出合法标记时选择同前缀图片并单独发送。
+- ai_node 每次调用 chat_agent 都注入运行数据 faces/ 中可用的情绪名和 `send_text` 的 `hatsumeface` 参数说明，不再使用随机或冷却 gate；参数必须逐字使用 faces 文件名前缀中的原始情绪文字，模型传入合法情绪时选择同前缀图片并单独发送。
 
 ~~~mermaid
 flowchart LR

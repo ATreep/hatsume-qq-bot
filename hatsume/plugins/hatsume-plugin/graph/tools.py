@@ -726,6 +726,9 @@ async def send_text(
     调用时必须传入非空的 memories 列表，至少包含一条记忆；为空时工具会返回错误且不会发送消息。
     CQ at 标记必须包含在 text 中，且每个标记只能指定一个 QQ 用户；不能 @ 全体成员。
     特殊控制标记请使用对应参数，不能写入 text。
+    hatsumeface 必须严格填写系统提示中列出的原始情绪文字（对应 faces 图片文件名中第一个下划线前的文字），
+    必须逐字匹配；禁止使用英文名称、翻译、别名、同义词或自行改写。例如可选情绪是“开心”时只能传“开心”，
+    不能传“happy”。不发送表情时传 null。
     """
     runtime = get_current_group_runtime()
     if not memories:
