@@ -570,31 +570,80 @@ def _get_coding_agent_tools() -> list[Any]:
 
 
 async def _run_web_researcher(task: str, user_id: int) -> str:
-    """Research the web with TinyFish MCP search and fetch tools."""
+    """Research the web with TinyFish's native LangChain tools."""
     from langchain.agents import create_agent
     from langchain.messages import AIMessage, HumanMessage
+    from langchain_core.tools import tool
+    from langchain_tinyfish import TinyFishFetch, TinyFishSearch
     from tenacity import stop_after_attempt
 
     from ..models import get_lite_model
     from ..prompts import WEB_RESEARCHER_PROMPT
     from .tools import shell_executor, skill_loader
     from .tools import set_shell_executor_limit
-    from ..mcp.manager import get_mcp_manager
-    from ..mcp.tools import make_dynamic_tools
 
     from .context import build_context_middleware
 
     set_shell_executor_limit(3)
     model = get_lite_model()
-    infos = await get_mcp_manager().discover_tools("tinyfish")
-    requested_names = {"search", "fetch_content"}
-    tinyfish_infos = [item for item in infos if item.name in requested_names]
-    missing = requested_names - {item.name for item in tinyfish_infos}
-    if missing:
-        raise RuntimeError(
-            "TinyFish MCP is missing required tools: " + ", ".join(sorted(missing))
+    search_backend = TinyFishSearch()
+    fetch_backend = TinyFishFetch()
+
+    @tool("tinyfish_search")
+    async def tinyfish_search(
+        query: str,
+        location: str | None = None,
+        language: str | None = None,
+    ) -> str:
+        """Search the web with TinyFish and return structured results."""
+        print(
+            f"🔎 [tinyfish_search] query={query!r} location={location!r} language={language!r}",
+            flush=True,
         )
-    tinyfish_tools = make_dynamic_tools("tinyfish", tinyfish_infos)
+        try:
+            result = await search_backend.ainvoke(
+                {"query": query, "location": location, "language": language}
+            )
+        except Exception as exc:
+            print(
+                f"❌ [tinyfish_search] failed: {type(exc).__name__}: {exc}",
+                flush=True,
+            )
+            raise
+        print(f"✅ [tinyfish_search] result_chars={len(str(result))}", flush=True)
+        return str(result)
+
+    @tool("tinyfish_fetch")
+    async def tinyfish_fetch(
+        urls: list[str],
+        format: str = "markdown",
+        links: bool | None = None,
+        image_links: bool | None = None,
+    ) -> str:
+        """Fetch clean page content with TinyFish."""
+        print(
+            f"📄 [tinyfish_fetch] urls={len(urls)} format={format!r}",
+            flush=True,
+        )
+        try:
+            result = await fetch_backend.ainvoke(
+                {
+                    "urls": urls,
+                    "format": format,
+                    "links": links,
+                    "image_links": image_links,
+                }
+            )
+        except Exception as exc:
+            print(
+                f"❌ [tinyfish_fetch] failed: {type(exc).__name__}: {exc}",
+                flush=True,
+            )
+            raise
+        print(f"✅ [tinyfish_fetch] result_chars={len(str(result))}", flush=True)
+        return str(result)
+
+    tinyfish_tools = [tinyfish_search, tinyfish_fetch]
     researcher = create_agent(
         model,
         tools=[*tinyfish_tools, shell_executor, skill_loader],
@@ -1170,7 +1219,7 @@ register_agent(
         "用于网络热点与名词搜索的 Agent。"
         "初芽需要搜索网络时必须通过 agent_dispatch 派发给此 Agent，"
         "仅当用户只提供了关键词或问题时，才调用此 Agent 进行网络搜索。若用户提供了URL或网站域名，则应首选 coding_agent。"
-        "此 Agent 通过 TinyFish MCP 的 search 与 fetch_content 工具先搜索再读取来源页面。"
+        "此 Agent 通过 TinyFish 的 LangChain SDK 工具 tinyfish_search 与 tinyfish_fetch 先搜索再读取来源页面。"
         "task 应包含完整问题、关键词、时间范围及所需来源；完成后返回带来源链接的报告。"
     ),
     handler=_run_web_researcher,

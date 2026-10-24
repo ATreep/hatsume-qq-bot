@@ -722,7 +722,7 @@ async def send_text(
 ) -> str:
     """向当前群发送文字，并可附带回复、记忆和表情控制参数。
 
-    任务进行中禁止调用本工具。每轮 ai_node 最多调用两次。
+    每轮 ai_node 最多调用两次。
     调用时必须传入非空的 memories 列表，至少包含一条记忆；为空时工具会返回错误且不会发送消息。
     CQ at 标记必须包含在 text 中，且每个标记只能指定一个 QQ 用户；不能 @ 全体成员。
     特殊控制标记请使用对应参数，不能写入 text。
@@ -1328,6 +1328,31 @@ async def generate_image(prompt: str, image_urls: list[str]) -> str:
         return f"❌ 图片生成失败: {e}"
 
     return result_msg
+
+
+@tool
+async def generate_tts(text: str) -> str:
+    """生成初芽的简短语音，并返回沙盒中的 MP3 文件路径。
+
+    只有简短、符合初芽角色性格的内容适合使用本工具；拒绝长篇大论或
+    与初芽角色不符的朗读文本。如果需要向用户发送这段语音，必须随后
+    使用 send_voice 工具。若相同内容已经通过 send_text 发出，不要重复
+    使用本工具发送一遍。
+    """
+    from ..models import generate_tts_audio
+
+    value = (text or "").strip()
+    if not value:
+        return "❌ 语音生成失败：text 不能为空。"
+    if len(value) > 200:
+        return "❌ 语音生成失败：TTS 只支持简短、符合初芽角色的内容。"
+    print(f"🔊 [generate_tts] requested {len(value)} characters")
+    try:
+        path = await generate_tts_audio(value)
+    except Exception as error:
+        print(f"❌ generate_tts failed: {type(error).__name__}: {error}")
+        return f"❌ 语音生成失败：{error}"
+    return f"语音已成功生成并保存到沙盒路径：file://{path}"
 
 @tool
 async def shell_executor(shell: str, timeout: int) -> str:
@@ -2719,6 +2744,7 @@ CHAT_TOOLS = [
     search_history_messages,
     view_image,
     generate_image,
+    generate_tts,
     send_text,
     send_image,
     send_video,

@@ -74,44 +74,93 @@ class ContextTests(unittest.IsolatedAsyncioTestCase):
     def model(self, *responses):
         return SessionModel(responses=list(responses))
 
+    async def test_send_text_first_gate_blocks_until_send_text_is_attempted(self):
+        middleware = self.chat_loop.SendTextFirstMiddleware()
+
+        blocked_request = SimpleNamespace(
+            tool_call={"name": "shell_executor", "id": "blocked"}
+        )
+        blocked_handler_called = False
+
+        async def blocked_handler(_request):
+            nonlocal blocked_handler_called
+            blocked_handler_called = True
+            return "should not run"
+
+        blocked = await middleware.awrap_tool_call(blocked_request, blocked_handler)
+        self.assertEqual(blocked.content, self.chat_loop.SEND_TEXT_FIRST_WARNING)
+        self.assertFalse(blocked_handler_called)
+
+        send_request = SimpleNamespace(
+            tool_call={"name": "send_text", "id": "send"}
+        )
+        send_attempted = False
+
+        async def send_handler(_request):
+            nonlocal send_attempted
+            send_attempted = True
+            raise RuntimeError("send failed")
+
+        with self.assertRaisesRegex(RuntimeError, "send failed"):
+            await middleware.awrap_tool_call(send_request, send_handler)
+        self.assertTrue(send_attempted)
+
+        later_request = SimpleNamespace(
+            tool_call={"name": "shell_executor", "id": "later"}
+        )
+        async def later_handler(_request):
+            return "allowed"
+
+        later = await middleware.awrap_tool_call(later_request, later_handler)
+        self.assertEqual(later, "allowed")
+
+    async def test_send_text_first_gate_state_survives_agent_reconstruction(self):
+        middleware = self.chat_loop.SendTextFirstMiddleware()
+        request = SimpleNamespace(tool_call={"name": "send_text", "id": "send"})
+        async def send_handler(_request):
+            return "sent"
+
+        await middleware.awrap_tool_call(request, send_handler)
+
+        later_request = SimpleNamespace(
+            tool_call={"name": "dynamic_mcp_tool", "id": "mcp"}
+        )
+        async def mcp_handler(_request):
+            return "mcp result"
+
+        result = await middleware.awrap_tool_call(later_request, mcp_handler)
+        self.assertEqual(result, "mcp result")
+
     def install_agent_fixtures(self, model):
         async def shell_executor(shell: str, timeout: int = 30) -> str:
             """Read a fixture log."""
             return "BEGIN\n" + "log line\n" * 2500 + "END"
-        async def tinyfish_search(query: str, purpose: str) -> str:
-            """Search a fixture index through TinyFish."""
+        async def tinyfish_search(query: str, location: str | None = None, language: str | None = None) -> str:
+            """Search a fixture index through TinyFish SDK."""
             return "Sources\n" + "source details\n" * 2500 + "https://example.test/docs"
-        async def tinyfish_fetch_content(urls: list[str], purpose: str) -> str:
-            """Fetch a fixture page through TinyFish."""
+        async def tinyfish_fetch(urls: list[str], format: str = "markdown", links: bool | None = None, image_links: bool | None = None) -> str:
+            """Fetch a fixture page through TinyFish SDK."""
             return "Fetched source details"
         async def web_search(query: str) -> str:
             """Search a fixture index for the coding agent."""
-            return await tinyfish_search(query, "Coding task")
+            return await tinyfish_search(query)
         async def skill_loader(name: str) -> str:
             """Read a fixture skill."""
             return "skill instructions"
         tools = SimpleNamespace(
             shell_executor=tool(shell_executor),
             web_search=tool(web_search),
-            tinyfish_search=tool("mcp__tinyfish__search")(tinyfish_search),
-            tinyfish_fetch_content=tool("mcp__tinyfish__fetch_content")(tinyfish_fetch_content),
+            tinyfish_search=tool("tinyfish_search")(tinyfish_search),
+            tinyfish_fetch=tool("tinyfish_fetch")(tinyfish_fetch),
             skill_loader=tool(skill_loader), set_shell_executor_limit=lambda limit: None,
             _agent_notification_callback=None,
         )
         for name in ("generate_image", "search_image", "skill_create", "skill_download", "skill_remove"):
             setattr(tools, name, tools.skill_loader)
         sys.modules[f"{PACKAGE}.graph.tools"] = tools
-        async def discover_tools(_name):
-            return [SimpleNamespace(name="search"), SimpleNamespace(name="fetch_content")]
-        sys.modules[f"{PACKAGE}.mcp"] = ModuleType(f"{PACKAGE}.mcp")
-        sys.modules[f"{PACKAGE}.mcp.manager"] = SimpleNamespace(
-            get_mcp_manager=lambda: SimpleNamespace(discover_tools=discover_tools),
-        )
-        sys.modules[f"{PACKAGE}.mcp.tools"] = SimpleNamespace(
-            make_dynamic_tools=lambda _server, _infos: [
-                tools.tinyfish_search,
-                tools.tinyfish_fetch_content,
-            ],
+        sys.modules["langchain_tinyfish"] = SimpleNamespace(
+            TinyFishSearch=lambda: tools.tinyfish_search,
+            TinyFishFetch=lambda: tools.tinyfish_fetch,
         )
         sys.modules[f"{PACKAGE}.models"] = SimpleNamespace(get_code_model=lambda: model, get_lite_model=lambda: model)
         sys.modules[f"{PACKAGE}.prompts"] = SimpleNamespace(
@@ -125,7 +174,7 @@ class ContextTests(unittest.IsolatedAsyncioTestCase):
     async def test_coding_and_research_handlers_compact_and_archive(self):
         for handler_name, tool_name, args in (
             ("_run_coding_agent", "shell_executor", {"shell": "read log"}),
-            ("_run_web_researcher", "mcp__tinyfish__search", {"query": "docs", "purpose": "Find docs"}),
+            ("_run_web_researcher", "tinyfish_search", {"query": "docs"}),
         ):
             with self.subTest(handler=handler_name):
                 model = self.model(

@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+from pathlib import Path
+import subprocess
+import uuid
 from typing import Any, Literal
 
 import requests
@@ -197,3 +201,52 @@ async def generate_image_for_sensenova(
         ],
         "image model",
     )
+
+
+async def generate_tts_audio(text: str) -> str:
+    """Synthesize Hatsume voice and return an MP3 sandbox path."""
+    from openai import OpenAI
+
+    from .prompts import TTS_VOICE_PROMPT
+
+    settings = get_model_config_store().resolve("tts")
+    output_dir = Path("/tmp")
+    wav_path = output_dir / f"hatsume-tts-{uuid.uuid4().hex}.wav"
+    mp3_path = output_dir / f"hatsume-tts-{uuid.uuid4().hex}.mp3"
+
+    def request() -> bytes:
+        client = OpenAI(
+            api_key=settings["api_key"],
+            base_url=settings["base_url"],
+            timeout=settings.get("timeout"),
+        )
+        completion = client.chat.completions.create(
+            model=settings["model"],
+            messages=[
+                {"role": "user", "content": TTS_VOICE_PROMPT},
+                {"role": "assistant", "content": text},
+            ],
+            audio={"format": "wav", "optimize_text_preview": False},
+        )
+        audio = getattr(completion.choices[0].message, "audio", None)
+        data = getattr(audio, "data", None)
+        if not isinstance(data, str) or not data:
+            raise ValueError("TTS response did not contain audio data")
+        return base64.b64decode(data)
+
+    print(f"🔊 [tts] synthesizing {len(text)} characters with {settings['model']}")
+    audio_bytes = await asyncio.to_thread(request)
+    wav_path.write_bytes(audio_bytes)
+    try:
+        await asyncio.to_thread(
+            subprocess.run,
+            ["ffmpeg", "-y", "-i", str(wav_path), "-codec:a", "libmp3lame", "-q:a", "4", str(mp3_path)],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            timeout=60,
+        )
+    finally:
+        wav_path.unlink(missing_ok=True)
+    print(f"🔊 [tts] generated sandbox audio: {mp3_path}")
+    return str(mp3_path)

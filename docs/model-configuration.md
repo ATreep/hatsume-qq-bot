@@ -75,7 +75,7 @@ roles:
 每次调用按顺序尝试：前一个条目抛出任何错误（HTTP 错误、连接失败、响应解析错误等）或超过 `timeout` 时，自动改用下一个；全部失败时抛出最后一个错误。每次调用都从主配置重新开始，不记忆上次失败的供应商。日志只记录失败条目的供应商、模型和错误类型/状态码。
 
 - `timeout` 是单个条目整次调用的上限，包含 SDK 自身的重试；同时作为 SDK 单次 HTTP 请求的超时，同步调用也受其限制。未设置时只依赖 SDK 默认超时，可能长时间等待后才切换。
-- 适用范围：聊天角色（含 `create_agent` 工具调用和同步 `invoke`）、`systemone`、`embedding`、`image_sensenova`。单条目角色仍直接返回原 SDK 客户端，行为不变。
+- 适用范围：聊天角色（含 `create_agent` 工具调用和同步 `invoke`）、`systemone`、`embedding`、`image_sensenova`、`tts`。单条目角色仍直接返回原 SDK 客户端，行为不变。
 - 工具调用时，每个条目使用自己 SDK 的工具格式；中途失败的对话历史会原样交给下一个条目。不同 API 之间切换时，供应商专有的推理内容等字段可能被下一个供应商忽略。
 - 调用方覆盖 `reasoning_effort` 时会应用到所有 OpenAI 条目；Google 备用条目保留自己的 thinking 设置（Google 主配置仍按原规则报错）。`thinking=False` 对所有条目生效。
 - 图片生成显式指定的模型 ID 只替换主条目的模型；备用条目使用各自配置的模型。图片条目未设置 `timeout` 时默认 300 秒。
@@ -138,6 +138,7 @@ API Key 只能直接写入 `providers.yml`，文件必须保持 owner-only 权�
 | `systemone` | `systemone` |
 | `embedding` | `openai_embeddings` |
 | `image_sensenova` | `sensenova_images` |
+| `tts` | `openai_chat_completions` |
 
 这次只新增三种标准聊天 API 的可切换适配器。SenseNova 图片和 System One 适配器保留，其供应商与模型选择也改为读取 YAML。需要特殊 `extra_body` 的聊天供应商可以保存为 `supported_apis: []`，本轮不能选为聊天模型。
 

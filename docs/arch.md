@@ -43,7 +43,7 @@ flowchart LR
 | 长期记忆检索 | 每轮自动检索或 find_memory | 只检索当前群；SQLite LIKE 优先，临时 BM25 与 Milvus/BGE-M3 补足 | graph/tools.py、memory/engine.py、memory/vector_store.py、memory/tokenizer.py |
 | 群内角色代理 | create_character_proxy、/proxy；群成员 @ 被代理用户或在对话中提到其昵称/外号 | 每群至多一个 RAM 代理；画像、外号和超时互不共享 | character_proxy.py、handlers/dialogue.py、graph/nodes.py |
 | 记忆协调与清理 | 显式协调命令、启动、每日 04:30 | 按当前 SQLite `group_id` 只读补齐 Milvus；同步清理 150 天前的 SQLite/Milvus 记录 | memory/engine.py、memory/vector_store.py、scripts/migrate_memory_vectors.py |
-| 联网搜索 | agent_dispatch(web_researcher, ...) | 专用研究 Agent 仅持有 TinyFish MCP 的 `search` 与 `fetch_content`，先搜索再抓取来源页面。chat_agent 不直接持有网络搜索工具 | graph/agents.py、graph/tools.py、mcp/client.py |
+| 联网搜索 | agent_dispatch(web_researcher, ...) | 专用研究 Agent 仅持有 TinyFish LangChain SDK 的 `tinyfish_search` 与 `tinyfish_fetch`，先搜索再抓取来源页面。chat_agent 不直接持有网络搜索工具 | graph/agents.py、graph/tools.py |
 | QQ 头像 | get_avatar | 返回指定 QQ 号的头像 URL | graph/tools.py、`utils/__init__.py` |
 | 股票报价查询 | query_stock_quote | 调用外部美股模拟盘 Tracker API 查询单股实时报价（价格、涨跌幅、成交量等） | graph/tools.py、config.py |
 | 股票代码搜索 | stock_search | 模糊搜索全部股票列表，按名称、代码或板块过滤，返回最多 10 条结果 | graph/tools.py、config.py |
@@ -51,6 +51,7 @@ flowchart LR
 | 随机 ACG 图片 | 白名单群戳一戳 | 从 macOS Photos 的 ACG 相册导出并直接发送；非白名单群静默返回 | handlers/tools.py |
 | 图片发送 | send_image | 支持 HTTP、base64 和沙盒 file:// 文件，每轮最多三张 | graph/tools.py |
 | 图片生成 | generate_image | 使用 SenseNova 图像接口，支持参考图和限流 | graph/tools.py、models.py、state.py |
+| 语音生成 | generate_tts | 使用 `models.yml` 中独立的 `tts` 角色请求 MiMo TTS，输出可由 `send_voice` 发送的沙盒 MP3 路径 | graph/tools.py、models.py、prompts.py |
 | 视频发送 | send_video | 支持 HTTP URL、沙盒绝对路径和沙盒 file:// 文件，每轮最多一个 | graph/tools.py |
 | 声音发送 | send_voice | 支持 HTTP/HTTPS 和沙盒 file://；网络文件下载到 /tmp，按后缀仅允许 MP3，其他格式保留文件并返回沙盒路径 | graph/tools.py |
 | 模型与供应商切换 | 管理员 /model、/provider | 全局模型角色与连接分别保存到 models.yml、providers.yml，下一次调用生效并保留到重启后 | handlers/tools.py、model_commands.py、model_config.py、model_factory.py、models.py |
@@ -58,7 +59,7 @@ flowchart LR
 | 本地 Shell | 管理员 /ccsh、/cc 或 shell_executor | 在当前 `hatsume-containerization` 的 `/work` 执行，home 为 `/root`，源码位于 `/work/hatsume`；进程、计数和延迟逻辑停用按群隔离 | handlers/tools.py、graph/tools.py、infra.py |
 | 后台长任务 | agent_dispatch(background_shell, ...) | 后台运行长时间或交互式命令，周期判断继续、通知、输入、结束或终止 | graph/agents.py、infra.py |
 | 编码 Agent | agent_dispatch(coding_agent, ...) | 使用代码模型与 Shell、Skill、搜索、图像工具处理复杂开发任务 | graph/agents.py、prompts.py |
-| Agent 通知 | 后台 Agent 中间输出或完成 | 注入当前对话；无活跃对话时为目标群启动新图 | graph/tools.py、graph/nodes.py、handlers/dialogue.py |
+| Agent 通知 | 后台 Agent 中间输出或完成 | 注入当前对话；无活跃对话时为目标群启动新图；Bot 断线竞态下保留带 `agent` 标记的队列消息并记录日志，等待路由恢复后的下一次对话投递 | graph/tools.py、graph/nodes.py、handlers/dialogue.py |
 | Agent stdin | respond_to_shell_prompt | 把用户回复交回等待输入的后台进程 | graph/tools.py、graph/agents.py |
 | 定时任务创建 | daily、weekly、monthly、at 四个聊天工具 | 频率任务每周期最多 5 个 `HH:MM:SS` 时间点、正整数间隔且由结束时间限定；用户未指定结束时间时 Agent 按任务语义选择有限边界且创建后告知用户；指定时刻最多 10 个 | graph/tools.py、timer/schedule.py、timer/store.py |
 | 定时任务管理 | /timer 或聊天工具 | 按群显示完整频率规则或全部指定时刻，支持删除；命令更新兼容为最多 10 个指定时刻 | handlers/tools.py、graph/tools.py |
@@ -244,7 +245,7 @@ stateDiagram-v2
 - ai_node 自动检索记忆，注入 Skill 列表、运行中 Agent 状态、当前群定时任务概览、当前群待办、可选表情图片提示和调用时的本地日期时间，再用 CHAT_TOOLS 创建 LangChain Agent。进入节点时先删除所有已满 72 小时的待办；Todo 数据库不可用时只注入不可用状态，不中断普通回复。主调用异常最多重试五次；若结果只有工具调用、工具结果、空白或 `[xxx: xxx]` 类控制标记且未请求结束对话，则携带本次 Agent 消息状态额外调用一次。递归上限为 60。
 - ai_node 每轮读取辅助队列的非破坏性快照，临时放在当前 Human 内容之前；同一辅助上下文会持续进入后续轮次，直到新写入触发压缩。发送前移除 reply、memory 与 face 标签；图历史会移除 reply 控制标记，但保留现有 face 与 memory 标签历史语义。
 - ai_node 只解析当前 HumanMessage 中顶层 `type=message` 的 JSON。每轮先用 `get_intent_model()`（Jev）在同一个 System One 请求中判断 chat_intend_judge 与 chat_end；判断为 skip 时不创建或调用 chat_agent，判断为 respond 时打印回复类型与原因后继续。系统注入任务绕过判断以保证执行。发送者 QQ ID 等于非空 `ADMIN_QQ_ID` 且该消息的直接正文包含大小写敏感的 `BYPASS` 时，本地 `sys_prompt` 追加 ADMIN MODE，chat_agent 保持当前高级模型，并在不修改 LangGraph 历史的前提下从全部模型输入消息复制过滤历史 `image_url` 与 `img_url` 内容段；回复引用、合并转发、辅助上下文和历史消息均不能触发，下一轮恢复未过滤输入与基础角色 Prompt。当前普通消息图片同时以沙盒 Markdown 路径和 `image_url` data URI 输入，回复图片仍使用沙盒 Markdown 路径。
-- ai_node 在最终可见文本确定后，把本次被回复消息的发送者与可见文本中每个 `[CQ:at,qq=...]` 指向的成员加入本群 `chat_peers`，不依赖发送是否成功；非法目标、未知发送者和 Bot 自身不入列。被加入者后续消息因此进入 pending 主对话而不是辅助上下文。
+- ai_node 在每次 chat_agent 调用中通过共享 middleware 强制第一个可执行工具调用为 `send_text`；其他工具在此前只返回警告，不执行。首次尝试即消耗该门槛，即使 `send_text` 后续返回校验或发送错误；门槛状态跨 MCP 工具加载重建的 Agent 保留，并在下一次 ai_node 调用重置。随后 ai_node 在最终可见文本确定后，把本次被回复消息的发送者与可见文本中每个 `[CQ:at,qq=...]` 指向的成员加入本群 `chat_peers`，不依赖发送是否成功；非法目标、未知发送者和 Bot 自身不入列。被加入者后续消息因此进入 pending 主对话而不是辅助上下文。
 - chat_agent 调用 end_conversation 后，ConversationState 立即关闭聊天并清空 chat_peers；ai_node 抑制该轮文本和表情发送，human_node 随即路由到 finish。下一次主动提及通过 activate_chat() 解除结束标记。
 - finish_conversation_node 清理图运行标记和 Human 队列，重置 Skill 单轮去重，把 Human/AI/Tool 历史规范化后放回辅助队列，最后发送 [CONVERSATION END]。
 
@@ -549,7 +550,7 @@ sequenceDiagram
     N->>N: 当前 human_queue 或新对话
 ~~~
 
-- web_researcher 使用轻量模型，工具列表严格为 TinyFish MCP 的 `[search, fetch_content]` 加必要的 Shell/Skill 辅助工具；通过既有 agent_dispatch 的群属实例、后台任务和通知流程返回带来源链接的研究报告；chat_agent 的网络搜索统一派发给此 Agent。
+- web_researcher 使用轻量模型，工具列表严格为 TinyFish LangChain SDK 的 `[tinyfish_search, tinyfish_fetch]` 加必要的 Shell/Skill 辅助工具；每次搜索和抓取会在控制台打印参数摘要、结果长度或错误类型，但不打印凭证；通过既有 agent_dispatch 的群属实例、后台任务和通知流程返回带来源链接的研究报告；chat_agent 的网络搜索统一派发给此 Agent。
 - coding_agent 使用代码模型，可调用 shell_executor、Skill 工具、网页与 Pexels 图片搜索、图片生成；它的 Shell 调用次数与 timeout 均不设上限，命令仍按调用时指定的正整数 timeout 终止。
 - Shell 预算通过 ContextVar 绑定每次调用上下文，同轮 chat_agent 的并行工具共享三次计数。chat_agent 的单次 timeout 上限为 60 秒；未绑定预算时也采用 60 秒上限。coding_agent 在自己的后台任务中设置不限次数与 timeout 的预算，不改变父聊天任务的限制。非法 timeout 不消耗调用次数，也不启动命令。
 - background_shell 先把任务解析为单条命令、终止条件和总超时，然后后台启动进程并增量读取日志。

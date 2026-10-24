@@ -63,7 +63,7 @@ from ..utils import (
     message_to_json,
     strip_thinking_tags,
 )
-from .chat_loop import ChatLoopDelegationMiddleware
+from .chat_loop import ChatLoopDelegationMiddleware, SendTextFirstMiddleware
 from .context import build_context_middleware
 from .tools import (
     get_chat_tools,
@@ -692,7 +692,13 @@ def inject_agent_notification(
     else:
         if start_conversation_cb is not None:
             print(f"🧩 [inject_agent_notification] Starting new conversation for {agent_name} result")
-            start_conversation_cb(user_id, group_id, notify_msg)
+            try:
+                start_conversation_cb(user_id, group_id, notify_msg)
+            except Exception as exc:  # noqa: BLE001 - delivery must not fail Agent task
+                print(
+                    f"⚠️ [inject_agent_notification] Failed to start conversation: "
+                    f"group={group_id} agent={agent_name} error={exc}"
+                )
         else:
             _start_direct_conv(user_id, group_id, notify_msg)
 
@@ -1291,6 +1297,7 @@ async def ai_node(state: MessagesState) -> dict:
         set_shell_executor_limit(3)  # chat_agent: 3 calls per round, timeout <= 60s
         invocation_messages = agent_messages
         loop_middleware = ChatLoopDelegationMiddleware(len(agent_messages))
+        send_text_first_middleware = SendTextFirstMiddleware()
         context_middleware = build_context_middleware(model_chosen)
         active_mcp_tools: list[Any] = []
         for attempt in range(2):
@@ -1299,7 +1306,11 @@ async def ai_node(state: MessagesState) -> dict:
                 model_chosen,
                 tools=get_chat_tools() + active_mcp_tools,
                 system_prompt=sys_prompt,
-                middleware=[loop_middleware, *context_middleware],
+                middleware=[
+                    loop_middleware,
+                    send_text_first_middleware,
+                    *context_middleware,
+                ],
             )
             retrying_agent = chat_agent.with_retry(stop_after_attempt=5)
             try:

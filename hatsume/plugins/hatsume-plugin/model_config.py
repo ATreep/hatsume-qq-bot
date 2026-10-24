@@ -25,6 +25,7 @@ ROLE_APIS = {
     "systemone": frozenset({"systemone"}),
     "embedding": frozenset({"openai_embeddings"}),
     "image_sensenova": frozenset({"sensenova_images"}),
+    "tts": frozenset({"openai_chat_completions"}),
 }
 ALL_APIS = frozenset().union(*ROLE_APIS.values())
 REASONING_EFFORTS = frozenset(

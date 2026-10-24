@@ -40,6 +40,7 @@ dependencies = [
     "rank-bm25>=0.2.2,<1",
     "requests>=2.34.2,<3",
     "langchain-google-genai>=4.2.7",
+    "langchain-tinyfish>=0.1.1,<0.2",
     "mcp>=1.25.0,<2",
     "httpx>=0.28.1,<1",
 ]

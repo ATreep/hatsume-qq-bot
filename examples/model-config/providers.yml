@@ -7,6 +7,11 @@ providers:
       - openai_chat_completions
       - openai_responses
       - openai_embeddings
+  mi:
+    base_url: https://api.xiaomimimo.com/v1
+    api_key: ''
+    supported_apis:
+      - openai_chat_completions
   google:
     base_url: https://generativelanguage.googleapis.com
     api_key: ''

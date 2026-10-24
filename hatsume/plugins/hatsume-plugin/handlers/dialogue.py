@@ -640,7 +640,21 @@ def _start_conv_for_trigger(
         if bot is not None
         else group_runtime_registry.get_or_create(group_id)
     )
-    target_bot = bot if bot is not None else group_runtime_registry.get_bot(group_id)
+    try:
+        target_bot = bot if bot is not None else group_runtime_registry.get_bot(group_id)
+    except LookupError:
+        # Agent/timer completions can race with a Bot disconnect. Keep the
+        # trigger queued so the next normal message can deliver it after the
+        # route is restored, but never let a fire-and-forget task fail.
+        queued_message = make_system_trigger_message(notify_msg, trigger_type)
+        state = runtime.conversation
+        if queued_message not in state.human_queue:
+            state.human_queue.append(queued_message)
+        print(
+            f"⚠️ [_start_conv_for_trigger] No connected bot for group={group_id}; "
+            f"queued trigger={trigger_type} for later delivery"
+        )
+        return
     conv_state = runtime.conversation
 
     async def _send_to_group(msg, reply_to_message_id=None) -> int | bool:

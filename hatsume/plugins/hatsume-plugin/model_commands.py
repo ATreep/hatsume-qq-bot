@@ -19,7 +19,7 @@ MODEL_HELP = """/model 或 /model list — 查看所有模型角色
 /model fallback remove <role> <n>
 /model check <role> — 逐个检查聊天模型及其故障转移链
 角色：advance, lite, mini, coding, vision, systemone, embedding,
-image_sensenova"""
+image_sensenova, tts"""
 PROVIDER_HELP = """/provider list
 /provider show <id>
 /provider add <id> --base-url <完整URL> --api <api[,api]>

@@ -19,29 +19,29 @@ ROOT = Path(__file__).resolve().parents[1] / "hatsume/plugins/hatsume-plugin"
 class SearchModel(FakeMessagesListChatModel):
     def bind_tools(self, tools, **kwargs):
         if [item.name for item in tools] != [
-            "mcp__tinyfish__search",
-            "mcp__tinyfish__fetch_content",
+            "tinyfish_search",
+            "tinyfish_fetch",
             "shell_executor",
             "skill_loader",
         ]:
-            raise AssertionError(
-                "Researcher must expose TinyFish search/fetch plus shell_executor and skill_loader"
-            )
+            raise AssertionError("Researcher must expose TinyFish SDK search/fetch plus shell_executor and skill_loader")
         return self
 
 
 class WebResearcherTests(unittest.IsolatedAsyncioTestCase):
     async def test_researcher_searches_and_returns_visible_report(self):
         calls = []
-        @tool("mcp__tinyfish__search")
-        def tinyfish_search(query: str, purpose: str) -> str:
-            """Search the fixture index through TinyFish."""
+        fetch_calls = []
+        @tool("tinyfish_search")
+        def tinyfish_search(query: str, location: str | None = None, language: str | None = None) -> str:
+            """Search the fixture index through TinyFish SDK."""
             calls.append(query)
             return "GNOME AT-SPI documentation https://gnome.pages.gitlab.gnome.org/at-spi2-core/libatspi/"
-        @tool("mcp__tinyfish__fetch_content")
-        def tinyfish_fetch_content(urls: list[str], purpose: str) -> str:
-            """Fetch fixture pages through TinyFish."""
-            return ""
+        @tool("tinyfish_fetch")
+        def tinyfish_fetch(urls: list[str], format: str = "markdown", links: bool | None = None, image_links: bool | None = None) -> str:
+            """Fetch fixture pages through TinyFish SDK."""
+            fetch_calls.append(urls)
+            return "Fetched GNOME AT-SPI documentation"
         @tool
         def shell_executor(shell: str, timeout: int) -> str:
             """Run a shell command in the fixture sandbox."""
@@ -52,7 +52,8 @@ class WebResearcherTests(unittest.IsolatedAsyncioTestCase):
             return ""
         report = "参考 GNOME AT-SPI 文档：https://gnome.pages.gitlab.gnome.org/at-spi2-core/libatspi/"
         model = SearchModel(responses=[
-            AIMessage(content="", tool_calls=[{"name": "mcp__tinyfish__search", "args": {"query": "GNOME AT-SPI", "purpose": "Find accessibility documentation"}, "id": "q1"}]),
+                    AIMessage(content="", tool_calls=[{"name": "tinyfish_search", "args": {"query": "GNOME AT-SPI"}, "id": "q1"}]),
+            AIMessage(content="", tool_calls=[{"name": "tinyfish_fetch", "args": {"urls": ["https://gnome.pages.gitlab.gnome.org/at-spi2-core/libatspi/"]}, "id": "q2"}]),
             AIMessage(content=report),
         ])
         package = "researcher_test_plugin"
@@ -66,15 +67,9 @@ class WebResearcherTests(unittest.IsolatedAsyncioTestCase):
             skill_loader=skill_loader,
             set_shell_executor_limit=lambda _limit: None,
         )
-        manager = SimpleNamespace(
-            discover_tools=lambda _name: _discover_tinyfish_tools(),
-        )
-        async def _discover_tinyfish_tools():
-            return [SimpleNamespace(name="search"), SimpleNamespace(name="fetch_content")]
-        modules[f"{package}.mcp"] = ModuleType(f"{package}.mcp")
-        modules[f"{package}.mcp.manager"] = SimpleNamespace(get_mcp_manager=lambda: manager)
-        modules[f"{package}.mcp.tools"] = SimpleNamespace(
-            make_dynamic_tools=lambda _server, _infos: [tinyfish_search, tinyfish_fetch_content],
+        modules["langchain_tinyfish"] = SimpleNamespace(
+            TinyFishSearch=lambda: tinyfish_search,
+            TinyFishFetch=lambda: tinyfish_fetch,
         )
         modules[f"{package}.models"] = SimpleNamespace(get_lite_model=lambda: model)
         modules[f"{package}.prompts"] = SimpleNamespace(WEB_RESEARCHER_PROMPT="实际搜索并返回来源")
@@ -83,10 +78,14 @@ class WebResearcherTests(unittest.IsolatedAsyncioTestCase):
         namespace = {"__package__": f"{package}.graph", "Any": Any, "Mapping": Mapping}
         nodes = [n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
                  and n.name in {"_run_web_researcher", "_extract_visible_agent_text"}]
-        with patch.dict(sys.modules, modules):
+        with patch.dict(sys.modules, modules), patch("builtins.print") as print_mock:
             exec(compile(ast.Module(body=nodes, type_ignores=[]), "researcher", "exec"), namespace)
             result = await namespace["_run_web_researcher"]("查找无障碍文档", 123)
         self.assertEqual(calls, ["GNOME AT-SPI"])
+        self.assertEqual(fetch_calls, [["https://gnome.pages.gitlab.gnome.org/at-spi2-core/libatspi/"]])
+        logs = [str(call.args[0]) for call in print_mock.call_args_list if call.args]
+        self.assertTrue(any("[tinyfish_search]" in line for line in logs))
+        self.assertTrue(any("[tinyfish_fetch]" in line for line in logs))
         self.assertEqual(result, report)
 
     def test_agent_is_registered_and_chat_has_no_search_tool(self):
