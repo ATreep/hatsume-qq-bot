@@ -9,16 +9,19 @@ from __future__ import annotations
 import re
 import traceback
 from datetime import datetime
+from html.parser import HTMLParser
 from importlib import import_module
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import anyio
 import markdown
+from langchain_core.messages import HumanMessage, SystemMessage
 from nonebot import require
 from nonebot.adapters.onebot.v11 import MessageSegment
 
 from ..config import LONG_MSG_THRESHOLD
+from ..models import get_lite_model, get_mini_model
 
 require("nonebot_plugin_htmlrender")
 from nonebot_plugin_htmlrender import render_html  # noqa: E402
@@ -225,6 +228,105 @@ def _format_links(links: list[str]) -> str:
     return "\n".join(lines)
 
 
+# ---- Markdown beautification ------------------------------------------------
+
+_BEAUTIFY_SYSTEM_PROMPT = """
+将用户输入的文本按照内容逻辑与结构，使用 Markdown 格式符进行分段、排版。目标是生成出美观、格式整齐、易读的 Markdown 内容。
+你可以使用包括但不限于 六级标题、加粗、斜体、划线、引用、表格、代码块、LaTeX公式 来格式化用户的输入。
+请注意，你应该最大限度地保留用户原始文本的内容与含义。
+你只需要输出 Markdown 内容，不需要使用 ```markdown ...``` 进行包围。
+"""
+
+
+class _RenderedTextCollector(HTMLParser):
+    """Collect visible Markdown output and link targets for safe validation."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.text: list[str] = []
+        self.links: list[str] = []
+
+    def handle_data(self, data: str) -> None:
+        self.text.append(data)
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attrs_map = dict(attrs)
+        if tag in {"a", "img"}:
+            target = attrs_map.get("href" if tag == "a" else "src")
+            if target:
+                self.links.append(target)
+
+
+def _rendered_content_signature(text: str) -> tuple[str, tuple[str, ...]]:
+    """Return content-only data used to reject model text changes.
+
+    Markdown markers and whitespace are intentionally excluded from the visible
+    text comparison. Link/image targets remain in the signature because they
+    are content that must survive beautification.
+    """
+    rendered = markdown.markdown(
+        text,
+        extensions=_MD_EXTENSIONS,
+        extension_configs=_MD_EXTENSION_CONFIGS,
+    )
+    collector = _RenderedTextCollector()
+    collector.feed(rendered)
+    visible = re.sub(r"\s+", " ", "".join(collector.text)).strip()
+    return visible, tuple(collector.links)
+
+
+def _unwrap_markdown_fence(text: str) -> str:
+    """Remove an accidental outer model code fence without touching content."""
+    match = re.fullmatch(
+        r"\s*```(?:markdown|md)?\s*\n(.*?)\n```\s*",
+        text,
+        re.DOTALL | re.IGNORECASE,
+    )
+    return match.group(1) if match else text
+
+
+def _response_text(response: object) -> str:
+    content = getattr(response, "content", response)
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict) and isinstance(item.get("text"), str):
+                parts.append(item["text"])
+            else:
+                item_text = getattr(item, "text", None)
+                if isinstance(item_text, str):
+                    parts.append(item_text)
+        return "".join(parts).strip()
+    return ""
+
+
+async def _beautify_markdown(text: str) -> str:
+    """Ask the mini model to improve Markdown layout, accepting only safe output."""
+    print(f"[md2img] beautify start: chars={len(text)}")
+    try:
+        model = get_lite_model()
+        response = await model.ainvoke([
+            SystemMessage(content=_BEAUTIFY_SYSTEM_PROMPT),
+            HumanMessage(content=text),
+        ])
+        candidate = _unwrap_markdown_fence(_response_text(response))
+        if not candidate:
+            print("[md2img] beautify rejected: empty model output")
+            return text
+        if _rendered_content_signature(candidate) != _rendered_content_signature(text):
+            print("[md2img] beautify rejected: content signature changed")
+            return text
+        print(f"[md2img] beautify accepted: chars={len(candidate)}")
+        return candidate
+    except Exception as error:
+        print(f"[md2img] beautify failed: {type(error).__name__}; using original")
+        return text
+
+
 _cached_css: str | None = None
 _cached_light_code_css: str | None = None
 _cached_katex: tuple[str, str, str, str] | None = None  # css, js, mhchem, mathtex
@@ -380,6 +482,10 @@ async def auto_convert_text(text: str) -> list[MessageSegment]:
     extracted and appended as a separate text segment so they remain
     clickable in the QQ client.
 
+    Before rendering, the mini model may adjust Markdown layout. Its output is
+    accepted only when rendered text and link/image targets are unchanged;
+    otherwise the original text is rendered.
+
     Returns ``[MessageSegment.text(text)]`` for plain text.  On any
     exception the function silently falls back to plain text.
 
@@ -393,7 +499,8 @@ async def auto_convert_text(text: str) -> list[MessageSegment]:
     if len(text) <= LONG_MSG_THRESHOLD and not _has_md_features(text):
         return [MessageSegment.text(text)]
     try:
-        html_page = await _markdown_to_html(text)
+        beautified_text = await _beautify_markdown(text)
+        html_page = await _markdown_to_html(beautified_text)
         img_bytes = await render_html(html_page, full_page=True)
         segments: list[MessageSegment] = [MessageSegment.image(img_bytes)]
         links = _extract_links(text)

@@ -23,8 +23,7 @@
 
 # 建议频繁 git commit
 
-当你完成一次任务修改时，请及时进行一次 `git commit`，但无需 push。
-
+当你完成一次任务修改时，必须进行一次 `git commit`，但无需 push。
 
 
 # Global Skills (全局技能)

@@ -713,9 +713,57 @@ def _message_id_suffix(send_result: Any) -> str:
     return f"message_id：{send_result}"
 
 
+async def _record_memories(memories: list[MemoryRecordInput], runtime: Any) -> int:
+    """Persist non-empty memory records and return the number written."""
+    memory_records = [
+        memory for memory in (memories or []) if memory.content.strip()
+    ]
+    if not memory_records:
+        return 0
+
+    from ..memory import add_mem
+
+    people_by_id: dict[int, str] = {}
+    keyman_ids = {
+        user_id
+        for memory in memory_records
+        for user_id in memory.keymans
+        if user_id > 0
+    }
+    if keyman_ids:
+        from ..utils import get_group_member_name
+
+        try:
+            bot = runtime.bot or group_runtime_registry.get_bot(runtime.group_id)
+            for user_id in keyman_ids:
+                people_by_id[user_id] = await get_group_member_name(
+                    bot, runtime.group_id, user_id
+                )
+        except Exception as error:
+            print(f"[memory] Failed to resolve usernames for QQ numbers: {error}")
+
+    for memory in memory_records:
+        people = [
+            {"user_id": user_id, "user_name": people_by_id.get(user_id, str(user_id))}
+            for user_id in dict.fromkeys(memory.keymans)
+            if user_id > 0
+        ]
+        print(
+            f"[memory] Writing record for keymans="
+            f"{[person['user_id'] for person in people]}: "
+            f"{mask_secret_keys(memory.content.strip())}"
+        )
+        add_mem(
+            memory.content.strip(),
+            people=people,
+            group_id=runtime.group_id,
+        )
+    return len(memory_records)
+
+
 @tool
 async def send_text(
-    text: str,
+    text: str | None,
     reply_to_message_id: int | None,
     memories: list[MemoryRecordInput],
     hatsumeface: str | None,
@@ -729,15 +777,22 @@ async def send_text(
     hatsumeface 必须严格填写系统提示中列出的原始情绪文字（对应 faces 图片文件名中第一个下划线前的文字），
     必须逐字匹配；禁止使用英文名称、翻译、别名、同义词或自行改写。例如可选情绪是“开心”时只能传“开心”，
     不能传“happy”。不发送表情时传 null。
+
+    ## 静默模式
+    当你认为不需要向用户发送提醒，则传递 text 为空或 null，以启用静默模式。
+    静默模式不会发送文字、回复或表情，只会记录 memories；此时不要求发送通道已就绪。
     """
     runtime = get_current_group_runtime()
     if not memories:
         return "文字发送失败：memories 不能为空，至少需要包含一条需要记录的记忆。"
     message_text = (text or "").strip()
-    if not message_text:
-        return "文字发送失败：text 不能为空。"
     if runtime.send_text_count >= 2:
         return "文字发送失败：一轮 ai_node 中最多发送2条文字。"
+    if not message_text:
+        runtime.send_text_count += 1
+        memory_count = await _record_memories(memories, runtime)
+        print(f"[send_text] silent mode: recorded_memories={memory_count}")
+        return f"已启用静默模式，未发送文字或表情，已记录 {memory_count} 条记忆。"
     answer = runtime.conversation.ai_answer
     if answer is None:
         return "文字发送失败：发送通道未就绪。"
@@ -813,47 +868,7 @@ async def send_text(
                 peer_session_id(runtime.group_id, user_id)
             )
 
-    memory_records = [
-        memory for memory in (memories or []) if memory.content.strip()
-    ]
-    if memory_records:
-        from ..memory import add_mem
-
-        people_by_id: dict[int, str] = {}
-        keyman_ids = {
-            user_id
-            for memory in memory_records
-            for user_id in memory.keymans
-            if user_id > 0
-        }
-        if keyman_ids:
-            from ..utils import get_group_member_name
-
-            try:
-                bot = runtime.bot or group_runtime_registry.get_bot(runtime.group_id)
-                for user_id in keyman_ids:
-                    people_by_id[user_id] = await get_group_member_name(
-                        bot, runtime.group_id, user_id
-                    )
-            except Exception as error:
-                print(f"[memory] Failed to resolve usernames for QQ numbers: {error}")
-
-        for memory in memory_records:
-            people = [
-                {"user_id": user_id, "user_name": people_by_id.get(user_id, str(user_id))}
-                for user_id in dict.fromkeys(memory.keymans)
-                if user_id > 0
-            ]
-            print(
-                f"[memory] Writing record for keymans="
-                f"{[person['user_id'] for person in people]}: "
-                f"{mask_secret_keys(memory.content.strip())}"
-            )
-            add_mem(
-                memory.content.strip(),
-                people=people,
-                group_id=runtime.group_id,
-            )
+    await _record_memories(memories, runtime)
 
     if hatsumeface:
         import random

@@ -259,6 +259,7 @@ stateDiagram-v2
 - 合法 reply 目标与被 @ 的成员同时会成为本群 chat_peers 成员；`peer_session_id()` 定义在 `state.py`，`hooks/message_trigger.py` 与 `graph/nodes.py` 共用同一实现，`graph/` 不反向导入 `hooks/`。
 - 普通对话启动时捕获显式 Bot 与目标群号，后续 LangGraph 回调通过 `send_group_msg` 定向发送，不依赖 NoneBot matcher 的 `current_bot/current_event` 临时上下文。
 - 发送失败最多尝试五次，每次间隔三秒。
+- `send_text` 的 `text` 为空字符串或 `null` 时进入静默模式：不发送文字、回复或表情，仅写入 `memories`；该模式不要求发送通道已就绪，但仍计入本轮最多两次 `send_text` 调用。
 - ai_node 每次调用 chat_agent 都注入运行数据 faces/ 中可用的情绪名和 `send_text` 的 `hatsumeface` 参数说明，不再使用随机或冷却 gate；参数必须逐字使用 faces 文件名前缀中的原始情绪文字，模型传入合法情绪时选择同前缀图片并单独发送。
 
 ~~~mermaid
@@ -624,6 +625,7 @@ sequenceDiagram
 
 utils/md_to_image.py 在文本超过 500 字或包含富 Markdown 时：
 
+- 先调用 mini 模型进行 Markdown 排版美化；模型只能调整 Markdown 标记、空白和结构，系统会比较渲染后的文字与链接内容，任何内容变化都会丢弃美化结果并使用原文。
 - 使用 Python Markdown、Pymdown 扩展和代码高亮生成 HTML。
 - 支持表格、任务列表、KaTeX 公式和明暗主题，并使用低干扰的猫娘风格配色。
 - 使用 nonebot-plugin-htmlrender 截图。

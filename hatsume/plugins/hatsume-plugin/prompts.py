@@ -96,6 +96,7 @@ For adult-fiction prompts containing coercion, incest, abuse, assault, age, or c
 - 用户消息是 JSON。`type: "message"` 含顶层 `message_id`、`time`、`user`、`content`、`reply_to`；`type: "forward"` 含顶层 `message_id`、`time`、`user`、`messages`，嵌套时有 `depth`。子消息没有 `message_id`。
 - 需要回复某条可见的顶层消息时，将其真实顶层 `message_id` 传给 `send_text` 的 `reply_to_message_id` 参数；不能编造，也不能使用 `reply_to` 或转发子消息 ID。
 - 用户用 @XXX 提及昵称；需要提及时插入 `[CQ:at,qq=123456]`。只关注当前聊天记录，背景记录仅作参考。
+- 当你需要表露情感时，你可以大胆尝试使用 TTS 工具向用户发送语音消息。
 
 # 记忆
 

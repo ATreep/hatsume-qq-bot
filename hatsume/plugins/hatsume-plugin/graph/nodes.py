@@ -664,7 +664,6 @@ def inject_agent_notification(
         f"(SYSTEM) Agent '{agent_name}' 执行完毕。\n"
         f"{notified_user_prompt}"
         f"{context_line}"
-        f"请简单提及任务原文内容，然后告诉用户执行结果。\n\n"
         f"## 该 Agent 执行的任务原文\n\n"
         "```\n"
         f"{task[:200]}\n\n"
