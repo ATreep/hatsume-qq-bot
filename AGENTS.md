@@ -7,7 +7,11 @@
 
 # 文档同步
 
-实现或修改代码时，必须同步更新 `docs/` 中的相关文档。
+实现或修改代码时，必须同步更新 `docs/` 中的相关文档以及 AGENTS.md 的相关内容。
+
+# GUI 自动化
+
+桌面 GUI 自动化、AT-SPI/CDP 控件操作、GUI 截图命令和 `sandbox_computer_use` 已从项目移除；不要重新添加相关工具、模块、配置变量或镜像启动脚本。网页内容处理继续使用现有的无头浏览器/网络工具链。
 
 # 调试日志
 
@@ -156,7 +160,14 @@ Timer 的 `schedule_type` 与 Hook 的 `trigger_type` 是不同层级的字段�
   `trigger_type="group_increase"` 启动。
 - 该事件使用新成员 QQ 号和头像生成欢迎提示，属于系统通知，不属于普通群消息或 Agent 返回。
 
-## 7. 其他内部标记与非初芽事件
+## 7. human_queue 注入与 chat_peers
+
+- Agent 回调、Timer、Heartbeat Hook 的结构化通知对象在写入 `human_queue` 或启动新图前，立即加入目标群的 `chat_peers`；无通知对象的 `user_id=0` 不加入。
+- Hook 的 `notified_user_ids`、Timer/Agent 的 `user_id` 都会过滤 `0`、非正整数、Bot 自身和重复值；Sandbox Channel 的 `user_id` 只表示来源，不代表需要 @ 的对象。
+- Message-match Hook 的触发者由 `activate_trigger_peer()` 加入，群成员加入由 `activate_chat()` 加入；最终回复中的 CQ at 和回复目标仍由 `send_text` 登记。
+- 详细队列入口、系统标记和分支行为见 `docs/human-message-queue-injection.md`。
+
+## 8. 其他内部标记与非初芽事件
 
 - `start_new_conversation()` 的 `system_trigger_type` 默认值为 `system_task`，供未归类的内部启动调用使用；
   新增调用点必须明确写出实际来源，不能默认丢失分类。

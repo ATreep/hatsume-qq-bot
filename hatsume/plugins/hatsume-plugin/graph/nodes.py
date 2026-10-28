@@ -26,7 +26,7 @@ from langchain_core.messages import RemoveMessage
 from langgraph.graph import MessagesState
 from pydantic import BaseModel
 
-from ..config import ADMIN_QQ_ID, CONTEXT_QUEUE_LEN, LIVELY_TONE_ENABLED
+from ..config import ADMIN_QQ_ID, BOT_QQ_ID, CONTEXT_QUEUE_LEN, LIVELY_TONE_ENABLED
 from ..errors import (
     LLMAuthError,
     LLMBaseError,
@@ -63,6 +63,7 @@ from ..utils import (
     message_to_json,
     strip_thinking_tags,
 )
+from ..state import peer_session_id
 from .chat_loop import ChatLoopDelegationMiddleware, SendTextFirstMiddleware
 from .context import build_context_middleware
 from .tools import (
@@ -246,10 +247,22 @@ async def chat_intend_judge(
     back-to-back hits so that retries don't just burn API quota on a hard
     limit.
     """
-    judge_messages = [
-        SystemMessage(_get_chat_intend_judge_prompt()),
-        *_without_image_url_parts(messages),
-    ]
+    # The configured decision model (mercury-decide) accepts multimodal
+    # content.  Keep image blocks in this request so intent decisions can use
+    # the attached media instead of judging a text-only projection.
+    image_part_count = sum(
+        1
+        for message in messages
+        for part in (
+            getattr(message, "content", [])
+            if isinstance(getattr(message, "content", None), list)
+            else []
+        )
+        if isinstance(part, Mapping)
+        and part.get("type") in {"image_url", "img_url"}
+    )
+    print(f"[chat_intend_judge] preserving {image_part_count} image part(s)")
+    judge_messages = [SystemMessage(_get_chat_intend_judge_prompt()), *messages]
     consecutive_limit_errors = 0
     for attempt in range(1, CHAT_INTENT_MAX_ATTEMPTS + 1):
         try:
@@ -458,17 +471,35 @@ def _current_message_text(content: Any) -> str:
     return ""
 
 
-def _messages_to_jev_state(messages: list[Any]) -> list[dict[str, str]]:
-    """Build a text-only conversation state accepted by Jev."""
-    jev_messages: list[dict[str, str]] = []
-    for message in _without_image_url_parts(messages):
+def _messages_to_jev_state(messages: list[Any]) -> list[dict[str, Any]]:
+    """Build Jev state while preserving multimodal content blocks."""
+    jev_messages: list[dict[str, Any]] = []
+    for message in messages:
         content = (
             message.get("content", "")
             if isinstance(message, Mapping)
             else getattr(message, "content", "")
         )
-        text = _message_content_to_text(content).strip()
-        if not text:
+        if isinstance(content, list):
+            normalized_content = [
+                part
+                for part in content
+                if isinstance(part, (str, Mapping))
+                and (
+                    not isinstance(part, Mapping)
+                    or part.get("type") in {"text", "image_url", "img_url"}
+                )
+            ]
+            if not normalized_content:
+                continue
+            state_content: Any = normalized_content
+        else:
+            text = _message_content_to_text(content).strip()
+            if not text:
+                continue
+            state_content = text
+
+        if state_content == []:
             continue
 
         message_type = (
@@ -480,7 +511,7 @@ def _messages_to_jev_state(messages: list[Any]) -> list[dict[str, str]]:
             "human": "user",
             "ai": "assistant",
         }.get(str(message_type), str(message_type))
-        jev_messages.append({"role": role, "content": text})
+        jev_messages.append({"role": role, "content": state_content})
     return jev_messages
 
 
@@ -647,6 +678,25 @@ def _build_notified_user_prompt(user_id: int, user_name: str | None = None) -> s
     )
 
 
+def _register_injected_chat_peers(group_id: int, user_ids: Iterator[int] | list[int]) -> list[int]:
+    """Register valid users explicitly addressed by an injected system event."""
+    runtime = group_runtime_registry.get_or_create(group_id)
+    registered: list[int] = []
+    for raw_user_id in user_ids:
+        if isinstance(raw_user_id, bool) or not isinstance(raw_user_id, int):
+            continue
+        if raw_user_id <= 0 or raw_user_id == BOT_QQ_ID or raw_user_id in registered:
+            continue
+        runtime.conversation.chat_peers.add(peer_session_id(group_id, raw_user_id))
+        registered.append(raw_user_id)
+    if registered:
+        print(
+            "👥 [system-trigger] Registered injected chat peers: "
+            f"group={group_id} users={registered}"
+        )
+    return registered
+
+
 def inject_agent_notification(
     user_id: int,
     group_id: int,
@@ -676,6 +726,7 @@ def inject_agent_notification(
 
     runtime = group_runtime_registry.get_or_create(group_id)
     state = runtime.conversation
+    _register_injected_chat_peers(group_id, [user_id])
     queued_message = make_system_trigger_message(notify_msg, "agent")
     # A graph can still be draining its final turn after ``is_chatting`` has
     # been cleared. Keep the notification on that graph's queue so a second
@@ -730,6 +781,7 @@ def inject_timer(
 
     runtime = group_runtime_registry.get_or_create(group_id)
     state = runtime.conversation
+    _register_injected_chat_peers(group_id, [user_id])
     if state.is_chatting:
         state.human_queue.append(make_system_trigger_message(timer_msg, "timer"))
         print(f"⏰ [inject_timer] Injected timer into human_queue for user {user_id}")
@@ -787,6 +839,7 @@ def inject_hook(
     )
     runtime = group_runtime_registry.get_or_create(group_id)
     state = runtime.conversation
+    _register_injected_chat_peers(group_id, normalized_notified_user_ids)
     if state.is_chatting:
         state.human_queue.append(make_system_trigger_message(hook_msg, "hook"))
         print(f"🪝 [inject_hook] Injected Hook {normalized_name} into human_queue")
@@ -1093,16 +1146,36 @@ async def ai_node(state: MessagesState) -> dict:
             # does not generate JSON text, so both typed answers can be
             # consumed directly without parsing generated prose.
             jev_chain = get_systemone_chain()
-            filtered_last_human_msg = _without_image_url_parts([last_human_msg])[0]
+            # mercury-decide natively accepts image_url/img_url blocks.  Keep
+            # them in the decision state so an image-only message remains
+            # eligible for visual intent and chat-end decisions.
+            decision_last_human_msg = last_human_msg
             recent_messages = _without_bootstrap_role_prompt(
                 state['messages'][-6:]
             )
             jev_state = {
-                "current_message": _message_content_to_text(
-                    getattr(filtered_last_human_msg, "content", filtered_last_human_msg)
+                "current_message": getattr(
+                    decision_last_human_msg,
+                    "content",
+                    decision_last_human_msg,
                 ),
                 "recent_messages": _messages_to_jev_state(recent_messages),
             }
+            decision_image_count = sum(
+                1
+                for value in (jev_state["current_message"], *jev_state["recent_messages"])
+                for part in (
+                    value
+                    if isinstance(value, list)
+                    else value.get("content", [])
+                    if isinstance(value, Mapping)
+                    and isinstance(value.get("content"), list)
+                    else []
+                )
+                if isinstance(part, Mapping)
+                and part.get("type") in {"image_url", "img_url"}
+            )
+            print(f"[jev_judge] preserving {decision_image_count} image part(s) in decision state")
 
             jev_response = await _post_systemone(
                 jev_chain,

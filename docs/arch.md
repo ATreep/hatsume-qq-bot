@@ -240,12 +240,13 @@ stateDiagram-v2
 ~~~
 
 - human_node 每 0.3 秒检查 human_queue，五分钟无输入时写入 __end__。
-- ai_node 在处理普通用户输入时与 chat_intend_judge 一起调用 Jev 的 Choice 判断 chat_end；输入使用最近对话状态但会移除所有 image_url/img_url 内容段。系统注入、辅助上下文和角色代理消息绕过 chat_end 判断；Jev 选择“结束”时请求结束，由 human_node 写入 __end__ 并结束对话。
+- ai_node 在处理普通用户输入时与 chat_intend_judge 一起调用 Jev 的 Choice 判断 chat_end；输入使用最近对话状态并保留 image_url/img_url 多模态内容段，供当前 mercury-decide 决策模型进行图片意图判断。系统注入、辅助上下文和角色代理消息绕过 chat_end 判断；Jev 选择“结束”时请求结束，由 human_node 写入 __end__ 并结束对话。
 - 图历史超过 60 条 LangGraph 消息时，删除最早的一对 Human/AI 消息。
 - ai_node 自动检索记忆，注入 Skill 列表、运行中 Agent 状态、当前群定时任务概览、当前群待办、可选表情图片提示和调用时的本地日期时间，再用 CHAT_TOOLS 创建 LangChain Agent。进入节点时先删除所有已满 72 小时的待办；Todo 数据库不可用时只注入不可用状态，不中断普通回复。主调用异常最多重试五次；若结果只有工具调用、工具结果、空白或 `[xxx: xxx]` 类控制标记且未请求结束对话，则携带本次 Agent 消息状态额外调用一次。递归上限为 60。
 - ai_node 每轮读取辅助队列的非破坏性快照，临时放在当前 Human 内容之前；同一辅助上下文会持续进入后续轮次，直到新写入触发压缩。发送前移除 reply、memory 与 face 标签；图历史会移除 reply 控制标记，但保留现有 face 与 memory 标签历史语义。
-- ai_node 只解析当前 HumanMessage 中顶层 `type=message` 的 JSON。每轮先用 `get_intent_model()`（Jev）在同一个 System One 请求中判断 chat_intend_judge 与 chat_end；判断为 skip 时不创建或调用 chat_agent，判断为 respond 时打印回复类型与原因后继续。系统注入任务绕过判断以保证执行。发送者 QQ ID 等于非空 `ADMIN_QQ_ID` 且该消息的直接正文包含大小写敏感的 `BYPASS` 时，本地 `sys_prompt` 追加 ADMIN MODE，chat_agent 保持当前高级模型，并在不修改 LangGraph 历史的前提下从全部模型输入消息复制过滤历史 `image_url` 与 `img_url` 内容段；回复引用、合并转发、辅助上下文和历史消息均不能触发，下一轮恢复未过滤输入与基础角色 Prompt。当前普通消息图片同时以沙盒 Markdown 路径和 `image_url` data URI 输入，回复图片仍使用沙盒 Markdown 路径。
+- ai_node 只解析当前 HumanMessage 中顶层 `type=message` 的 JSON。每轮先用 `get_intent_model()`（Jev）在同一个 System One 请求中判断 chat_intend_judge 与 chat_end；判断为 skip 时不创建或调用 chat_agent，判断为 respond 时打印回复类型与原因后继续。决策请求保留当前消息和最近状态中的 `image_url`/`img_url` 内容段，使 mercury-decide 可以直接依据图片判断意图；系统注入任务绕过判断以保证执行。发送者 QQ ID 等于非空 `ADMIN_QQ_ID` 且该消息的直接正文包含大小写敏感的 `BYPASS` 时，本地 `sys_prompt` 追加 ADMIN MODE，chat_agent 保持当前高级模型，并在不修改 LangGraph 历史的前提下从全部模型输入消息复制过滤历史 `image_url` 与 `img_url` 内容段；回复引用、合并转发、辅助上下文和历史消息均不能触发，下一轮恢复未过滤输入与基础角色 Prompt。当前普通消息图片同时以沙盒 Markdown 路径和 `image_url` data URI 输入，回复图片仍使用沙盒 Markdown 路径。
 - ai_node 在每次 chat_agent 调用中通过共享 middleware 强制第一个可执行工具调用为 `send_text`；其他工具在此前只返回警告，不执行。首次尝试即消耗该门槛，即使 `send_text` 后续返回校验或发送错误；门槛状态跨 MCP 工具加载重建的 Agent 保留，并在下一次 ai_node 调用重置。随后 ai_node 在最终可见文本确定后，把本次被回复消息的发送者与可见文本中每个 `[CQ:at,qq=...]` 指向的成员加入本群 `chat_peers`，不依赖发送是否成功；非法目标、未知发送者和 Bot 自身不入列。被加入者后续消息因此进入 pending 主对话而不是辅助上下文。
+- Agent、Timer、Heartbeat Hook 的系统注入在写入 `human_queue` 或启动新图前，也会把结构化通知对象登记到本群 `chat_peers`；`user_id=0`、非法 ID、重复 ID 和 Bot 自身跳过。Message-match Hook 另外登记触发消息发送者，群成员加入登记新成员。Sandbox Channel 的 `user_id` 仅是来源字段，不作为通知对象。完整入口与标记对照见 `docs/human-message-queue-injection.md`。
 - chat_agent 调用 end_conversation 后，ConversationState 立即关闭聊天并清空 chat_peers；ai_node 抑制该轮文本和表情发送，human_node 随即路由到 finish。下一次主动提及通过 activate_chat() 解除结束标记。
 - finish_conversation_node 清理图运行标记和 Human 队列，重置 Skill 单轮去重，把 Human/AI/Tool 历史规范化后放回辅助队列，最后发送 [CONVERSATION END]。
 
@@ -502,7 +503,7 @@ configure_tool_callbacks() 在每次新图启动时把发送回调、当前用�
 
 脚本必须带 shebang 且可执行，由 `asyncio.create_subprocess_exec` 在当前容器 `/work` 下直接启动。exit 0 表示无变化；exit 10 且非空 stdout 表示事件；其他退出码、空 exit-10、超过 8 KiB stdout、超时或启动失败只更新失败状态。创建和换脚本设置 `HATSUME_HOOK_VALIDATION=1` 试跑，不注入、不更新运行状态，脚本必须在此模式下不推进游标。Heartbeat Hook 可持久化 `notified_user_ids` QQ 号列表；触发注入时若列表非空，系统提示 Agent @ 相关用户，并根据事件是否一次性或需持续更新决定调用 `delete_hook` 或 `update_hook`。
 
-`inject_hook()` 是独立公开注入函数。活动群图将 `hook` 标记消息追加到本群 human_queue；空闲群用已有 graph-start lock 和 direct-conversation 路径启动新图。内部标记绕过结束检测并在模型输入前移除，不创建 Hook 专属 Agent 或第二张图。
+`inject_hook()` 是独立公开注入函数。活动群图将 `hook` 标记消息追加到本群 human_queue；空闲群用已有 graph-start lock 和 direct-conversation 路径启动新图。注入前会把 `notified_user_ids` 登记到本群 `chat_peers`，内部标记绕过结束检测并在模型输入前移除，不创建 Hook 专属 Agent 或第二张图。
 
 `hooks/message_trigger.py` 负责消息匹配触发：`user_chat_handle` 在每次收到群消息时先取该群 enabled 的 message_match Hook（机器人自己发送的消息被忽略，避免自触发循环），用消息纯文本（最多扫描 2000 字符）做 `re.search`。命中的 Hook 直接注入，事件正文包含时间、群号、发送者、命中正则、命中片段与消息原文，不运行脚本、不污染其他 Hook；注入成功更新 `last_run_at` 并清零失败计数，注入异常写入 `last_error` 与 `consecutive_failures`，单个 Hook 失败不影响同批其他 Hook，也不影响正常聊天流程。注入成功后把触发者加入本群 `chat_peers`（`activate_chat("group_<群号>_<QQ>")`），该会话立即视为活跃，触发者后续消息继续进入对话；注入失败或没有 Hook 命中时不动会话状态。触发后 Hook 保留，只有 `delete_hook` 才会删除。
 
@@ -600,15 +601,6 @@ sequenceDiagram
 - `.container/supervise.sh` 作为 PID 1 直接启动 `.container/run_bot.py`，写入当前 Bot PID；`hatsume-restart` 创建显式重启请求并延迟发送 TERM，supervisor 仅在存在该请求时重新启动 Bot。
 - `data/hatsume-plugin/skills/self-evolution.md` 告诉运行时 Agent `/work/hatsume` 的边界、测试要求与重启命令；检查失败时如实报告失败并评估是否为本任务相关，与本任务无关的既有基线失败不自动阻止重启。
 
-### GUI 语义操作
-
-- `graph/tools.py` 的 `CHAT_TOOLS` 直接注册桌面 `gui_launch/inspect/click/focus/set_text/type/key/screenshot` 与坐标后备工具 `gui_click_coordinates`、浏览器 `chrome_open/inspect/click/focus/set_text`，无需 chat_agent 调用 Shell 可执行程序。
-- `gui_automation.py` 是内部基础设施模块；工具通过 `infra.run_cmd` 在系统 Python 中执行，以使用 apt 安装的 AT-SPI 绑定。此模块不导入 graph 或 handlers，不增加循环依赖。
-- `gui_click_coordinates(x, y, button="left", clicks=1)` 使用 xdotool 模拟桌面鼠标，支持左/右/中键和双击，并按实际屏幕尺寸拒绝越界坐标；缺少语义 ID 时先截图并让 view_image 定位，点击后重新截图验证。操作复用桌面文件锁。
-- 主镜像在 Xvfb/Openbox 桌面启动固定地址的 D-Bus 会话与 AT-SPI2，默认终端为支持 AT-SPI 的 Xfce Terminal；PCManFM、终端菜单和输入控件通过真实无障碍对象执行动作，键盘和粘贴先按窗口 PID/标题激活再聚焦目标对象。
-- Google Chrome 调试端口仅监听容器内 localhost。每群拥有一个 CDP 标签页；检查通过 `Accessibility.getFullAXTree` 获取语义控件和 `backendDOMNodeId`，动作解析真实 DOM 对象，拒绝导航后的文档或已移除节点。
-- 每群在 `/run/hatsume/gui/<group-id>` 保存两份最新快照，快照带随机引用前缀且 10 分钟过期；不接受其他群的引用。桌面仍共享，跨群 GUI 操作由文件锁串行化。截图保存到 `/work/gui-screenshots/<group-id>`。容器重建后引用自动清空。
-- 聚焦测试为 `tests/test_gui_refs.py` 与 `tests/test_gui_tools.py`；实际探针覆盖文件管理器菜单点击、终端粘贴/执行、Chrome 中文输入/按钮回显、过期引用拒绝以及截图。
 
 ### 7.2 图片与视频
 
@@ -625,7 +617,7 @@ sequenceDiagram
 
 utils/md_to_image.py 在文本超过 500 字或包含富 Markdown 时：
 
-- 先调用 mini 模型进行 Markdown 排版美化；模型只能调整 Markdown 标记、空白和结构，系统会比较渲染后的文字与链接内容，任何内容变化都会丢弃美化结果并使用原文。
+- 先调用 lite 模型进行 Markdown 排版美化；模型按内容逻辑调整 Markdown 标记、空白和结构并尽量保留原文含义，系统会比较渲染后的文字与链接内容，任何内容变化都会丢弃美化结果并使用原文。
 - 使用 Python Markdown、Pymdown 扩展和代码高亮生成 HTML。
 - 支持表格、任务列表、KaTeX 公式和明暗主题，并使用低干扰的猫娘风格配色。
 - 使用 nonebot-plugin-htmlrender 截图。
@@ -775,11 +767,9 @@ graph/tools.py、graph/agents.py、graph/nodes.py 与 handlers/dialogue.py 之�
 | `todo/__init__.py`、`todo/store.py` | 公共连接；数据、容量、读取和完成已按 group_id |
 | `utils/__init__.py` | QQ helper 使用显式群号，成员缓存已按群键控 |
 | `utils/md_to_image.py`、`utils/security.py` | 无群可变状态的渲染与纯文本脱敏 |
-| `virtual/image/Dockerfile`、`virtual/image_pack.sh` | 构建所有群共享的 Ubuntu 26.04 LTS 镜像；Dockerfile 安装 ubuntu-standard、开发/网络工具、Python、Node.js、GitHub CLI、Claude Code 与 Agent 工具依赖 |
 
 `COMMON_SKILLS_DIR` 中的运行时 Markdown Skill 是统一的默认公共只读资产；不会复制进群目录，Agent 只能通过工具修改所属群的本地 overlay，群本地层不能覆盖公共名称。
 
-`virtual/` 保留原镜像构建与历史启动脚本，但当前 bot 运行时不会调用它们。
 ## 9. 测试模块索引
 
 测试必须离线且可重复，不得依赖真实 QQ、模型 API、Docker、Apple Photos 或网络。目录级规则见 tests/AGENTS.md。

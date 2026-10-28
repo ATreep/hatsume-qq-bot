@@ -21,9 +21,6 @@ def _get_float_env(name: str, default: float) -> float:
         return default
 
 
-SANDBOX_COMPUTER_USE_MAX_ITERATIONS: int = 30
-
-
 # ---------------------------------------------------------------------------
 # Bot identity
 # ---------------------------------------------------------------------------

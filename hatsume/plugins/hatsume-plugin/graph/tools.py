@@ -1372,7 +1372,7 @@ async def generate_tts(text: str) -> str:
 @tool
 async def shell_executor(shell: str, timeout: int) -> str:
     """
-    在 Ubuntu Linux GUI 沙盒中执行 bash shell（当前工作目录 pwd 为 /work，~ 为 /root），并返回输出结果。
+    在 Ubuntu Linux 沙盒中执行 bash shell（当前工作目录 pwd 为 /work，~ 为 /root），并返回输出结果。
     如果你是初芽，需要阅读或操作网页时先加载 lightpanda Skill，再派发 coding_agent 执行浏览器任务。
     timeout 为正整数秒，超过该时长会强制终止命令；初芽默认最多允许 60 秒，
     coding_agent 不受该 60 秒限制。
@@ -1406,177 +1406,6 @@ async def shell_executor(shell: str, timeout: int) -> str:
     return result
 
 
-# ---------------------------------------------------------------------------
-# Semantic GUI automation
-# ---------------------------------------------------------------------------
-_GUI_AUTOMATION_SCRIPT = (
-    "/work/hatsume/hatsume/plugins/hatsume-plugin/gui_automation.py"
-)
-
-
-async def _run_gui_automation(
-    operation: str,
-    *arguments: str,
-    timeout: int = 30,
-) -> str:
-    """Run the internal AT-SPI/CDP bridge in the current GUI sandbox."""
-    runtime = get_current_group_runtime()
-    await ensure_container_running(runtime.group_id)
-    command = " ".join(
-        [
-            f"HATSUME_GUI_GROUP_ID={runtime.group_id}",
-            "/usr/bin/python3",
-            shlex.quote(_GUI_AUTOMATION_SCRIPT),
-            shlex.quote(operation),
-            *(shlex.quote(argument) for argument in arguments),
-        ]
-    )
-    return await run_cmd(command, timeout=timeout, group_id=runtime.group_id)
-
-
-@tool
-async def gui_inspect(application: str = "", max_nodes: int = 200) -> str:
-    """检查整个 Linux 虚拟桌面的 AT-SPI 无障碍树并返回临时元素 ID。
-
-    返回的元素包含 id、application、role、name、actions 和 bounds。后续
-    gui_click、gui_focus 或 gui_set_text 必须使用这一次检查返回的 id；窗口
-    或弹窗变化后重新调用本工具。不要根据 bounds 自己计算坐标。
-    """
-    if max_nodes < 1 or max_nodes > 500:
-        return "错误：max_nodes 必须在 1 到 500 之间。"
-    return await _run_gui_automation("atspi-inspect", str(max_nodes), application)
-
-
-@tool
-async def gui_click(element_id: str) -> str:
-    """通过 AT-SPI 元素 ID 激活桌面控件，例如按钮、菜单项或复选框。"""
-    return await _run_gui_automation("atspi-click", element_id)
-
-
-@tool
-async def gui_click_coordinates(
-    x: int,
-    y: int,
-    button: Literal["left", "right", "middle"] = "left",
-    clicks: int = 1,
-) -> str:
-    """按原始桌面截图的像素坐标点击整个 GUI 桌面。
-
-    用于没有 AT-SPI/CDP 元素 ID 的控件。先用 gui_screenshot 截图，再通过
-    view_image 的自定义 prompt 确定目标坐标；优先使用元素 ID 操作。
-    原图左上角为 (0, 0)，x 向右、y 向下；不要使用缩放预览坐标。
-    button 为 left/right/middle，clicks 为 1（单击）或 2（双击）。
-    程序会根据实际桌面尺寸拒绝越界坐标。点击后重新截图确认结果。
-    """
-    if (isinstance(x, bool) or isinstance(y, bool)
-            or not isinstance(x, int) or not isinstance(y, int) or x < 0 or y < 0):
-        return "错误：x、y 必须为非负整数像素坐标。"
-    if button not in {"left", "right", "middle"} or clicks not in {1, 2}:
-        return "错误：button 必须为 left/right/middle，clicks 必须为 1 或 2。"
-    return await _run_gui_automation("click-coordinates", str(x), str(y), button, str(clicks))
-
-
-@tool
-async def gui_drag(
-    app_id: str,
-    start_x: int,
-    start_y: int,
-    end_x: int,
-    end_y: int,
-    speed: float = 800.0,
-) -> str:
-    """在指定应用窗口内拖拽鼠标。
-
-    app_id 必须是最近一次 gui_inspect 返回的应用根元素 ID；坐标使用原始桌面
-    截图像素。speed 是移动速度，单位为像素/秒，默认 800，工具会按起终点距离
-    计算持续时间并模拟连续的人类鼠标移动。适用于拖动验证码、GUI 控件、页面
-    或元素滚动条；拖拽前先用 gui_screenshot 和 view_image 确定起点、终点。
-    """
-    if not app_id or not app_id.strip():
-        return "错误：app_id 不能为空，必须使用 gui_inspect 返回的应用根元素 ID。"
-    coordinates = (start_x, start_y, end_x, end_y)
-    if any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in coordinates):
-        return "错误：拖拽起点和终点坐标必须为非负整数。"
-    if isinstance(speed, bool) or not isinstance(speed, (int, float)) or speed <= 0:
-        return "错误：speed 必须为正数像素/秒。"
-    return await _run_gui_automation(
-        "drag", app_id, str(start_x), str(start_y), str(end_x), str(end_y), str(float(speed))
-    )
-
-
-@tool
-async def gui_focus(element_id: str) -> str:
-    """通过 AT-SPI 元素 ID 聚焦桌面控件。"""
-    return await _run_gui_automation("atspi-focus", element_id)
-
-
-@tool
-async def gui_set_text(element_id: str, text: str) -> str:
-    """通过 AT-SPI 元素 ID 设置桌面输入控件的文本。"""
-    return await _run_gui_automation("atspi-set-text", element_id, text)
-
-
-@tool
-async def gui_key(element_id: str, key: str) -> str:
-    """先聚焦指定 AT-SPI/CDP 元素，再发送按键，例如 Return、Tab 或 ctrl+l。"""
-    return await _run_gui_automation("key", key, element_id)
-
-
-@tool
-async def gui_type(element_id: str, text: str) -> str:
-    """先聚焦 AT-SPI/CDP 元素再粘贴文本；用于终端等不支持 set_text 的控件。"""
-    return await _run_gui_automation("type", text, element_id)
-
-
-@tool
-async def gui_launch(application: str, arguments: list[str] | None = None) -> str:
-    """启动桌面程序，随后用 gui_inspect 取得控件 ID。
-
-    application 可用 terminal、file_manager，或已安装程序的可执行文件名；
-    arguments 是程序参数列表，不能提供 Shell 命令串。
-    """
-    return await _run_gui_automation("launch", application, json.dumps(arguments or []))
-
-
-@tool
-async def gui_screenshot() -> str:
-    """截取整个虚拟桌面并返回 PNG 路径；需要视觉确认时再调用 view_image。"""
-    return await _run_gui_automation("screenshot", timeout=30)
-
-
-@tool
-async def chrome_open(url: str) -> str:
-    """启动带 CDP 的 Google Chrome，或导航现有 CDP 页面到指定 URL。"""
-    if not url.startswith(("http://", "https://")):
-        return "错误：Chrome URL 必须以 http:// 或 https:// 开头。"
-    return await _run_gui_automation("chrome-open", url, timeout=45)
-
-
-@tool
-async def chrome_inspect(target_id: str = "") -> str:
-    """通过 Chrome CDP 枚举可交互 DOM 元素、Accessibility 信息和 HTML attributes。"""
-    return await _run_gui_automation("chrome-inspect", target_id, timeout=30)
-
-
-@tool
-async def chrome_click(element_id: str) -> str:
-    """通过 Chrome CDP 元素 ID 点击当前页面控件，不使用屏幕坐标。"""
-    return await _run_gui_automation("chrome-click", element_id)
-
-
-@tool
-async def chrome_focus(element_id: str) -> str:
-    """通过 Chrome CDP 元素 ID 聚焦当前页面控件。"""
-    return await _run_gui_automation("chrome-focus", element_id)
-
-
-@tool
-async def chrome_set_text(element_id: str, text: str) -> str:
-    """通过 Chrome CDP 元素 ID 输入文本并校验输入框或 contenteditable 的最终值。
-
-    底层使用 Chrome 的 Input.insertText 事件管线，让网页框架同步受控输入状态。
-    """
-    return await _run_gui_automation("chrome-set-text", element_id, text)
 
 # ---------------------------------------------------------------------------
 # Timer tools
@@ -2560,7 +2389,6 @@ async def agent_dispatch(
     from .agents import (
         add_agent_instance,
         bind_agent_instance,
-        get_running_agent_instance,
         has_running_agent_task,
         set_agent_state,
         track_agent_task,
@@ -2568,18 +2396,6 @@ async def agent_dispatch(
         finish_agent_history,
     )
     import time as _time
-
-    if agent_name == "sandbox_computer_use":
-        active_instance = get_running_agent_instance(agent_name)
-        if active_instance is not None:
-            active_group_id = active_instance.get("group_id")
-            if active_group_id != group_id:
-                return "该agent正在被其他人占用，请稍后再尝试分发。"
-            active_task = str(active_instance.get("task", "")).strip()
-            return (
-                "该 Agent 只能单实例运行，禁止并行运行多个实例。\n"
-                f"当前任务提示词：{active_task}"
-            )
 
     if has_running_agent_task(agent_name, group_id, task):
         return f"错误：Agent '{agent_name}' 已在当前群执行相同任务。"
