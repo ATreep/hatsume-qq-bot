@@ -6,7 +6,10 @@ bypassing a Jinja2 autoescape bug in its ``render_markdown`` template.
 
 from __future__ import annotations
 
+import html
+import json
 import re
+import secrets
 import traceback
 from datetime import datetime
 from importlib import import_module
@@ -49,6 +52,7 @@ def _get_templates_dir() -> Path:
 # ---- data directory resolution ----------------------------------------------
 
 _DATA_DIR: Path | None = None
+_MERMAID_JS: str | None | bool = None
 
 
 def _get_data_dir() -> Path:
@@ -138,7 +142,8 @@ _CODE_WRAP_CSS = """
 # Patterns that indicate rich Markdown formatting — when any of these are found
 # in a message, it should be rendered as an image even if the text is short.
 _MD_FEATURE_PATTERN = re.compile(
-    r"```"  # fenced code blocks (triple backtick)
+    r"(?i:(?:^|\n)[ \t]*(?:`{3,}|~{3,})[ \t]*mermaid(?:[ \t]+[^\n]*)?[ \t]*(?:\n|$))"  # Mermaid fences
+    r"|```"  # fenced code blocks (triple backtick)
     r"|^#{1,6}\s"  # ATX headers (#, ##, ###, …)
     r"|\$\$"  # display LaTeX $$…$$
     r"|\$[^$]+\$"  # inline LaTeX $…$
@@ -333,6 +338,20 @@ async def _get_light_code_css() -> str:
     return _cached_light_code_css
 
 
+async def _get_mermaid_js() -> str | None:
+    """Load the pinned local Mermaid browser bundle, if available."""
+    global _MERMAID_JS
+    if _MERMAID_JS is None:
+        asset = Path(__file__).parent / "assets" / "mermaid.min.js"
+        try:
+            _MERMAID_JS = await _read(asset)
+            print(f"[md2img] mermaid asset loaded: bytes={len(_MERMAID_JS)}")
+        except Exception as error:
+            _MERMAID_JS = False
+            print(f"[md2img] mermaid asset unavailable: {type(error).__name__}")
+    return _MERMAID_JS if _MERMAID_JS is not False else None
+
+
 async def _get_katex() -> tuple[str, str, str, str] | None:
     """Load & cache KaTeX assets for math rendering. Returns None if not found."""
     global _cached_katex
@@ -347,6 +366,95 @@ async def _get_katex() -> tuple[str, str, str, str] | None:
         except Exception:
             _cached_katex = False  # type: ignore[assignment]
     return _cached_katex if _cached_katex and _cached_katex is not False else None
+
+
+# ---- Mermaid extraction -------------------------------------------------------
+
+def _extract_mermaid_blocks(md_text: str) -> tuple[str, list[str]]:
+    """Replace Mermaid fences with collision-safe placeholders."""
+    blocks: list[str] = []
+    token_prefix = f"HATSUME_MERMAID_BLOCK_{secrets.token_hex(4)}_"
+    token_index = 0
+    output: list[str] = []
+    cursor = 0
+
+    pattern = re.compile(
+        r"(?P<indent>^[ \t]*)(?P<fence>`{3,}|~{3,})[ \t]*mermaid[ \t]*\n"
+        r"(?P<body>.*?)(?P=indent)(?P<close>`{3,}|~{3,})[ \t]*$",
+        re.MULTILINE | re.DOTALL | re.IGNORECASE,
+    )
+    for match in pattern.finditer(md_text):
+        output.append(md_text[cursor:match.start()])
+        while True:
+            token = f"{token_prefix}{token_index}"
+            token_index += 1
+            if token not in md_text:
+                break
+        blocks.append(match.group("body").strip("\n"))
+        output.append(f"{match.group('indent')}{token}")
+        cursor = match.end()
+    output.append(md_text[cursor:])
+    if blocks:
+        print(
+            f"[md2img] mermaid extraction: blocks={len(blocks)} "
+            f"bytes={sum(len(block.encode('utf-8')) for block in blocks)}"
+        )
+    return "".join(output), blocks
+
+
+def _mermaid_theme(dark_mode: bool) -> dict[str, str]:
+    """Return Mermaid base-theme variables matching the Markdown palette."""
+    if dark_mode:
+        return {
+            "background": "#1a1418",
+            "primaryColor": "#3a2833",
+            "primaryTextColor": "#eadde3",
+            "primaryBorderColor": "#f0a0b8",
+            "lineColor": "#f0a0b8",
+            "secondaryColor": "#30232b",
+            "tertiaryColor": "#2d1f28",
+            "secondaryTextColor": "#d8cdd2",
+            "tertiaryTextColor": "#b6a4ae",
+            "noteBkgColor": "#3a2833",
+            "noteTextColor": "#eadde3",
+            "textColor": "#eadde3",
+            "fontFamily": "-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif",
+        }
+    return {
+        "background": "#fff3f7",
+        "primaryColor": "#fdf2f5",
+        "primaryTextColor": "#4a3340",
+        "primaryBorderColor": "#d4456a",
+        "lineColor": "#b83852",
+        "secondaryColor": "#fef9f6",
+        "tertiaryColor": "#f5e8ec",
+        "secondaryTextColor": "#7a5a6a",
+        "tertiaryTextColor": "#8b6a79",
+        "noteBkgColor": "#fef7f9",
+        "noteTextColor": "#4a3340",
+        "textColor": "#4a3340",
+        "fontFamily": "-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif",
+    }
+
+
+def _replace_mermaid_placeholders(
+    html_body: str, markdown_text: str, blocks: list[str]
+) -> str:
+    """Replace Markdown placeholder paragraphs with safe Mermaid hosts."""
+    token_matches = re.findall(r"HATSUME_MERMAID_BLOCK_[0-9a-f]+_\d+", markdown_text)
+    for index, source in enumerate(blocks):
+        token = token_matches[index] if index < len(token_matches) else ""
+        source_html = html.escape(source)
+        host = (
+            f'<div class="hatsume-mermaid" data-mermaid-index="{index}">'
+            f'<pre class="hatsume-mermaid-fallback"><code class="language-mermaid">'
+            f"{source_html}</code></pre>"
+            '<div class="hatsume-mermaid-output" aria-label="Mermaid diagram"></div>'
+            "</div>"
+        )
+        html_body = html_body.replace(f"<p>{token}</p>", host)
+        html_body = html_body.replace(token, host)
+    return html_body
 
 
 # ---- Markdown → image -------------------------------------------------------
@@ -365,11 +473,14 @@ _MD_EXTENSION_CONFIGS = {"mdx_math": {"enable_dollar_delimiter": True}}
 
 async def _markdown_to_html(md_text: str) -> str:
     """Convert Markdown to a self-contained HTML page ready for ``render_html``."""
+    markdown_text, mermaid_blocks = _extract_mermaid_blocks(md_text)
     html_body = markdown.markdown(
-        md_text,
+        markdown_text,
         extensions=_MD_EXTENSIONS,
         extension_configs=_MD_EXTENSION_CONFIGS,
     )
+    if mermaid_blocks:
+        html_body = _replace_mermaid_placeholders(html_body, markdown_text, mermaid_blocks)
 
     needs_katex = "math/tex" in html_body
     css = await _get_css()
@@ -382,12 +493,57 @@ async def _markdown_to_html(md_text: str) -> str:
         katex = await _get_katex()
         if katex:
             katex_css, katex_js, mhchem_js, mathtex_js = katex
-            extra = (
+            extra += (
                 f'<style type="text/css">{katex_css}</style>'
                 f"<script defer>{katex_js}</script>"
                 f"<script defer>{mhchem_js}</script>"
                 f"<script defer>{mathtex_js}</script>"
             )
+
+    mermaid_js = await _get_mermaid_js() if mermaid_blocks else None
+    mermaid_theme = _mermaid_theme(dark_mode)
+    mermaid_css = """
+.hatsume-mermaid{margin:24px 0;padding:16px;border:1px solid rgba(212,69,106,.22);border-radius:12px;overflow:hidden;background:rgba(255,255,255,.18)}
+.hatsume-mermaid-output{width:100%;overflow-x:auto;text-align:center}
+.hatsume-mermaid-output svg{display:block;width:auto;max-width:100%;height:auto;margin:0 auto;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+.hatsume-mermaid-fallback{margin:0;white-space:pre-wrap;overflow-wrap:anywhere}
+.hatsume-mermaid.is-rendered .hatsume-mermaid-fallback{display:none}
+.hatsume-mermaid.is-failed .hatsume-mermaid-output{display:none}
+"""
+    if mermaid_blocks:
+        css += mermaid_css
+        print(
+            f"[md2img] mermaid theme: {'dark' if dark_mode else 'light'} "
+            f"blocks={len(mermaid_blocks)} asset={'yes' if mermaid_js else 'no'}"
+        )
+        if mermaid_js:
+            payload = json.dumps(mermaid_blocks, ensure_ascii=False).replace("</", "<\\/")
+            theme_payload = json.dumps(mermaid_theme, ensure_ascii=False)
+            extra += (
+                f"<script>{mermaid_js}</script>"
+                "<script>"
+                "window.__hatsume_mermaid_ready=false;"
+                f"window.__hatsume_mermaid_sources={payload};"
+                f"window.__hatsume_mermaid_theme={theme_payload};"
+                "(async()=>{"
+                "const hosts=[...document.querySelectorAll('.hatsume-mermaid')];"
+                "try{"
+                "mermaid.initialize({startOnLoad:false,securityLevel:'strict',theme:'base',themeVariables:window.__hatsume_mermaid_theme,deterministicIds:true});"
+                "for(const [index,host] of hosts.entries()){"
+                "try{const source=host.querySelector('code').textContent;"
+                "const result=await mermaid.render(`hatsume-mermaid-${index}`,source);"
+                "host.querySelector('.hatsume-mermaid-output').innerHTML=result.svg;"
+                "host.classList.add('is-rendered');"
+                "if(result.bindFunctions)result.bindFunctions(host.querySelector('.hatsume-mermaid-output'));"
+                "console.info('[md2img] mermaid rendered',index);"
+                "}catch(error){host.classList.add('is-failed');console.error('[md2img] mermaid render failed',index,error?.name||'Error');}"
+                "}"
+                "}catch(error){hosts.forEach(host=>host.classList.add('is-failed'));console.error('[md2img] mermaid bootstrap failed',error?.name||'Error');}"
+                "finally{window.__hatsume_mermaid_ready=true;}})();"
+                "</script>"
+            )
+        else:
+            print("[md2img] mermaid fallback: source blocks kept as code")
 
     page = (
         '<!DOCTYPE html><html>'
