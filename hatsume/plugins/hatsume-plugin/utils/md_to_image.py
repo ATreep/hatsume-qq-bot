@@ -239,7 +239,7 @@ _BEAUTIFY_SYSTEM_PROMPT = """
 
 ## 你的操作方式
 使用 Markdown 格式符进行分段、排版。
-你需要按照原文内容逻辑重新划分段落、并恰当地生成多级标题、表格、引用、列表等有利于排版的 Markdown 格式。
+你需要按照原文内容逻辑重新划分段落、并恰当地生成多级标题、表格、引用、列表、Mermaid 图表（统计图、流程图、时序图等）、LaTeX 数学公式等有利于排版的 Markdown 格式。
 
 ## 输出目标
 将输入的原文内容转换为结构层次感分明、美观、格式整齐、易读的 Markdown 内容。
@@ -406,33 +406,59 @@ def _mermaid_theme(dark_mode: bool) -> dict[str, str]:
     """Return Mermaid base-theme variables matching the Markdown palette."""
     if dark_mode:
         return {
-            "background": "#1a1418",
-            "primaryColor": "#3a2833",
-            "primaryTextColor": "#eadde3",
-            "primaryBorderColor": "#f0a0b8",
-            "lineColor": "#f0a0b8",
+            "background": "#21191f",
+            "primaryColor": "#3b2935",
+            "primaryTextColor": "#f1e3e8",
+            "primaryBorderColor": "#d98aa4",
+            "lineColor": "#e49ab2",
             "secondaryColor": "#30232b",
-            "tertiaryColor": "#2d1f28",
-            "secondaryTextColor": "#d8cdd2",
-            "tertiaryTextColor": "#b6a4ae",
-            "noteBkgColor": "#3a2833",
-            "noteTextColor": "#eadde3",
-            "textColor": "#eadde3",
+            "tertiaryColor": "#392b34",
+            "secondaryTextColor": "#dfcbd3",
+            "tertiaryTextColor": "#beaab3",
+            "noteBkgColor": "#47352d",
+            "noteTextColor": "#f1e3e8",
+            "textColor": "#f1e3e8",
+            "clusterBkg": "#2b2027",
+            "clusterBorder": "#765263",
+            "edgeLabelBackground": "#21191f",
+            "actorBkg": "#3b2935",
+            "actorBorder": "#d98aa4",
+            "actorTextColor": "#f1e3e8",
+            "signalColor": "#e49ab2",
+            "labelBoxBkgColor": "#30232b",
+            "labelBoxBorderColor": "#765263",
+            "labelTextColor": "#f1e3e8",
+            "activationBkgColor": "#765263",
+            "activationBorderColor": "#d98aa4",
+            "sequenceNumberColor": "#21191f",
             "fontFamily": "-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif",
         }
     return {
-        "background": "#fff3f7",
-        "primaryColor": "#fdf2f5",
-        "primaryTextColor": "#4a3340",
-        "primaryBorderColor": "#d4456a",
-        "lineColor": "#b83852",
-        "secondaryColor": "#fef9f6",
-        "tertiaryColor": "#f5e8ec",
-        "secondaryTextColor": "#7a5a6a",
-        "tertiaryTextColor": "#8b6a79",
-        "noteBkgColor": "#fef7f9",
-        "noteTextColor": "#4a3340",
-        "textColor": "#4a3340",
+        "background": "#fffafd",
+        "primaryColor": "#fff5e5",
+        "primaryTextColor": "#5b3d4d",
+        "primaryBorderColor": "#efbfd0",
+        "lineColor": "#b85b78",
+        "secondaryColor": "#fff8fb",
+        "tertiaryColor": "#f9e8ef",
+        "secondaryTextColor": "#6d4e5d",
+        "tertiaryTextColor": "#846b77",
+        "noteBkgColor": "#fff0d6",
+        "noteTextColor": "#5b3d4d",
+        "textColor": "#5b3d4d",
+        "clusterBkg": "#fff8fb",
+        "clusterBorder": "#f0cbd8",
+        "edgeLabelBackground": "#fffafd",
+        "actorBkg": "#fff5e5",
+        "actorBorder": "#efbfd0",
+        "actorTextColor": "#5b3d4d",
+        "signalColor": "#b85b78",
+        "labelBoxBkgColor": "#fff8fb",
+        "labelBoxBorderColor": "#f0cbd8",
+        "labelTextColor": "#5b3d4d",
+        "activationBkgColor": "#f4d4df",
+        "activationBorderColor": "#d98aa4",
+        "sequenceNumberColor": "#fffafd",
         "fontFamily": "-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif",
     }
 
@@ -503,12 +529,13 @@ async def _markdown_to_html(md_text: str) -> str:
     mermaid_js = await _get_mermaid_js() if mermaid_blocks else None
     mermaid_theme = _mermaid_theme(dark_mode)
     mermaid_css = """
-.hatsume-mermaid{margin:24px 0;padding:16px;border:1px solid rgba(212,69,106,.22);border-radius:12px;overflow:hidden;background:rgba(255,255,255,.18)}
+.hatsume-mermaid{margin:24px 0;padding:16px;border:1px solid #f0cbd8;border-radius:12px;overflow:hidden;background:#fffafd;box-shadow:0 8px 24px rgba(180,120,140,.08)}
 .hatsume-mermaid-output{width:100%;overflow-x:auto;text-align:center}
 .hatsume-mermaid-output svg{display:block;width:auto;max-width:100%;height:auto;margin:0 auto;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
 .hatsume-mermaid-fallback{margin:0;white-space:pre-wrap;overflow-wrap:anywhere}
 .hatsume-mermaid.is-rendered .hatsume-mermaid-fallback{display:none}
 .hatsume-mermaid.is-failed .hatsume-mermaid-output{display:none}
+@media(prefers-color-scheme:dark){.hatsume-mermaid{border-color:#765263;background:#21191f;box-shadow:0 8px 24px rgba(0,0,0,.22)}}
 """
     if mermaid_blocks:
         css += mermaid_css

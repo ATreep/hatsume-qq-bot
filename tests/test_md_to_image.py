@@ -104,6 +104,9 @@ def test_mermaid_theme_has_light_and_dark_palettes(md_module):
     assert light["background"] != dark["background"]
     assert light["primaryTextColor"] != dark["primaryTextColor"]
     assert light["fontFamily"] == dark["fontFamily"]
+    assert light["primaryColor"] == "#fff5e5"
+    assert light["noteBkgColor"] == "#fff0d6"
+    assert dark["background"] == "#21191f"
 
 
 def test_markdown_to_html_contains_mermaid_contract(md_module, monkeypatch):
