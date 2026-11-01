@@ -104,9 +104,12 @@ def test_mermaid_theme_has_light_and_dark_palettes(md_module):
     assert light["background"] != dark["background"]
     assert light["primaryTextColor"] != dark["primaryTextColor"]
     assert light["fontFamily"] == dark["fontFamily"]
-    assert light["primaryColor"] == "#fff5e5"
-    assert light["noteBkgColor"] == "#fff0d6"
-    assert dark["background"] == "#21191f"
+    assert light["primaryColor"] == "#fff0f7"
+    assert light["noteBkgColor"] == "#ffe0ec"
+    assert light["pie1"] == "#d4456a"
+    assert light["xyChart"]["plotColorPalette"].startswith("#d4456a")
+    assert dark["background"] == "#2b2428"
+    assert dark["pie1"] == "#f08bad"
 
 
 def test_markdown_to_html_contains_mermaid_contract(md_module, monkeypatch):

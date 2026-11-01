@@ -402,63 +402,131 @@ def _extract_mermaid_blocks(md_text: str) -> tuple[str, list[str]]:
     return "".join(output), blocks
 
 
-def _mermaid_theme(dark_mode: bool) -> dict[str, str]:
+def _mermaid_theme(dark_mode: bool) -> dict[str, object]:
     """Return Mermaid base-theme variables matching the Markdown palette."""
     if dark_mode:
         return {
-            "background": "#21191f",
-            "primaryColor": "#3b2935",
-            "primaryTextColor": "#f1e3e8",
-            "primaryBorderColor": "#d98aa4",
-            "lineColor": "#e49ab2",
-            "secondaryColor": "#30232b",
-            "tertiaryColor": "#392b34",
-            "secondaryTextColor": "#dfcbd3",
-            "tertiaryTextColor": "#beaab3",
-            "noteBkgColor": "#47352d",
-            "noteTextColor": "#f1e3e8",
-            "textColor": "#f1e3e8",
-            "clusterBkg": "#2b2027",
-            "clusterBorder": "#765263",
-            "edgeLabelBackground": "#21191f",
-            "actorBkg": "#3b2935",
-            "actorBorder": "#d98aa4",
-            "actorTextColor": "#f1e3e8",
-            "signalColor": "#e49ab2",
-            "labelBoxBkgColor": "#30232b",
-            "labelBoxBorderColor": "#765263",
-            "labelTextColor": "#f1e3e8",
-            "activationBkgColor": "#765263",
-            "activationBorderColor": "#d98aa4",
-            "sequenceNumberColor": "#21191f",
+            "background": "#2b2428",
+            "primaryColor": "#4a2639",
+            "primaryTextColor": "#fff0f6",
+            "primaryBorderColor": "#f08bad",
+            "lineColor": "#f08bad",
+            "secondaryColor": "#5c2d45",
+            "tertiaryColor": "#713653",
+            "secondaryTextColor": "#ead5de",
+            "tertiaryTextColor": "#cbb1bd",
+            "noteBkgColor": "#5c2d45",
+            "noteTextColor": "#f7eaf0",
+            "textColor": "#f7eaf0",
+            "secondaryBorderColor": "#d06b92",
+            "tertiaryBorderColor": "#b9577f",
+            "radius": "14",
+            "strokeWidth": "1.5",
+            "useMaxWidth": "true",
+            "pie1": "#f08bad",
+            "pie2": "#d06b92",
+            "pie3": "#b9577f",
+            "pie4": "#8f4567",
+            "pie5": "#713653",
+            "cScale0": "#f08bad",
+            "cScale1": "#d06b92",
+            "cScale2": "#b9577f",
+            "cScale3": "#8f4567",
+            "taskBkgColor": "#5c2d45",
+            "activeTaskBkgColor": "#713653",
+            "doneTaskBkgColor": "#4a2639",
+            "taskBorderColor": "#f08bad",
+            "activeTaskBorderColor": "#f08bad",
+            "doneTaskBorderColor": "#d06b92",
+            "gridColor": "#513847",
+            "todayLineColor": "#f08bad",
+            "vertLineColor": "#d06b92",
+            "taskTextColor": "#f7eaf0",
+            "taskTextOutsideColor": "#f7eaf0",
+            "taskTextLightColor": "#f7eaf0",
+            "taskTextDarkColor": "#f7eaf0",
+            "pieTitleTextColor": "#f7eaf0",
+            "pieSectionTextColor": "#2b2428",
+            "pieLegendTextColor": "#f7eaf0",
+            "pieStrokeColor": "#2b2428",
+            "pieOuterStrokeColor": "#f08bad",
+            "pieOpacity": "1",
+            "xyChart": {"plotColorPalette": "#f08bad,#d06b92,#b9577f,#8f4567"},
+            "clusterBkg": "#351d2b",
+            "clusterBorder": "#d06b92",
+            "edgeLabelBackground": "#2b2428",
+            "actorBkg": "#4a2639",
+            "actorBorder": "#f08bad",
+            "actorTextColor": "#f7eaf0",
+            "signalColor": "#f08bad",
+            "labelBoxBkgColor": "#5c2d45",
+            "labelBoxBorderColor": "#d06b92",
+            "labelTextColor": "#f7eaf0",
+            "activationBkgColor": "#d06b92",
+            "activationBorderColor": "#f08bad",
+            "sequenceNumberColor": "#2b2428",
             "fontFamily": "-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif",
         }
     return {
-        "background": "#fffafd",
-        "primaryColor": "#fff5e5",
-        "primaryTextColor": "#5b3d4d",
-        "primaryBorderColor": "#efbfd0",
-        "lineColor": "#b85b78",
-        "secondaryColor": "#fff8fb",
-        "tertiaryColor": "#f9e8ef",
+        "background": "#ffeafc",
+        "primaryColor": "#fff0f7",
+        "primaryTextColor": "#4a3340",
+        "primaryBorderColor": "#d4456a",
+        "lineColor": "#c23d68",
+        "secondaryColor": "#ffe0ec",
+        "tertiaryColor": "#ffd0e1",
         "secondaryTextColor": "#6d4e5d",
         "tertiaryTextColor": "#846b77",
-        "noteBkgColor": "#fff0d6",
-        "noteTextColor": "#5b3d4d",
-        "textColor": "#5b3d4d",
-        "clusterBkg": "#fff8fb",
-        "clusterBorder": "#f0cbd8",
-        "edgeLabelBackground": "#fffafd",
-        "actorBkg": "#fff5e5",
-        "actorBorder": "#efbfd0",
-        "actorTextColor": "#5b3d4d",
-        "signalColor": "#b85b78",
-        "labelBoxBkgColor": "#fff8fb",
-        "labelBoxBorderColor": "#f0cbd8",
-        "labelTextColor": "#5b3d4d",
-        "activationBkgColor": "#f4d4df",
-        "activationBorderColor": "#d98aa4",
-        "sequenceNumberColor": "#fffafd",
+        "noteBkgColor": "#ffe0ec",
+        "noteTextColor": "#4a3340",
+        "textColor": "#4a3340",
+        "secondaryBorderColor": "#ef9fbd",
+        "tertiaryBorderColor": "#d8759b",
+        "radius": "14",
+        "strokeWidth": "1.5",
+        "useMaxWidth": "true",
+        "pie1": "#d4456a",
+        "pie2": "#c23d68",
+        "pie3": "#b9577f",
+        "pie4": "#8f4567",
+        "pie5": "#713653",
+        "cScale0": "#d4456a",
+        "cScale1": "#c23d68",
+        "cScale2": "#b9577f",
+        "cScale3": "#8f4567",
+        "taskBkgColor": "#ffe0ec",
+        "activeTaskBkgColor": "#ffd0e1",
+        "doneTaskBkgColor": "#fff0f7",
+        "taskBorderColor": "#d4456a",
+        "activeTaskBorderColor": "#c23d68",
+        "doneTaskBorderColor": "#ef9fbd",
+        "gridColor": "#efbfd0",
+        "todayLineColor": "#c23d68",
+        "vertLineColor": "#d06b92",
+        "taskTextColor": "#4a3340",
+        "taskTextOutsideColor": "#4a3340",
+        "taskTextLightColor": "#4a3340",
+        "taskTextDarkColor": "#4a3340",
+        "pieTitleTextColor": "#4a3340",
+        "pieSectionTextColor": "#4a3340",
+        "pieLegendTextColor": "#4a3340",
+        "pieStrokeColor": "#4a3340",
+        "pieOuterStrokeColor": "#d4456a",
+        "pieOpacity": "1",
+        "xyChart": {"plotColorPalette": "#d4456a,#c23d68,#b9577f,#8f4567"},
+        "clusterBkg": "#ffe0ec",
+        "clusterBorder": "#ef9fbd",
+        "edgeLabelBackground": "#ffeafc",
+        "actorBkg": "#fff0f7",
+        "actorBorder": "#d4456a",
+        "actorTextColor": "#4a3340",
+        "signalColor": "#c23d68",
+        "labelBoxBkgColor": "#ffe0ec",
+        "labelBoxBorderColor": "#ef9fbd",
+        "labelTextColor": "#4a3340",
+        "activationBkgColor": "#ef9fbd",
+        "activationBorderColor": "#d4456a",
+        "sequenceNumberColor": "#ffeafc",
         "fontFamily": "-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif",
     }
 
@@ -528,14 +596,19 @@ async def _markdown_to_html(md_text: str) -> str:
 
     mermaid_js = await _get_mermaid_js() if mermaid_blocks else None
     mermaid_theme = _mermaid_theme(dark_mode)
+    mermaid_theme_json = json.dumps(mermaid_theme, ensure_ascii=False)
     mermaid_css = """
-.hatsume-mermaid{margin:24px 0;padding:16px;border:1px solid #f0cbd8;border-radius:12px;overflow:hidden;background:#fffafd;box-shadow:0 8px 24px rgba(180,120,140,.08)}
+.hatsume-mermaid{margin:24px 0;padding:18px;border:1px solid #ef9fbd;border-radius:var(--hm-radius,24px);overflow:hidden;background:#ffeafc;box-shadow:none}
 .hatsume-mermaid-output{width:100%;overflow-x:auto;text-align:center}
-.hatsume-mermaid-output svg{display:block;width:auto;max-width:100%;height:auto;margin:0 auto;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+.hatsume-mermaid-output svg{display:block;width:auto;max-width:100%;height:auto;margin:0 auto;font-family:"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif}
+.hatsume-mermaid-output svg .node rect{rx:14px;ry:14px}.hatsume-mermaid-output svg .node rect,.hatsume-mermaid-output svg .node polygon,.hatsume-mermaid-output svg .node circle,.hatsume-mermaid-output svg .node path{filter:none;stroke-linejoin:round}
+.hatsume-mermaid-output svg .edgePath path,.hatsume-mermaid-output svg .flowchart-link{stroke-width:1.5px;stroke-linecap:round}
+.hatsume-mermaid-output svg .edgeLabel rect{fill:#ffeafc!important;stroke:#ef9fbd!important;opacity:.96;rx:8px;ry:8px}
+.hatsume-mermaid-output svg .label foreignObject>div{border-radius:8px}
 .hatsume-mermaid-fallback{margin:0;white-space:pre-wrap;overflow-wrap:anywhere}
 .hatsume-mermaid.is-rendered .hatsume-mermaid-fallback{display:none}
 .hatsume-mermaid.is-failed .hatsume-mermaid-output{display:none}
-@media(prefers-color-scheme:dark){.hatsume-mermaid{border-color:#765263;background:#21191f;box-shadow:0 8px 24px rgba(0,0,0,.22)}}
+@media(prefers-color-scheme:dark){.hatsume-mermaid{border-color:#d06b92;background:#2b2428;box-shadow:0 8px 24px rgba(0,0,0,.22)}.hatsume-mermaid-output svg .edgeLabel rect{fill:#2b2428!important;stroke:#d06b92!important}}
 """
     if mermaid_blocks:
         css += mermaid_css
@@ -545,7 +618,7 @@ async def _markdown_to_html(md_text: str) -> str:
         )
         if mermaid_js:
             payload = json.dumps(mermaid_blocks, ensure_ascii=False).replace("</", "<\\/")
-            theme_payload = json.dumps(mermaid_theme, ensure_ascii=False)
+            theme_payload = mermaid_theme_json
             extra += (
                 f"<script>{mermaid_js}</script>"
                 "<script>"
