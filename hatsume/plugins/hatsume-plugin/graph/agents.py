@@ -95,8 +95,53 @@ def record_agent_event(agent_id: str, event: Any) -> None:
         _AGENT_HISTORY[agent_id].append(event)
 
 
-def finish_agent_history(agent_id: str, result: Any) -> None:
-    record_agent_event(agent_id, {"output": str(result)})
+def finish_agent_history(
+    agent_id: str,
+    result: Any,
+    *,
+    status: str = "completed",
+    summary: str = "",
+    tests_run: list[str] | None = None,
+    tests_passed: bool | None = None,
+    files_changed: list[str] | None = None,
+    remaining_issues: list[str] | None = None,
+) -> None:
+    """Record a bounded, structured terminal result for an Agent instance."""
+    record_agent_event(agent_id, {
+        "output": str(result),
+        "status": status,
+        "summary": summary or str(result)[:1000],
+        "tests_run": list(tests_run or []),
+        "tests_passed": tests_passed,
+        "files_changed": list(files_changed or []),
+        "remaining_issues": list(remaining_issues or []),
+    })
+
+
+def update_agent_progress(
+    agent_id: str,
+    *,
+    phase: str,
+    progress: int | None = None,
+    detail: str = "",
+) -> None:
+    """Update lifecycle metadata and retain a concise progress event."""
+    state = next(
+        (instance for instances in _AGENT_STATES.values() for instance in instances
+         if instance.get("instance_id") == agent_id),
+        None,
+    )
+    if state is None:
+        return
+    bounded_progress = None if progress is None else max(0, min(100, int(progress)))
+    state.update({"phase": phase, "progress": bounded_progress, "last_activity_at": time.time()})
+    print(
+        f"🧩 [agent] progress id={agent_id} phase={phase} "
+        f"progress={bounded_progress if bounded_progress is not None else 'unknown'}%",
+        flush=True,
+    )
+    if detail:
+        state["progress_detail"] = str(detail)[:300]
 
 
 def get_agent_history(agent_id: str, length: int = 5) -> list[Any] | None:

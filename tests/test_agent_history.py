@@ -88,7 +88,9 @@ class AgentHistoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.agents.get_agent_history(agent_id, -1)), 9)
         self.assertEqual(len(self.agents.get_agent_history(agent_id, 5)), 5)
         self.assertEqual(len(self.agents.get_agent_history(agent_id, 99)), 9)
-        self.assertEqual(self.agents.get_agent_history(agent_id, 1), [{'output': 'output'}])
+        report = self.agents.get_agent_history(agent_id, 1)[0]
+        self.assertEqual(report['output'], 'output')
+        self.assertEqual(report['status'], 'completed')
         for length in (0, -2, True):
             with self.assertRaises(ValueError):
                 self.agents.get_agent_history(agent_id, length)
@@ -136,7 +138,10 @@ class AgentHistoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(agent_id, reply)
         self.assertIn('必须先', await self.invoke('agent_stop', agent_id=agent_id))
         self.assertEqual(json.loads(await self.invoke('agent_history_list')), [])
-        self.assertEqual(json.loads(await self.invoke('agent_work_history', agent_id=agent_id, length=5)), [])
+        self.assertEqual(
+            json.loads(await self.invoke('agent_work_history', agent_id=agent_id, length=5)),
+            [],
+        )
         self.assertIn('已停止', await self.invoke('agent_stop', agent_id=agent_id))
         self.assertTrue(released.is_set())
         self.assertEqual(self.agents.get_running_instances(123), [])
@@ -154,7 +159,9 @@ class AgentHistoryTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.gather(*list(self.runtime.agent_tasks))
         state = self.agents.get_agent_state('coding_agent', 123)
         agent_id = state['instance_id']
-        self.assertEqual(self.agents.get_agent_history(agent_id, -1), [{'output': 'complete'}])
+        report = self.agents.get_agent_history(agent_id, -1)[-1]
+        self.assertEqual(report['output'], 'complete')
+        self.assertEqual(report['status'], 'completed')
         self.assertIn(agent_id, self.notifications[0]['result'])
         self.assertEqual(state['status'], 'done')
 
@@ -208,6 +215,26 @@ class AgentHistoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(records), 1)
         self.assertEqual(records[0]['error'], 'RuntimeError: failure')
         self.assertNotIn('output', records[0])
+
+    def test_progress_and_terminal_report_are_structured(self):
+        agent_id = self.add(status='running')
+        self.agents.update_agent_progress(
+            agent_id, phase='verify', progress=120, detail='run tests'
+        )
+        state = self.agents.get_agent_state('coding_agent', 123)
+        self.assertEqual((state['phase'], state['progress']), ('verify', 100))
+        self.agents.finish_agent_history(
+            agent_id,
+            'finished',
+            status='completed',
+            tests_run=['python3 -m unittest'],
+            tests_passed=True,
+            files_changed=['src/example.py'],
+        )
+        report = self.agents.get_agent_history(agent_id, 1)[0]
+        self.assertEqual(report['status'], 'completed')
+        self.assertTrue(report['tests_passed'])
+        self.assertEqual(report['files_changed'], ['src/example.py'])
 
 
 

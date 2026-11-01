@@ -208,7 +208,7 @@ def set_shell_executor_limit(max_calls: int | None) -> None:
     """Set the shell_executor budget for the current agent invocation.
 
     Call with ``max_calls=3`` before invoking 初芽 (3 calls, at most 60s each).
-    Call with ``max_calls=None`` before invoking coding_agent (no call/timeout cap).
+    Call with ``max_calls=None`` before invoking 编码 Agent (no call/timeout cap).
     Replaces the current shared budget and resets its call counter to 0.
     """
     _shell_executor_budget.set(_ShellExecutorBudget(
@@ -465,7 +465,7 @@ def web_search(query: str) -> str:
     输入搜索关键字。
 
     注意：
-    若提供了 URL，请使用 coding_agent 爬取网页内容阅读。
+    若提供了 URL，请使用 编码 Agent 爬取网页内容阅读。
     禁止将 URL 直接作为关键字搜索。
     """
     print("Search the web: ", query)
@@ -763,15 +763,15 @@ async def _record_memories(memories: list[MemoryRecordInput], runtime: Any) -> i
 
 @tool
 async def send_text(
-    text: str | None,
-    reply_to_message_id: int | None,
-    memories: list[MemoryRecordInput],
-    hatsumeface: str | None,
+    text: str | None = None,
+    reply_to_message_id: int | None = None,
+    memories: list[MemoryRecordInput] | None = None,
+    hatsumeface: str | None = None,
 ) -> str:
-    """向当前群发送文字，并可附带回复、记忆和表情控制参数。
+    """向当前群发送文字，并可附带回复、可选记忆和表情控制参数。
 
     每轮 ai_node 最多调用两次。
-    调用时必须传入非空的 memories 列表，至少包含一条记忆；为空时工具会返回错误且不会发送消息。
+    memories 仅在确实需要保存长期记忆时传入；省略或传空列表不会阻止文字发送。
     CQ at 标记必须包含在 text 中，且每个标记只能指定一个 QQ 用户；不能 @ 全体成员。
     特殊控制标记请使用对应参数，不能写入 text。
     `reply_to_message_id` 只能填写当前模型可见且未被压缩的当前 HumanMessage 顶层消息 ID，
@@ -784,17 +784,16 @@ async def send_text(
 
     ## 静默模式
     当你认为不需要向用户发送提醒，则传递 text 为空或 null，以启用静默模式。
-    静默模式不会发送文字、回复或表情，只会记录 memories；此时不要求发送通道已就绪。
+    静默模式不会发送文字、回复或表情；仅在提供 memories 时记录记忆，此时不要求发送通道已就绪。
     """
     runtime = get_current_group_runtime()
-    if not memories:
-        return "文字发送失败：memories 不能为空，至少需要包含一条需要记录的记忆。"
+    memory_records = memories or []
     message_text = (text or "").strip()
     if runtime.send_text_count >= 2:
         return "文字发送失败：一轮 ai_node 中最多发送2条文字。"
     if not message_text:
         runtime.send_text_count += 1
-        memory_count = await _record_memories(memories, runtime)
+        memory_count = await _record_memories(memory_records, runtime)
         print(f"[send_text] silent mode: recorded_memories={memory_count}")
         return f"已启用静默模式，未发送文字或表情，已记录 {memory_count} 条记忆。"
     answer = runtime.conversation.ai_answer
@@ -889,7 +888,7 @@ async def send_text(
                 peer_session_id(runtime.group_id, user_id)
             )
 
-    await _record_memories(memories, runtime)
+    await _record_memories(memory_records, runtime)
 
     if hatsumeface:
         import random
@@ -1397,9 +1396,9 @@ async def generate_tts(text: str) -> str:
 async def shell_executor(shell: str, timeout: int) -> str:
     """
     在 Ubuntu Linux 沙盒中执行 bash shell（当前工作目录 pwd 为 /work，~ 为 /root），并返回输出结果。
-    如果你是初芽，需要阅读或操作网页时先加载 lightpanda Skill，再派发 coding_agent 执行浏览器任务。
+    如果你是初芽，需要阅读或操作网页时先加载 lightpanda Skill，再派发 编码 Agent 执行浏览器任务。
     timeout 为正整数秒，超过该时长会强制终止命令；初芽默认最多允许 60 秒，
-    coding_agent 不受该 60 秒限制。
+    编码 Agent 不受该 60 秒限制。
 
     ## 约束：
     - 此工具无法执行交互式命令，如安装包时必须使用 `apt install -y` 或 `apt install --assume-yes`。
@@ -1414,12 +1413,12 @@ async def shell_executor(shell: str, timeout: int) -> str:
     if max_timeout is not None and timeout > max_timeout:
         return (
             "❌ 初芽的 shell_executor timeout 最大为 60 秒，命令未执行。"
-            "请将耗时任务完整派发给 coding_agent。"
+            "请将耗时任务完整派发给 编码 Agent。"
         )
     if budget is not None and not budget.reserve():
         return (
             "❌ 禁止多次调用 shell_executor，"
-            "请将你的原始任务使用 agent_dispatch 完整地派发给 coding_agent。"
+            "请将你的原始任务使用 agent_dispatch 完整地派发给 编码 Agent。"
         )
 
     runtime = get_current_group_runtime()
@@ -2058,7 +2057,7 @@ async def create_heartbeat_hook(
     - 当你收到来自 XXX 的邮件时，向我发送提醒
     - 当网站 XXX 上有新文章时，及时邮件通知我
 
-    调用前必须加载 `heartbeat-hook-authoring` Skill，让 coding_agent 在
+    调用前必须加载 `heartbeat-hook-authoring` Skill，让 编码 Agent 在
     `/work/hatsume/data/hatsume-plugin/hooks/` 写好可执行脚本并以验证模式试跑。
     普通情况下必须拒绝无意义、应使用 Timer、或无法拆成快速增量检查的请求；
     只有管理员明确坚持时可以绕过这个语义拒绝。无论谁请求，程序都强制
@@ -2418,6 +2417,7 @@ async def agent_dispatch(
         track_agent_task,
         untrack_agent_task,
         finish_agent_history,
+        update_agent_progress,
     )
     import time as _time
 
@@ -2433,6 +2433,10 @@ async def agent_dispatch(
         user_id=notified_user_id,
         user_name=None,
         started_at=_time.time(),
+        phase="queued",
+        progress=0,
+        workspace="/work",
+        terminal_status=None,
     )
 
     async def _run_and_notify() -> None:
@@ -2448,6 +2452,7 @@ async def agent_dispatch(
                     instance_id=instance_id,
                     user_name=notified_user_name,
                 )
+                update_agent_progress(instance_id, phase="running", progress=10)
                 with bind_agent_instance(instance_id):
                     result = await handler(task, notified_user_id)
             except asyncio.CancelledError:
@@ -2456,21 +2461,43 @@ async def agent_dispatch(
                     group_id=group_id,
                     instance_id=instance_id,
                     status="cancelled",
+                    terminal_status="cancelled",
+                    phase="finished",
+                    progress=100,
+                    finished_at=_time.time(),
                 )
                 untrack_agent_task(instance_id)
                 raise
-            except Exception:
-                print(f"❌ Agent {agent_name} failed")
+            except Exception as exc:
+                print(f"❌ Agent {agent_name} failed: id={instance_id} error={type(exc).__name__}")
                 traceback.print_exc()
                 result = f"Agent '{agent_name}' 执行失败。"
-            set_agent_state(
-                agent_name,
-                group_id=group_id,
-                instance_id=instance_id,
-                status="done",
-                result=result,
-            )
-            finish_agent_history(instance_id, result)
+                set_agent_state(
+                    agent_name,
+                    group_id=group_id,
+                    instance_id=instance_id,
+                    status="failed",
+                    terminal_status="failed",
+                    phase="finished",
+                    progress=100,
+                    finished_at=_time.time(),
+                    error=f"{type(exc).__name__}: {exc}"[:500],
+                    result=result,
+                )
+                finish_agent_history(instance_id, result, status="failed")
+            else:
+                set_agent_state(
+                    agent_name,
+                    group_id=group_id,
+                    instance_id=instance_id,
+                    status="done",
+                    terminal_status="completed",
+                    phase="finished",
+                    progress=100,
+                    finished_at=_time.time(),
+                    result=result,
+                )
+                finish_agent_history(instance_id, result, status="completed")
             untrack_agent_task(instance_id)
 
             from .nodes import inject_agent_notification

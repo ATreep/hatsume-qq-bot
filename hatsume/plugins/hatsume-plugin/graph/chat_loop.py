@@ -44,7 +44,7 @@ class SendTextFirstMiddleware(AgentMiddleware):
             if not self._send_text_started:
                 if tool_name != "send_text":
                     print(
-                        f"⚠️ [chat_agent] blocked first tool call: {tool_name!r}; "
+                        f"⚠️ [初芽] blocked first tool call: {tool_name!r}; "
                         "send_text is required first",
                         flush=True,
                     )
@@ -52,7 +52,7 @@ class SendTextFirstMiddleware(AgentMiddleware):
                 # Mark before execution: this records the first attempted call,
                 # even if send_text later returns a validation or send error.
                 self._send_text_started = True
-                print("[chat_agent] first tool call accepted: send_text", flush=True)
+                print("[初芽] first tool call accepted: send_text", flush=True)
         return await handler(request)
 
     def wrap_tool_call(self, request: Any, handler: Any) -> Any:
@@ -60,13 +60,13 @@ class SendTextFirstMiddleware(AgentMiddleware):
         if not self._send_text_started:
             if tool_name != "send_text":
                 print(
-                    f"⚠️ [chat_agent] blocked first tool call: {tool_name!r}; "
+                    f"⚠️ [初芽] blocked first tool call: {tool_name!r}; "
                     "send_text is required first",
                     flush=True,
                 )
                 return self._blocked_result(request)
             self._send_text_started = True
-            print("[chat_agent] first tool call accepted: send_text", flush=True)
+            print("[初芽] first tool call accepted: send_text", flush=True)
         return handler(request)
 
 
@@ -98,7 +98,7 @@ class ChatLoopDelegationMiddleware(AgentMiddleware):
             self._seen_messages.add(key)
             if message.type == "ai" and getattr(message, "tool_calls", None):
                 self._rounds += 1
-        print(f"[chat_agent] completed_tool_rounds={self._rounds}", flush=True)
+        print(f"[初芽] completed_tool_rounds={self._rounds}", flush=True)
         if self._rounds < CHAT_LOOP_DELEGATION_ROUNDS or self._reminded:
             return None
         self._reminded = True

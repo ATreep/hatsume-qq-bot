@@ -21,6 +21,7 @@ policy in `hatsume/plugins/hatsume-plugin/graph/context.py`.
   output chunk once. Its notifications and final report also use output archives
   for large logs; monitoring no longer resends the entire accumulated log on
   every decision.
+- Background Agent state includes a bounded lifecycle phase/progress summary, a shared workspace marker, terminal status, and completion timestamps. Final history records include status, summary, verification fields, changed-file names, and remaining-issue summaries; raw workspace paths and full tool output are not user-facing reports.
 - Chat delegation counts completed tool rounds independently of message history,
   including across MCP tool-loading passes. Compaction does not reset the count
   or cause the seven-round reminder to repeat.

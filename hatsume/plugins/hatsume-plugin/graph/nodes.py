@@ -84,6 +84,7 @@ ADMIN_MODE_KEYWORD = "BYPASS"
 CHAT_DETECTION_BYPASS_KEYWORD = "初芽"
 
 CHAT_INTENT_MAX_ATTEMPTS = 3
+CHAT_INTENT_CONFIDENCE_THRESHOLD = 0.20
 REPLYABLE_TOOL_MESSAGE_ID_PATTERN = re.compile(r"\[replyable_message_id:\s*(\d+)\]")
 
 
@@ -785,9 +786,22 @@ def inject_agent_notification(
     """Inject an agent result into the conversation flow."""
     context_line = f"📋 派发背景：{context}\n" if context else ""
     notified_user_prompt = _build_notified_user_prompt(user_id, notified_user_name)
+    lifecycle_line = "状态：终态；阶段：finished；进度：100%\n"
+    agent_id = result.splitlines()[0].removeprefix("Agent ID: ").strip()
+    if agent_id:
+        from .agents import get_agent_instance
+
+        agent_state = get_agent_instance(agent_name, group_id, agent_id)
+        if agent_state is not None:
+            lifecycle_line = (
+                f"状态：{agent_state.get('terminal_status', agent_state.get('status', 'unknown'))}；"
+                f"阶段：{agent_state.get('phase', 'unknown')}；"
+                f"进度：{agent_state.get('progress', 0)}%\n"
+            )
     notify_msg = (
         f"(SYSTEM) Agent '{agent_name}' 执行完毕。\n"
         f"{notified_user_prompt}"
+        f"{lifecycle_line}"
         f"{context_line}"
         f"## 该 Agent 执行的任务原文\n\n"
         "```\n"
@@ -1288,11 +1302,11 @@ async def ai_node(state: MessagesState) -> dict:
             if (
                 chat_intent_choice != "无需回复"
                 and chat_intent_confidence is not None
-                and float(chat_intent_confidence) < 0.2
+                and float(chat_intent_confidence) < CHAT_INTENT_CONFIDENCE_THRESHOLD
             ):
                 print(
                     "[jev_judge] Response skipped: confidence "
-                    f'{float(chat_intent_confidence):.2f} of "{chat_intent_choice}" is below 0.40'
+                    f'{float(chat_intent_confidence):.2f} of "{chat_intent_choice}" is below {CHAT_INTENT_CONFIDENCE_THRESHOLD:.2f}'
                 )
                 return {"messages": []}
             chat_intent_reason = f'Jev 选择"{chat_intent_choice}"'

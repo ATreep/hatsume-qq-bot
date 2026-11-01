@@ -71,4 +71,4 @@ class ShellAgentLimitTests(unittest.IsolatedAsyncioTestCase):
 
     def test_description_explains_chat_cap_and_coding_exemption(self):
         self.assertIn("60 秒", self.shell.description)
-        self.assertIn("coding_agent 不受", self.shell.description)
+        self.assertIn("编码 Agent 不受", self.shell.description)

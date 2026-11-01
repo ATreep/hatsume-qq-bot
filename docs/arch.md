@@ -260,7 +260,7 @@ stateDiagram-v2
 - 合法 reply 目标与被 @ 的成员同时会成为本群 chat_peers 成员；`peer_session_id()` 定义在 `state.py`，`hooks/message_trigger.py` 与 `graph/nodes.py` 共用同一实现，`graph/` 不反向导入 `hooks/`。
 - 普通对话启动时捕获显式 Bot 与目标群号，后续 LangGraph 回调通过 `send_group_msg` 定向发送，不依赖 NoneBot matcher 的 `current_bot/current_event` 临时上下文。
 - 发送失败最多尝试五次，每次间隔三秒。
-- `send_text` 的 `text` 为空字符串或 `null` 时进入静默模式：不发送文字、回复或表情，仅写入 `memories`；该模式不要求发送通道已就绪，但仍计入本轮最多两次 `send_text` 调用。
+- `send_text` 的 `text` 为空字符串或 `null` 时进入静默模式：不发送文字、回复或表情；如果提供了 `memories` 才写入记忆。省略或传空 `memories` 不会阻止静默调用；该模式不要求发送通道已就绪，但仍计入本轮最多两次 `send_text` 调用。
 - ai_node 每次调用 chat_agent 都注入运行数据 faces/ 中可用的情绪名和 `send_text` 的 `hatsumeface` 参数说明，不再使用随机或冷却 gate；参数必须逐字使用 faces 文件名前缀中的原始情绪文字，模型传入合法情绪时选择同前缀图片并单独发送。
 
 ~~~mermaid
@@ -620,6 +620,8 @@ utils/md_to_image.py 在文本超过 500 字或包含富 Markdown 时：
 - 先调用 lite 模型进行 Markdown 排版美化；模型按内容逻辑调整 Markdown 标记、空白和结构并尽量保留原文含义，模型输出直接用于渲染，调用失败时才回退到原文。
 - 使用 Python Markdown、Pymdown 扩展和代码高亮生成 HTML。
 - 支持表格、任务列表、KaTeX 公式和明暗主题，并使用低干扰的猫娘风格配色。
+- 识别 `mermaid` 代码围栏，使用本地固定版本的 Mermaid 浏览器包在同一个无头 Chromium 页面内渲染 SVG；支持 Mermaid 包提供的全部图表语法，不依赖 CDN 或运行时 Node CLI。
+- Mermaid 使用与 Markdown 相同的樱花明暗配色；单个图表解析失败、资源缺失或脚本异常时保留该图表源码作为代码块，不影响其他 Markdown 内容。
 - 使用 nonebot-plugin-htmlrender 截图。
 - 把原文 URL 作为额外文本段保留，使图片中的链接仍可点击。
 - 渲染失败时回退为纯文本。
@@ -722,7 +724,7 @@ graph/tools.py、graph/agents.py、graph/nodes.py 与 handlers/dialogue.py 之�
 | hatsume/plugins/hatsume-plugin/hooks/message_trigger.py | 用户消息匹配选择、Hook 事件正文组装与直接注入。 |
 | `hatsume/plugins/hatsume-plugin/utils/__init__.py` | QQ 昵称查询、时间、头像 URL、统一消息 JSON、forward JSON 和带五分钟缓存的成员模糊搜索。 |
 | hatsume/plugins/hatsume-plugin/qq_emoji.py | 共享 QQ 表情 ID 映射，并把 OneBot face 段转为文本。 |
-| hatsume/plugins/hatsume-plugin/utils/md_to_image.py | Markdown、代码、公式和表格到 HTML 与图片的转换，包含猫娘风格主题、链接提取和纯文本回退。 |
+| hatsume/plugins/hatsume-plugin/utils/md_to_image.py | Markdown、代码、公式、表格和 Mermaid 图表到 HTML 与图片的转换，包含猫娘风格主题、链接提取和纯文本回退。 |
 | hatsume/plugins/hatsume-plugin/utils/security.py | 无框架依赖的敏感凭证正则识别与脱敏。 |
 
 ### 8.3 隔离模块与公共模块
@@ -799,7 +801,7 @@ graph/tools.py、graph/agents.py、graph/nodes.py 与 handlers/dialogue.py 之�
 | tests/test_hook_store.py | Hook SQLite schema、群隔离 CRUD、输入边界、同名拒绝、并发五个启用上限与运行状态。 |
 | tests/test_hook_executor.py | 群路径、shebang/可执行校验、0/10 协议、验证模式、超时/输出清理、非重入与路由恢复。 |
 | tests/test_hook_message_trigger.py | 消息匹配 Hook schema/迁移/更新边界、触发人与正则选择、直接注入、失败记录与 heartbeat 作业隔离。 |
-| tests/test_md_to_image.py | Markdown 特征检测、链接保留、渲染与纯文本回退。 |
+| tests/test_md_to_image.py | Markdown/Mermaid 特征检测、围栏提取、主题 HTML、链接保留、渲染与纯文本回退。 |
 | tests/test_membersearch.py | 成员缓存、子串匹配、字符重叠排序、命令与工具结果。 |
 | tests/test_memory_db.py | 记忆 current group_id schema、activated-group 并发快照与失败回调重试、群内 LIKE/BM25/写入与生命周期。 |
 | tests/test_memory_utils.py | 每日过期清理及旧检索兼容测试。 |
