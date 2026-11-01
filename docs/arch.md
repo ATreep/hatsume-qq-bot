@@ -254,7 +254,7 @@ stateDiagram-v2
 
 - AI 文本经 mask_secret_keys() 脱敏。
 - 普通短文本直接发送；超过 LONG_MSG_THRESHOLD=500 或包含代码块、标题、公式、粗体等特征时由 md_to_image.py 渲染。
-- chat_agent 可在回复开头输出一个 `[reply: <message_id>]`。ai_node 只接受本次实际传入 Agent 的 HumanMessage 顶层 JSON 中存在的 ID；未知、格式错误、重复或非开头标记会被移除并降级为普通消息。
+- `send_text.reply_to_message_id` 只接受当前轮当前 HumanMessage 中、仍直接可见且未被上下文压缩的顶层人类消息 ID；辅助队列和已压缩历史消息不加入候选。若模型提交已压缩或不可见的 ID，工具返回错误给初芽而不发送，让其改用当前可见消息。成功发送的 AI 消息 ID 会写入工具结果并在当前可见上下文中成为可回复目标；上下文压缩后若该 AI 消息不再可见，同样会被拒绝。
 - 合法目标由发送层转换为首个 `MessageSegment.reply()`，并与文本、at 或渲染图片组成同一条 QQ 消息。若 OneBot 拒绝该引用，程序立即用相同正文重试一次普通发送，再进入原有重试策略。
 - AI 输出中的 `[CQ:at,qq=123456]` 占位符由发送层转换为 QQ at 消息段；图片化发送时先发送 at 段再发送图片，图片内显示为 @用户名。
 - 合法 reply 目标与被 @ 的成员同时会成为本群 chat_peers 成员；`peer_session_id()` 定义在 `state.py`，`hooks/message_trigger.py` 与 `graph/nodes.py` 共用同一实现，`graph/` 不反向导入 `hooks/`。
@@ -617,7 +617,7 @@ sequenceDiagram
 
 utils/md_to_image.py 在文本超过 500 字或包含富 Markdown 时：
 
-- 先调用 lite 模型进行 Markdown 排版美化；模型按内容逻辑调整 Markdown 标记、空白和结构并尽量保留原文含义，系统会比较渲染后的文字与链接内容，任何内容变化都会丢弃美化结果并使用原文。
+- 先调用 lite 模型进行 Markdown 排版美化；模型按内容逻辑调整 Markdown 标记、空白和结构并尽量保留原文含义，模型输出直接用于渲染，调用失败时才回退到原文。
 - 使用 Python Markdown、Pymdown 扩展和代码高亮生成 HTML。
 - 支持表格、任务列表、KaTeX 公式和明暗主题，并使用低干扰的猫娘风格配色。
 - 使用 nonebot-plugin-htmlrender 截图。

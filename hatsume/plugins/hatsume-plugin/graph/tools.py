@@ -774,6 +774,10 @@ async def send_text(
     调用时必须传入非空的 memories 列表，至少包含一条记忆；为空时工具会返回错误且不会发送消息。
     CQ at 标记必须包含在 text 中，且每个标记只能指定一个 QQ 用户；不能 @ 全体成员。
     特殊控制标记请使用对应参数，不能写入 text。
+    `reply_to_message_id` 只能填写当前模型可见且未被压缩的当前 HumanMessage 顶层消息 ID，
+    或仍在当前可见上下文中的初芽已发送消息 ID；历史辅助记录、已压缩消息和未知 ID 会返回错误，
+    不会静默改成普通发送。成功发送后返回结果会带有内部 `replyable_message_id` 标记，后续轮次可用
+    该 ID 回复初芽自己刚发送的消息。
     hatsumeface 必须严格填写系统提示中列出的原始情绪文字（对应 faces 图片文件名中第一个下划线前的文字），
     必须逐字匹配；禁止使用英文名称、翻译、别名、同义词或自行改写。例如可选情绪是“开心”时只能传“开心”，
     不能传“happy”。不发送表情时传 null。
@@ -800,7 +804,14 @@ async def send_text(
         isinstance(reply_to_message_id, bool)
         or reply_to_message_id not in runtime.replyable_message_ids
     ):
-        reply_to_message_id = None
+        print(
+            "⚠️ [send_text] rejected reply target not visible in current context: "
+            f"message_id={reply_to_message_id}"
+        )
+        return (
+            "文字发送失败：reply_to_message_id 不在当前未压缩的模型可见消息集合中，"
+            "请不要回复该历史消息；如需回复，请选择当前上下文中可见消息的 message_id。"
+        )
 
     runtime.send_text_count += 1
     message_text = mask_secret_keys(message_text)
@@ -853,6 +864,16 @@ async def send_text(
     if send_result is False:
         return "文字发送失败：消息未能发送。"
 
+    sent_message_id = (
+        int(send_result)
+        if isinstance(send_result, int) and not isinstance(send_result, bool)
+        else None
+    )
+    if sent_message_id is not None and sent_message_id > 0:
+        # A just-sent AI message can be the target of a later send_text call.
+        runtime.replyable_message_ids.add(sent_message_id)
+        print(f"💬 [send_text] sent AI message message_id={sent_message_id}")
+
     from ..config import BOT_QQ_ID
     from ..state import peer_session_id
     addressed_user_ids = [
@@ -898,7 +919,10 @@ async def send_text(
         except Exception as error:
             print(f"❌ send_text face failed: {error}")
 
-    return f"文字已成功发送给用户，{_message_id_suffix(send_result)}。"
+    suffix = _message_id_suffix(send_result)
+    if sent_message_id is not None and sent_message_id > 0:
+        suffix += f" [replyable_message_id:{sent_message_id}]"
+    return f"文字已成功发送给用户，{suffix}。"
 
 
 @tool

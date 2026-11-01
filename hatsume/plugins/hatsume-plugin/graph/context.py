@@ -106,9 +106,16 @@ class ToolOutputMiddleware(AgentMiddleware):
 class AgentSummarizationMiddleware(SummarizationMiddleware):
     """Keep history intact if summary generation fails instead of saving an error."""
 
-    def __init__(self, *args: Any, preserve_system_human: bool = False, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        *args: Any,
+        preserve_system_human: bool = False,
+        on_visible_messages: Any = None,
+        **kwargs: Any,
+    ) -> None:
         super().__init__(*args, **kwargs)
         self.preserve_system_human = preserve_system_human
+        self.on_visible_messages = on_visible_messages
 
     def _summary_input(self, messages: list[Any]) -> str:
         return self.summary_prompt.format(messages=self._trim_messages_for_summary(messages))
@@ -176,6 +183,8 @@ class AgentSummarizationMiddleware(SummarizationMiddleware):
         self._ensure_message_ids(messages)
         total_tokens = self.token_counter(messages)
         if not self._should_summarize(messages, total_tokens):
+            if self.on_visible_messages is not None:
+                self.on_visible_messages(messages)
             return None
 
         cutoff_index = self._determine_cutoff_index(messages)
@@ -189,10 +198,13 @@ class AgentSummarizationMiddleware(SummarizationMiddleware):
             return None
 
         summary = self._create_summary(messages_to_summarize)
+        compacted_messages = self._compact_messages(messages, summary, cutoff_index)
+        if self.on_visible_messages is not None:
+            self.on_visible_messages(compacted_messages)
         return {
             "messages": [
                 RemoveMessage(id=REMOVE_ALL_MESSAGES),
-                *self._compact_messages(messages, summary, cutoff_index),
+                *compacted_messages,
             ]
         }
 
@@ -202,6 +214,8 @@ class AgentSummarizationMiddleware(SummarizationMiddleware):
         self._ensure_message_ids(messages)
         total_tokens = self.token_counter(messages)
         if not self._should_summarize(messages, total_tokens):
+            if self.on_visible_messages is not None:
+                self.on_visible_messages(messages)
             return None
 
         cutoff_index = self._determine_cutoff_index(messages)
@@ -215,10 +229,13 @@ class AgentSummarizationMiddleware(SummarizationMiddleware):
             return None
 
         summary = await self._acreate_summary(messages_to_summarize)
+        compacted_messages = self._compact_messages(messages, summary, cutoff_index)
+        if self.on_visible_messages is not None:
+            self.on_visible_messages(compacted_messages)
         return {
             "messages": [
                 RemoveMessage(id=REMOVE_ALL_MESSAGES),
-                *self._compact_messages(messages, summary, cutoff_index),
+                *compacted_messages,
             ]
         }
 
@@ -227,6 +244,7 @@ def build_context_middleware(
     model: Any,
     *,
     preserve_system_human: bool = False,
+    on_visible_messages: Any = None,
 ) -> list[AgentMiddleware]:
     """Use absolute budgets because custom/failover models may lack profiles."""
     return [
@@ -238,5 +256,6 @@ def build_context_middleware(
             trim_tokens_to_summarize=CONTEXT_SUMMARY_INPUT_TOKENS,
             summary_prompt=SUMMARY_PROMPT,
             preserve_system_human=preserve_system_human,
+            on_visible_messages=on_visible_messages,
         ),
     ]

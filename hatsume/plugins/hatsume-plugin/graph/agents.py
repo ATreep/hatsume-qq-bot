@@ -652,7 +652,7 @@ async def _run_web_researcher(task: str, user_id: int) -> str:
     )
     response = await researcher.with_retry(stop_after_attempt=3).ainvoke(
         {"messages": [HumanMessage(task)]},
-        {"recursion_limit": 30},
+        {"recursion_limit": 300},
     )
     for message in reversed(response.get("messages", [])):
         if isinstance(message, AIMessage) and not message.tool_calls:
@@ -729,7 +729,7 @@ async def _run_coding_agent(task: str, user_id: int) -> str:
                 streamed_messages = list(input_messages)
                 async for event in coding_agent.astream(
                     {"messages": input_messages},
-                    {"recursion_limit": 400},
+                    {"recursion_limit": 500},
                     stream_mode="updates",
                 ):
                     # Each event is {node_name: {state_update}}

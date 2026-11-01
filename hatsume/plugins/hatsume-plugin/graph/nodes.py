@@ -21,7 +21,7 @@ from typing import Any
 
 import nonebot_plugin_localstore as store
 from langchain.agents import create_agent
-from langchain.messages import HumanMessage, SystemMessage
+from langchain.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.messages import RemoveMessage
 from langgraph.graph import MessagesState
 from pydantic import BaseModel
@@ -84,6 +84,7 @@ ADMIN_MODE_KEYWORD = "BYPASS"
 CHAT_DETECTION_BYPASS_KEYWORD = "初芽"
 
 CHAT_INTENT_MAX_ATTEMPTS = 3
+REPLYABLE_TOOL_MESSAGE_ID_PATTERN = re.compile(r"\[replyable_message_id:\s*(\d+)\]")
 
 
 class ChatIntentJudgeResult(BaseModel):
@@ -534,7 +535,47 @@ def _build_systemone_body(
     state: Any,
     questions: Mapping[str, Any],
 ) -> dict[str, Any]:
-    return {"model": model_name, "state": state, "questions": dict(questions)}
+    normalized_state, images = _normalize_systemone_state(state)
+    body: dict[str, Any] = {
+        "model": model_name,
+        "state": normalized_state,
+        "questions": dict(questions),
+    }
+    if images:
+        body["images"] = images
+    return body
+
+
+def _normalize_systemone_state(state: Any) -> tuple[Any, list[str]]:
+    """Move OpenAI image parts out of state into System One's image inputs.
+
+    System One rejects ``image_url`` blocks nested in arbitrary JSON state. Its
+    image-capable models instead accept ordered base64/data URLs in the
+    top-level ``images`` array and expose them to the model as ``Image N``.
+    """
+    images: list[str] = []
+
+    def walk(value: Any) -> Any:
+        if isinstance(value, Mapping):
+            if value.get("type") in {"image_url", "img_url"}:
+                image_value = value.get("image_url", value.get("img_url"))
+                if isinstance(image_value, Mapping):
+                    image_value = image_value.get("url")
+                if isinstance(image_value, str) and image_value:
+                    images.append(image_value)
+                    return f"Image {len(images)}"
+                return "[image]"
+            return {key: walk(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [walk(item) for item in value]
+        if isinstance(value, tuple):
+            return [walk(item) for item in value]
+        return value
+
+    normalized = walk(state)
+    if images:
+        print(f"[systemone] moved {len(images)} image asset(s) to top-level inputs")
+    return normalized, images
 
 
 async def _post_systemone(
@@ -597,39 +638,51 @@ def _iter_replyable_top_level_messages(
 ) -> Iterator[tuple[int, int | None]]:
     """Yield ``(message_id, sender_qq_id)`` for each replyable top-level JSON.
 
-    Only ``HumanMessage`` content is inspected, and only text parts whose
-    complete text parses as one normalized JSON object. Nested objects such as
-    ``reply_to`` and forward children are never recursed into, so a user cannot
-    smuggle a foreign ID through embedded JSON.
+    HumanMessage content is parsed only when a complete text part is one
+    normalized top-level JSON object. AI-authored IDs are accepted only from
+    explicit platform metadata or the send_text ToolMessage marker. Nested
+    objects such as ``reply_to`` and forward children are never recursed into.
     """
     for message in messages:
-        if getattr(message, "type", None) != "human":
-            continue
+        if getattr(message, "type", None) == "human":
+            content = getattr(message, "content", "")
+            text_parts: list[str] = []
+            if isinstance(content, str):
+                text_parts.append(content)
+            elif isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict) and part.get("type") == "text":
+                        text_parts.append(str(part.get("text", "")))
+                    elif isinstance(part, str):
+                        text_parts.append(part)
 
-        content = getattr(message, "content", "")
-        text_parts: list[str] = []
-        if isinstance(content, str):
-            text_parts.append(content)
-        elif isinstance(content, list):
-            for part in content:
-                if isinstance(part, dict) and part.get("type") == "text":
-                    text_parts.append(str(part.get("text", "")))
-                elif isinstance(part, str):
-                    text_parts.append(part)
+            for text in text_parts:
+                try:
+                    normalized = json.loads(text)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                if not isinstance(normalized, dict):
+                    continue
+                if normalized.get("type") not in {"message", "forward"}:
+                    continue
+                message_id = normalized.get("message_id")
+                if not isinstance(message_id, int) or isinstance(message_id, bool):
+                    continue
+                yield message_id, _normalized_message_sender_id(normalized)
 
-        for text in text_parts:
-            try:
-                normalized = json.loads(text)
-            except (json.JSONDecodeError, TypeError):
-                continue
-            if not isinstance(normalized, dict):
-                continue
-            if normalized.get("type") not in {"message", "forward"}:
-                continue
-            message_id = normalized.get("message_id")
-            if not isinstance(message_id, int) or isinstance(message_id, bool):
-                continue
-            yield message_id, _normalized_message_sender_id(normalized)
+        # send_text returns this marker after a successful bot send.  It is
+        # the platform ID of an AI-authored message and remains available to
+        # later turns until context compaction removes the ToolMessage.
+        if getattr(message, "type", None) == "tool":
+            for match in REPLYABLE_TOOL_MESSAGE_ID_PATTERN.finditer(
+                str(getattr(message, "content", ""))
+            ):
+                yield int(match.group(1)), BOT_QQ_ID
+
+        if isinstance(message, AIMessage):
+            raw_id = message.additional_kwargs.get("platform_message_id")
+            if isinstance(raw_id, int) and not isinstance(raw_id, bool) and raw_id > 0:
+                yield raw_id, BOT_QQ_ID
 
 
 def _extract_replyable_message_ids(messages: list[Any]) -> set[int]:
@@ -651,6 +704,28 @@ def _extract_replyable_senders(messages: list[Any]) -> dict[int, int]:
         if sender_id is not None:
             senders.setdefault(message_id, sender_id)
     return senders
+
+
+def _refresh_replyable_messages(
+    messages: list[Any],
+    *,
+    current_human_ids: set[int] | None = None,
+) -> None:
+    """Refresh reply candidates from the exact context visible to the model."""
+    runtime = _runtime()
+    pairs = list(_iter_replyable_top_level_messages(messages))
+    if current_human_ids is not None:
+        pairs = [
+            (message_id, sender_id)
+            for message_id, sender_id in pairs
+            if sender_id == BOT_QQ_ID or message_id in current_human_ids
+        ]
+    runtime.replyable_message_ids = {message_id for message_id, _sender in pairs}
+    runtime.replyable_senders = {
+        message_id: sender_id
+        for message_id, sender_id in pairs
+        if sender_id is not None and sender_id != BOT_QQ_ID
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1183,25 +1258,19 @@ async def ai_node(state: MessagesState) -> dict:
                 {
                     "chat_intent": {
                         "type": "choice",
-                        "instructions": {
-                            "question": "当前消息最符合哪一种回复意图？",
-                            "focus": "判断 `current_message`，并参考 `recent_messages` 理解上下文。",
-                        },
+                        "instructions": "当前消息最符合哪一种回复意图？判断 `current_message`，并参考 `recent_messages` 理解上下文。",
                         "criteria": CHAT_INTENT_URGENCY_TYPES,
                     },
                     "chat_end": {
                         "type": "choice",
-                        "instructions": {
-                            "question": "用户是否想结束与初芽的当前对话？",
-                            "focus": "判断 `current_message` 是否表示想要结束当前聊天或在转向其他的话题。",
-                        },
+                        "instructions": "用户是否想结束与初芽的当前对话？判断 `current_message` 是否表示想要结束当前聊天或在转向其他的话题。",
                         "criteria": {
                             "结束": "用户透露出想结束当前话题；或用户开始讨论另一个话题， 且不再关注当前话题。",
                             "继续": "用户仍在提问、补充信息、回应初芽，或明确希望继续互动。",
                         },
                     },
                 },
-                route="/decisions"
+                route="/systemone"
             )
             chat_end_answer = _jev_answer(jev_response, "chat_end") or {}
             chat_end_choice = str(chat_end_answer.get("choice", "继续"))
@@ -1219,7 +1288,7 @@ async def ai_node(state: MessagesState) -> dict:
             if (
                 chat_intent_choice != "无需回复"
                 and chat_intent_confidence is not None
-                and float(chat_intent_confidence) < 0.4
+                and float(chat_intent_confidence) < 0.2
             ):
                 print(
                     "[jev_judge] Response skipped: confidence "
@@ -1342,7 +1411,6 @@ async def ai_node(state: MessagesState) -> dict:
     sys_prompt += f"\n\n# 当前日期与时间\n{get_date()}"
 
     llm_error_type: str | None = None  # Track specific error type for user-facing messages
-    replyable_message_ids: set[int] = set()  # Init to satisfy static analysis; always set in try block
     agent_tool_messages: list[Any] = []
     try:
         mem_msg = (
@@ -1358,10 +1426,13 @@ async def ai_node(state: MessagesState) -> dict:
         agent_messages = conversation_history + mem_msg + [last_human_msg]
         if admin_mode_enabled:
             agent_messages = _without_image_url_parts(agent_messages)
-        replyable_message_ids = _extract_replyable_message_ids(agent_messages)
-        runtime.replyable_senders = _extract_replyable_senders(agent_messages)
-        runtime.replyable_message_ids = set(replyable_message_ids)
-
+        # The context middleware refreshes this set again after any compaction.
+        # Do not retain IDs that disappear from the model-visible context.
+        current_human_ids = _extract_replyable_message_ids([state["messages"][-1]])
+        _refresh_replyable_messages(
+            agent_messages,
+            current_human_ids=current_human_ids,
+        )
         print("Start chat_agent invocation.")
 
         t_invocation_start = time.monotonic()
@@ -1370,7 +1441,13 @@ async def ai_node(state: MessagesState) -> dict:
         invocation_messages = agent_messages
         loop_middleware = ChatLoopDelegationMiddleware(len(agent_messages))
         send_text_first_middleware = SendTextFirstMiddleware()
-        context_middleware = build_context_middleware(model_chosen)
+        context_middleware = build_context_middleware(
+            model_chosen,
+            on_visible_messages=lambda visible: _refresh_replyable_messages(
+                visible,
+                current_human_ids=current_human_ids,
+            ),
+        )
         active_mcp_tools: list[Any] = []
         for attempt in range(2):
             t_pass_start = time.monotonic()

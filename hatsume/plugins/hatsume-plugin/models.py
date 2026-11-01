@@ -96,7 +96,7 @@ def _systemone_transport(settings: dict[str, Any]) -> ChatOpenAI:
 
 
 def get_typesafe_model() -> BaseChatModel:
-    """Build the transport for the separate System One /decisions API."""
+    """Build the transport for the separate System One /systemone API."""
     return _systemone_transport(get_model_config_store().resolve("systemone"))
 
 

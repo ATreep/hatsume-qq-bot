@@ -48,3 +48,5 @@ python3 -m unittest discover -s tests -p test_agent_context.py
 python3 -m unittest discover -s tests -p test_web_researcher.py
 python3 -m unittest discover -s tests -p test_shell_agent_limits.py
 ```
+
+初芽的 `send_text.reply_to_message_id` 候选在每次模型可见上下文刷新时重建：只保留当前轮当前 HumanMessage 的顶层消息，以及仍可见的初芽发送结果。辅助聊天记录、被压缩掉的历史消息和不再存在于当前上下文的 AI 消息不会进入集合；提交这些 ID 时工具返回错误而不是静默降级。成功发送的 AI 消息会在工具结果中带有内部 `replyable_message_id` 标记，供后续可见轮次继续回复。

@@ -76,6 +76,7 @@ roles:
 
 - `timeout` 是单个条目整次调用的上限，包含 SDK 自身的重试；同时作为 SDK 单次 HTTP 请求的超时，同步调用也受其限制。未设置时只依赖 SDK 默认超时，可能长时间等待后才切换。
 - 适用范围：聊天角色（含 `create_agent` 工具调用和同步 `invoke`）、`systemone`、`embedding`、`image_sensenova`、`tts`。单条目角色仍直接返回原 SDK 客户端，行为不变。
+- `systemone` 的请求状态必须是纯文本/JSON：当前消息和最近消息中的 OpenAI `image_url`/`img_url` 内容段会在发送前替换为 `Image N` 占位符，并按出现顺序移动到请求顶层的 `images` 数组（使用原始 data URL）。这样可避免 System One 将多模态内容误判为非法状态；图片模型会按 `Image 1`、`Image 2` 的顺序读取这些图片。
 - 工具调用时，每个条目使用自己 SDK 的工具格式；中途失败的对话历史会原样交给下一个条目。不同 API 之间切换时，供应商专有的推理内容等字段可能被下一个供应商忽略。
 - 调用方覆盖 `reasoning_effort` 时会应用到所有 OpenAI 条目；Google 备用条目保留自己的 thinking 设置（Google 主配置仍按原规则报错）。`thinking=False` 对所有条目生效。
 - 图片生成显式指定的模型 ID 只替换主条目的模型；备用条目使用各自配置的模型。图片条目未设置 `timeout` 时默认 300 秒。
