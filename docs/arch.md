@@ -606,7 +606,7 @@ sequenceDiagram
 
 - 输入图片使用 requests 同步下载，限制为 9 MiB 和 3600 万像素。
 - 普通消息、Bot 成功发送的图片与回复图片使用 Pillow 检测实际格式，并把显式 `group_id` 传到 infra.py 的查找、目录创建和本地 copy 边界；文件进入 `/tmp/hatsume-user-images/<group-id>`。路径由群号、QQ 消息 ID 与消息内图片序号确定，避免共享容器内跨群碰撞。
-- 当前普通消息图片使用同一份已校验字节同时生成沙盒 Markdown 路径和 `image_url` data URI，因此模型可以直接理解图片，也可以通过 `view_image(file://...)` 读取沙盒文件。回复图片优先复用沙盒中的确定性路径，缺失时从 OneBot 临时 URL 恢复；合并转发图片保持临时 URL 且不附加顶层多模态块。
+- 当前普通消息图片使用同一份已校验字节同时生成沙盒 Markdown 路径和 `image_url` data URI。初芽优先直接理解当前多模态图片，不无条件重复调用 `view_image`；只有图片未作为多模态内容提供、需要读取历史沙盒图片，或需要专用视觉模型进行 OCR、坐标识别或详细分析时，才使用 `view_image(file://...)`。回复图片优先复用沙盒中的确定性路径，缺失时从 OneBot 临时 URL 恢复；合并转发图片保持临时 URL 且不附加顶层多模态块。
 - search_image 使用固定的 Pexels Search API，通过 PIXELS_API_KEY 鉴权；网络请求在线程中执行，最多返回十条带来源信息的候选结果，再由聊天 Agent 复用 send_image 发送。
 - view_image 接受可选 `prompt`，空字符串或纯空白时使用预置图片描述提示词，否则使用自定义提示词。查询截图控件坐标时 chat_agent 应指定目标、原图像素坐标系、中心点和边界框输出格式。HTTP/HTTPS 图片 URL 直接交给轻量模型；沙盒 file:// 绝对路径通过 infra.py 的统一读取边界传入当前 runtime 的显式群号，在当前容器读取 base64 后由 Pillow 校验实际图片格式并生成 data URI。该流程不依赖 `file` 命令或文件扩展名。
 - generate_image 使用 SenseNova 图像接口；有参考图时复用同一个按群读取和字节校验边界，再以 data URI 交给图像接口。
