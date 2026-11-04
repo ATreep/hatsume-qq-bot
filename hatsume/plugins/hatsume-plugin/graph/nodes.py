@@ -41,6 +41,7 @@ from ..models import (
     get_lite_model,
     get_mini_model,
     get_systemone_chain,
+    get_view_image_model,
 )
 from ..model_factory import run_with_failover
 
@@ -515,6 +516,95 @@ def _messages_to_jev_state(messages: list[Any]) -> list[dict[str, Any]]:
         }.get(str(message_type), str(message_type))
         jev_messages.append({"role": role, "content": state_content})
     return jev_messages
+
+
+def _is_gif_image_url(url: str) -> bool:
+    """Return whether an image URL or data URI identifies a GIF image."""
+    normalized = url.strip().lower()
+    if normalized.startswith("data:image/gif"):
+        return True
+    return normalized.split("?", 1)[0].split("#", 1)[0].endswith(".gif")
+
+
+async def _describe_gif_for_intent(
+    image_url: str,
+    cache: dict[str, str],
+) -> str:
+    """Describe one GIF for the decision model that cannot consume GIFs."""
+    if image_url in cache:
+        return cache[image_url]
+    print(
+        "[jev_judge] GIF detected; converting it to text with the vision model "
+        f"(url_chars={len(image_url)})"
+    )
+    try:
+        response = await get_view_image_model().ainvoke([
+            HumanMessage(
+                content=[
+                    {
+                        "type": "text",
+                        "text": (
+                            "这是用户发送的 GIF 动图。请结合动图中的主要画面、动作、"
+                            "表情和可见文字，生成一段简洁、客观的中文描述，供另一个"
+                            "不支持 GIF 的对话意图模型判断是否需要回复。"
+                        ),
+                    },
+                    {"type": "image_url", "image_url": {"url": image_url}},
+                ]
+            )
+        ])
+        content = response.content
+        if isinstance(content, list):
+            description = "".join(
+                str(part.get("text", "")) if isinstance(part, Mapping) else str(part)
+                for part in content
+            ).strip()
+        else:
+            description = str(content).strip()
+    except Exception as exc:  # noqa: BLE001 - intent fallback must not leak GIF
+        print(f"[jev_judge] GIF description failed: {type(exc).__name__}: {exc}")
+        description = "GIF 图片（识图模型暂时无法生成描述）"
+    if not description:
+        description = "GIF 图片（识图模型未返回描述）"
+    cache[image_url] = description
+    print(f"[jev_judge] GIF description ready: chars={len(description)}")
+    return description
+
+
+async def _replace_gifs_for_intent(
+    value: Any,
+    cache: dict[str, str] | None = None,
+) -> Any:
+    """Replace GIF image parts with vision descriptions before intent judging."""
+    descriptions = cache if cache is not None else {}
+    if isinstance(value, Mapping):
+        if value.get("type") in {"image_url", "img_url"}:
+            image_value = value.get("image_url", value.get("img_url"))
+            if isinstance(image_value, Mapping):
+                image_value = image_value.get("url")
+            if isinstance(image_value, str) and _is_gif_image_url(image_value):
+                description = await _describe_gif_for_intent(image_value, descriptions)
+                return {
+                    "type": "text",
+                    "text": f"[GIF 图片识图描述] {description}",
+                }
+        return {
+            key: await _replace_gifs_for_intent(item, descriptions)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [await _replace_gifs_for_intent(item, descriptions) for item in value]
+    if isinstance(value, tuple):
+        return [await _replace_gifs_for_intent(item, descriptions) for item in value]
+    return value
+
+
+async def _prepare_jev_state_for_intent(state: dict[str, Any]) -> dict[str, Any]:
+    """Make decision state compatible with the System One image input limits."""
+    cache: dict[str, str] = {}
+    prepared = await _replace_gifs_for_intent(state, cache)
+    assert isinstance(prepared, dict)
+    return prepared
 
 
 def _jev_answer(response: Any, question_id: str) -> Mapping[str, Any] | None:
@@ -1250,6 +1340,7 @@ async def ai_node(state: MessagesState) -> dict:
                 ),
                 "recent_messages": _messages_to_jev_state(recent_messages),
             }
+            jev_state = await _prepare_jev_state_for_intent(jev_state)
             decision_image_count = sum(
                 1
                 for value in (jev_state["current_message"], *jev_state["recent_messages"])
