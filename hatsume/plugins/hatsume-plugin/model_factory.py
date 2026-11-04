@@ -275,7 +275,12 @@ class FailoverChatModel(BaseChatModel):
         call_kwargs = self._call_kwargs(stop, kwargs)
         message = _run_sync(
             [
-                (label, lambda model=model: model.invoke(messages, **call_kwargs))
+                (
+                    label,
+                    lambda model=model: asyncio.run(
+                        model.ainvoke(messages, **call_kwargs)
+                    ),
+                )
                 for model, label in zip(self.models, self.labels)
             ],
             "chat model",

@@ -8,12 +8,9 @@ import contextvars
 import hashlib
 import json
 import shlex
-import ssl
 import threading
 import traceback
 import uuid
-import urllib.request
-import urllib.error
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Callable, Literal, TypedDict
@@ -21,7 +18,7 @@ from urllib.parse import unquote, urlparse
 
 from google.genai import types
 
-import requests
+import httpx
 from langchain_core.tools import tool as _langchain_tool
 from nonebot.adapters.onebot.v11 import Message, MessageSegment
 from langchain_community.tools import DuckDuckGoSearchRun
@@ -480,7 +477,7 @@ def web_search(query: str) -> str:
     return _fallback_duckduckgo(query)
 
 
-def _fetch_pexels_search(
+async def _fetch_pexels_search(
     query: str,
     count: int,
     orientation: ImageOrientation | None,
@@ -491,16 +488,16 @@ def _fetch_pexels_search(
     params: dict[str, str | int] = {"query": query, "per_page": count, "page": 1}
     if orientation is not None:
         params["orientation"] = orientation
-    response = requests.get(
-        f"{base_url.rstrip('/')}/v1/search",
-        params=params,
-        headers={
-            "Accept": "application/json",
-            "Authorization": api_key,
-            "User-Agent": "Hatsume/1.0",
-        },
-        timeout=10,
-    )
+    async with httpx.AsyncClient(timeout=10) as client:
+        response = await client.get(
+            f"{base_url.rstrip('/')}/v1/search",
+            params=params,
+            headers={
+                "Accept": "application/json",
+                "Authorization": api_key,
+                "User-Agent": "Hatsume/1.0",
+            },
+        )
     response.raise_for_status()
     return response.json()
 
@@ -541,15 +538,14 @@ async def search_image(
 
     print(f"Search Pexels images: {normalized_query!r}")
     try:
-        payload = await asyncio.to_thread(
-            _fetch_pexels_search,
+        payload = await _fetch_pexels_search(
             normalized_query,
             count,
             orientation,
             api_key,
             base_url,
         )
-    except requests.exceptions.HTTPError as e:
+    except httpx.HTTPStatusError as e:
         status_code = e.response.status_code if e.response is not None else 0
         print(f"Pexels image search HTTP error: {status_code or 'unknown'}")
         if status_code in (401, 403):
@@ -559,19 +555,19 @@ async def search_image(
         if status_code:
             return f"图片搜索失败：Pexels API 返回 HTTP {status_code}。"
         return "图片搜索失败：Pexels API 返回了未知 HTTP 错误。"
-    except requests.exceptions.SSLError as e:
+    except httpx.ConnectError as e:
         print(f"Pexels image search SSL error: {e}")
         return "图片搜索失败：无法验证 Pexels API 的 SSL 证书。"
-    except requests.exceptions.Timeout as e:
+    except httpx.TimeoutException as e:
         print(f"Pexels image search timeout: {e}")
         return "图片搜索失败：连接 Pexels API 超时。"
-    except requests.exceptions.ConnectionError as e:
+    except httpx.NetworkError as e:
         print(f"Pexels image search network error: {e}")
         return "图片搜索失败：暂时无法连接 Pexels API。"
-    except requests.exceptions.InvalidJSONError as e:
+    except ValueError as e:
         print(f"Pexels image search response error: {e}")
         return "图片搜索失败：Pexels API 返回了无效数据。"
-    except requests.exceptions.RequestException as e:
+    except httpx.HTTPError as e:
         print(f"Pexels image search request error: {e}")
         return "图片搜索失败：Pexels API 请求异常。"
 
@@ -964,8 +960,7 @@ async def send_image(image_url: str) -> str:
     if urlparse(url).scheme in {"http", "https"}:
         try:
             await ensure_container_running(runtime.group_id)
-            downloaded_path = await asyncio.to_thread(
-                _download_http_media_to_tmp,
+            downloaded_path = await _download_http_media_to_tmp(
                 url,
                 f"hatsume-image-{runtime.group_id}",
             )
@@ -1057,8 +1052,7 @@ async def send_video(video_url: str) -> str:
     if urlparse(url).scheme in {"http", "https"}:
         try:
             await ensure_container_running(runtime.group_id)
-            downloaded_path = await asyncio.to_thread(
-                _download_http_media_to_tmp,
+            downloaded_path = await _download_http_media_to_tmp(
                 url,
                 f"hatsume-video-{runtime.group_id}",
             )
@@ -1119,26 +1113,27 @@ async def send_video(video_url: str) -> str:
     return f"视频已成功发送给用户，{_message_id_suffix(send_result)}。"
 
 
-def _download_http_media_to_tmp(media_url: str, prefix: str) -> Path:
-    """Download an HTTP media URL into /tmp, preserving its URL suffix."""
+async def _download_http_media_to_tmp(media_url: str, prefix: str) -> Path:
+    """Download an HTTP media URL into /tmp without blocking the event loop."""
     suffix = Path(unquote(urlparse(media_url).path)).suffix
     destination = Path(f"/tmp/{prefix}-{uuid.uuid4().hex}{suffix}")
     try:
-        with requests.get(media_url, stream=True, timeout=30) as response:
-            response.raise_for_status()
-            with destination.open("xb") as output:
-                for chunk in response.iter_content(chunk_size=64 * 1024):
-                    if chunk:
-                        output.write(chunk)
+        async with httpx.AsyncClient(timeout=30) as client:
+            async with client.stream("GET", media_url) as response:
+                response.raise_for_status()
+                with destination.open("xb") as output:
+                    async for chunk in response.aiter_bytes(chunk_size=64 * 1024):
+                        if chunk:
+                            await asyncio.to_thread(output.write, chunk)
     except Exception:
         destination.unlink(missing_ok=True)
         raise
     return destination
 
 
-def _download_voice_to_sandbox(voice_url: str, *, group_id: int) -> Path:
+async def _download_voice_to_sandbox(voice_url: str, *, group_id: int) -> Path:
     """Download audio into /tmp, preserving its URL suffix for format checks."""
-    return _download_http_media_to_tmp(voice_url, f"hatsume-voice-{group_id}")
+    return await _download_http_media_to_tmp(voice_url, f"hatsume-voice-{group_id}")
 
 
 @tool
@@ -1173,8 +1168,8 @@ async def send_voice(voice_url: str) -> str:
         runtime.send_voice_count += 1
         await ensure_container_running(runtime.group_id)
         if parsed.scheme in {"http", "https"}:
-            file_path = await asyncio.to_thread(
-                _download_voice_to_sandbox, url, group_id=runtime.group_id
+            file_path = await _download_voice_to_sandbox(
+                url, group_id=runtime.group_id
             )
         if not await asyncio.to_thread(file_path.is_file):
             return f"❌ 声音发送失败：沙盒文件不存在或不是普通文件（{file_path}）。"
@@ -1965,7 +1960,7 @@ async def skill_remove(name: str) -> str:
 
 
 @tool
-def skill_download(url: str) -> str:
+async def skill_download(url: str) -> str:
     """
     从给定的 raw URL 下载技能 markdown 文件并保存到技能目录。
 
@@ -1991,15 +1986,16 @@ def skill_download(url: str) -> str:
 
     # Download (use unverified SSL context for environments with missing root certs)
     try:
-        ssl_ctx = ssl.create_default_context()
-        ssl_ctx.check_hostname = False
-        ssl_ctx.verify_mode = ssl.CERT_NONE
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"})
-        with urllib.request.urlopen(req, timeout=10, context=ssl_ctx) as response:
-            content = response.read().decode("utf-8")
-    except urllib.error.URLError as e:
+        async with httpx.AsyncClient(timeout=10, verify=False) as client:
+            response = await client.get(
+                url,
+                headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"},
+            )
+            response.raise_for_status()
+            content = response.text
+    except httpx.HTTPError as e:
         print(f"❌ skill_download URL error: {e}")
-        return f"错误：无法访问 URL：{e.reason}"
+        return f"错误：无法访问 URL：{e}"
     except Exception as e:
         print(f"❌ skill_download download error: {e}")
         return f"错误：下载失败：{e}"

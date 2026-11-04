@@ -128,7 +128,15 @@ class AgentSummarizationMiddleware(SummarizationMiddleware):
         return text
 
     def _create_summary(self, messages_to_summarize: list[Any]) -> str:
-        return self._summary_text(self.model.invoke(self._summary_input(messages_to_summarize)))
+        """Run the async summarizer for legacy synchronous callers."""
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(self._acreate_summary(messages_to_summarize))
+        raise RuntimeError(
+            "Synchronous context summarization is unavailable inside an event loop; "
+            "use the async Agent path."
+        )
 
     async def _acreate_summary(self, messages_to_summarize: list[Any]) -> str:
         response = await self.model.ainvoke(self._summary_input(messages_to_summarize))

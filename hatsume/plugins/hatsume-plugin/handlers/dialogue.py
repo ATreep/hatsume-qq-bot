@@ -11,7 +11,7 @@ from io import BytesIO
 from typing import Any
 from urllib.parse import unquote, urlparse
 
-import requests
+import httpx
 from nonebot.adapters import Bot
 from nonebot.adapters.onebot.v11 import (
     GroupIncreaseNoticeEvent,
@@ -85,9 +85,10 @@ async def _store_user_image(
     *,
     group_id: int,
 ) -> tuple[str, bytes]:
-    response = requests.get(url, timeout=10)
-    response.raise_for_status()
-    image_bytes = response.content
+    async with httpx.AsyncClient(timeout=10) as client:
+        response = await client.get(url)
+        response.raise_for_status()
+        image_bytes = response.content
 
     return (
         await _store_image_bytes(

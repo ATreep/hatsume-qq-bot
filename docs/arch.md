@@ -594,7 +594,7 @@ sequenceDiagram
 - `ContainerRuntime` 按群保存启动锁、active、引用计数、前台进程、前台 owner task 和延迟逻辑停用任务。同群状态合并，不同群命令可并行；它不再代表独立 Docker 容器。
 - `run_cmd()` 与后台命令直接以 `/work/hatsume` 为 cwd 启动 Bash，通过每次调用自己的 stdin 传递脚本，不读写共享 `virtual/script.sh`；stdout/stderr 经独立管道或唯一临时日志返回。
 - 所有调用点在进入 infra.py 时传递经过校验的显式 `group_id`；task-local runtime 只保留为 API 边界的兼容解析方式，不用于跨层猜测目标进程所有权。
-- 基础设施前台默认超时为 300 秒；shell_executor 使用调用者显式 timeout，chat_agent 在工具边界限制为 1 至 60 秒，coding_agent 不设上限。
+- 基础设施前台默认超时为 300 秒；shell_executor 使用调用者显式 timeout，chat_agent 在工具边界限制为 1 至 60 秒，coding_agent 不设上限。主图和后台 Agent 的 LLM 请求统一走异步接口；图片下载、Pexels/DeepSeek/Skill 网络请求和 SenseNova/TTS 请求使用异步 HTTP/SDK，避免同步 I/O 阻塞事件循环。
 - 后台命令的进程、临时日志和 stdin 所有权包含群号；跨群进程 ID 不可读取或终止。
 - 每群独立引用计数。该群最后一个进程释放后等待五分钟再把逻辑 runtime 标记为 inactive；同群新任务只取消该群延迟任务。
 - 前台命令和本地文件复制被取消或超时时都会 kill 并 await 对应子进程后再解除跟踪；reset 先取消并等待目标群 owner task，再移除该群状态，不会留下失联子进程，也不会停止或删除 `hatsume-containerization`。

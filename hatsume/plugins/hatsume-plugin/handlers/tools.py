@@ -11,7 +11,7 @@ import tempfile
 from datetime import datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
-import requests
+import httpx
 from nonebot.adapters import Bot
 from nonebot.adapters.onebot.v11 import Message, MessageSegment, PokeNotifyEvent
 
@@ -688,19 +688,19 @@ async def handle_aps(matcher) -> None:
     await matcher.finish("\n".join(lines))
 
 
-def _fetch_deepseek_balance(api_key: str, base_url: str) -> dict:
+async def _fetch_deepseek_balance(api_key: str, base_url: str) -> dict:
     """Fetch one DeepSeek balance snapshot without blocking the async caller."""
-    response = requests.get(
-        f"{base_url.rstrip('/')}/user/balance",
-        headers={
-            "Accept": "application/json",
-            "Authorization": f"Bearer {api_key}",
-            "User-Agent": "Hatsume/1.0",
-        },
-        timeout=10,
-    )
-    response.raise_for_status()
-    return response.json()
+    async with httpx.AsyncClient(timeout=10) as client:
+        response = await client.get(
+            f"{base_url.rstrip('/')}/user/balance",
+            headers={
+                "Accept": "application/json",
+                "Authorization": f"Bearer {api_key}",
+                "User-Agent": "Hatsume/1.0",
+            },
+        )
+        response.raise_for_status()
+        return response.json()
 
 
 def _build_deepseek_balance_report(payload: object) -> str | None:
@@ -757,10 +757,8 @@ async def handle_dsbalance(event, matcher, args: Message) -> None:
 
     print("Querying DeepSeek balance.")
     try:
-        payload = await asyncio.to_thread(
-            _fetch_deepseek_balance, api_key, base_url
-        )
-    except requests.exceptions.HTTPError as e:
+        payload = await _fetch_deepseek_balance(api_key, base_url)
+    except httpx.HTTPStatusError as e:
         status_code = e.response.status_code if e.response is not None else 0
         print(f"DeepSeek balance HTTP error: {status_code or 'unknown'}")
         if status_code in (401, 403):
@@ -774,23 +772,23 @@ async def handle_dsbalance(event, matcher, args: Message) -> None:
         else:
             await matcher.finish("❌ 错误：DeepSeek 余额接口返回了未知 HTTP 错误。")
         return
-    except requests.exceptions.SSLError:
+    except httpx.ConnectError:
         print("DeepSeek balance SSL error.")
         await matcher.finish("❌ 错误：无法验证 DeepSeek API 的 SSL 证书。")
         return
-    except requests.exceptions.Timeout:
+    except httpx.TimeoutException:
         print("DeepSeek balance timeout.")
         await matcher.finish("❌ 错误：连接 DeepSeek API 超时，请稍后重试。")
         return
-    except requests.exceptions.ConnectionError:
+    except httpx.NetworkError:
         print("DeepSeek balance connection error.")
         await matcher.finish("❌ 错误：暂时无法连接 DeepSeek API。")
         return
-    except requests.exceptions.InvalidJSONError:
+    except ValueError:
         print("DeepSeek balance invalid JSON response.")
         await matcher.finish("❌ 错误：DeepSeek API 返回了无效数据。")
         return
-    except requests.exceptions.RequestException:
+    except httpx.HTTPError:
         print("DeepSeek balance request error.")
         await matcher.finish("❌ 错误：查询 DeepSeek 余额失败，请稍后重试。")
         return

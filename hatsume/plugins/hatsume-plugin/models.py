@@ -9,7 +9,7 @@ import subprocess
 import uuid
 from typing import Any, Literal
 
-import requests
+import httpx
 
 # Preserve provider-specific response fields across LangChain message
 # conversions. Both DeepSeek-compatible reasoning and Gemini-compatible tool
@@ -178,22 +178,22 @@ async def generate_image_for_sensenova(
         }
         if image_sources:
             payload["images"] = [{"image_url": src} for src in image_sources]
-        response = await asyncio.to_thread(
-            requests.post,
-            f"{settings['base_url'].rstrip('/')}/images/{endpoint}",
-            headers={"Authorization": f"Bearer {settings['api_key']}"},
-            json=payload,
-            timeout=settings.get("timeout", 300),
-        )
-        response.raise_for_status()
+        timeout = settings.get("timeout", 300)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(
+                f"{settings['base_url'].rstrip('/')}/images/{endpoint}",
+                headers={"Authorization": f"Bearer {settings['api_key']}"},
+                json=payload,
+            )
+            response.raise_for_status()
+            response_data = response.json()
 
-        image_url = response.json()["data"][0]["url"]
+        image_url = response_data["data"][0]["url"]
         if not isinstance(image_url, str) or not image_url.startswith(("http://", "https://")):
             raise ValueError("SenseNova image response missing URL")
         return image_url
 
-    # requests honours the per-entry timeout itself; a worker thread cannot be
-    # interrupted by asyncio.wait_for, so no outer timeout is applied here.
+    # The async HTTP client enforces each configured entry timeout directly.
     return await run_with_failover(
         [
             (entry_label(settings), None, lambda settings=settings: request(settings))
@@ -205,7 +205,7 @@ async def generate_image_for_sensenova(
 
 async def generate_tts_audio(text: str) -> str:
     """Synthesize Hatsume voice and return an MP3 sandbox path."""
-    from openai import OpenAI
+    from openai import AsyncOpenAI
 
     from .prompts import TTS_VOICE_PROMPT
 
@@ -214,13 +214,13 @@ async def generate_tts_audio(text: str) -> str:
     wav_path = output_dir / f"hatsume-tts-{uuid.uuid4().hex}.wav"
     mp3_path = output_dir / f"hatsume-tts-{uuid.uuid4().hex}.mp3"
 
-    def request() -> bytes:
-        client = OpenAI(
-            api_key=settings["api_key"],
-            base_url=settings["base_url"],
-            timeout=settings.get("timeout"),
-        )
-        completion = client.chat.completions.create(
+    client = AsyncOpenAI(
+        api_key=settings["api_key"],
+        base_url=settings["base_url"],
+        timeout=settings.get("timeout"),
+    )
+    try:
+        completion = await client.chat.completions.create(
             model=settings["model"],
             messages=[
                 {"role": "user", "content": TTS_VOICE_PROMPT},
@@ -232,10 +232,11 @@ async def generate_tts_audio(text: str) -> str:
         data = getattr(audio, "data", None)
         if not isinstance(data, str) or not data:
             raise ValueError("TTS response did not contain audio data")
-        return base64.b64decode(data)
+        audio_bytes = base64.b64decode(data)
+    finally:
+        await client.close()
 
     print(f"🔊 [tts] synthesizing {len(text)} characters with {settings['model']}")
-    audio_bytes = await asyncio.to_thread(request)
     wav_path.write_bytes(audio_bytes)
     try:
         await asyncio.to_thread(

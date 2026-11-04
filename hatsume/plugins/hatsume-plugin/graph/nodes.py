@@ -1102,16 +1102,6 @@ def _without_auxiliary_image_payloads(messages: list[dict]) -> list[dict]:
     return cleaned
 
 
-def _summarize_auxiliary_messages(model: Any, queue: list[dict]) -> str:
-    result = model.invoke(
-        [
-            SystemMessage(AUXILIARY_COMPACTION_PROMPT),
-            HumanMessage(_without_auxiliary_image_payloads(queue)),  # type: ignore
-        ]
-    )
-    return result.content.__str__()
-
-
 async def _summarize_auxiliary_messages_async(
     model: Any, queue: list[dict]
 ) -> str:
@@ -1133,23 +1123,36 @@ def _trim_auxiliary_queue(runtime: Any) -> None:
     runtime.auxiliary_source_queue.clear()
 
 
-def _compact_auxiliary_messages_sync(runtime: Any) -> None:
+async def _compact_auxiliary_messages_async(runtime: Any) -> None:
     if len(runtime.auxiliary_messages_queue) <= CONTEXT_QUEUE_LEN:
         return
+    async with runtime.auxiliary_compaction_lock:
+        if len(runtime.auxiliary_messages_queue) <= CONTEXT_QUEUE_LEN:
+            return
+        queue_snapshot = list(runtime.auxiliary_messages_queue)
+        source_count = len(runtime.auxiliary_source_queue)
+        try:
+            summary = await _summarize_auxiliary_messages_async(
+                _select_compaction_model(),
+                queue_snapshot,
+            )
+            runtime.auxiliary_messages_queue[:len(queue_snapshot)] = [
+                {"type": "text", "text": "### 历史聊天记录总结：" + summary}
+            ]
+            del runtime.auxiliary_source_queue[:source_count]
+        except Exception:
+            print("❌ Failed to summarize auxiliary messages")
+            traceback.print_exc()
+            _trim_auxiliary_queue(runtime)
+
+
+def _compact_auxiliary_messages_sync(runtime: Any) -> None:
+    """Schedule compaction for legacy synchronous callers without blocking."""
     try:
-        summary = _summarize_auxiliary_messages(
-            _select_compaction_model(),
-            list(runtime.auxiliary_messages_queue),
-        )
-        runtime.auxiliary_messages_queue.clear()
-        runtime.auxiliary_messages_queue.append(
-            {"type": "text", "text": "### 历史聊天记录总结：" + summary}
-        )
-        runtime.auxiliary_source_queue.clear()
-    except Exception:
-        print("❌ Failed to summarize auxiliary messages")
-        traceback.print_exc()
-        _trim_auxiliary_queue(runtime)
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    loop.create_task(_compact_auxiliary_messages_async(runtime))
 
 
 def append_auxiliary_message(
@@ -1189,24 +1192,7 @@ async def append_auxiliary_message_async(
     if len(runtime.auxiliary_messages_queue) <= CONTEXT_QUEUE_LEN:
         return
 
-    async with runtime.auxiliary_compaction_lock:
-        if len(runtime.auxiliary_messages_queue) <= CONTEXT_QUEUE_LEN:
-            return
-        queue_snapshot = list(runtime.auxiliary_messages_queue)
-        source_count = len(runtime.auxiliary_source_queue)
-        try:
-            summary = await _summarize_auxiliary_messages_async(
-                _select_compaction_model(),
-                queue_snapshot,
-            )
-            runtime.auxiliary_messages_queue[:len(queue_snapshot)] = [
-                {"type": "text", "text": "### 历史聊天记录总结：" + summary}
-            ]
-            del runtime.auxiliary_source_queue[:source_count]
-        except Exception:
-            print("❌ Failed to summarize auxiliary messages")
-            traceback.print_exc()
-            _trim_auxiliary_queue(runtime)
+    await _compact_auxiliary_messages_async(runtime)
 
 
 def _snapshot_auxiliary_queue() -> tuple[list[dict], list[dict]]:
