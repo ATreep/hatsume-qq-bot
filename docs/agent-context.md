@@ -42,6 +42,8 @@ multimodal input, and generated output. Summarization compresses text history;
 it does not resize image/audio/video payloads or prevent an oversized system
 prompt or a single oversized user message.
 
+初芽调用 `shell_executor` 时，命令会交给后台 `background_shell` Agent，主图不会等待 shell 结束；命令完成后通过 Agent 通知重新注入结果。`coding_agent` 调用同一工具时保持同步等待，以便继续根据命令输出作出下一步决策。
+
 Focused checks (use local Python, never the project `.venv`):
 
 ```sh

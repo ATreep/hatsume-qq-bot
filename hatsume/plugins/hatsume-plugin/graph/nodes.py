@@ -1451,7 +1451,10 @@ async def ai_node(state: MessagesState) -> dict:
 
         t_invocation_start = time.monotonic()
 
-        set_shell_executor_limit(3)  # chat_agent: 3 calls per round, timeout <= 60s
+        set_shell_executor_limit(
+            3,
+            run_in_background=True,
+        )  # chat_agent: delegate shell calls so this graph never waits
         invocation_messages = agent_messages
         loop_middleware = ChatLoopDelegationMiddleware(len(agent_messages))
         send_text_first_middleware = SendTextFirstMiddleware()

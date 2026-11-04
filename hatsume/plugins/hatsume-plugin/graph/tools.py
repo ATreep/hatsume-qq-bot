@@ -187,6 +187,7 @@ class _ShellExecutorBudget:
 
     max_calls: int | None
     max_timeout: int | None = 60
+    run_in_background: bool = False
     call_count: int = 0
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
@@ -204,16 +205,23 @@ _shell_executor_budget: contextvars.ContextVar[_ShellExecutorBudget | None] = (
 )
 
 
-def set_shell_executor_limit(max_calls: int | None) -> None:
+def set_shell_executor_limit(
+    max_calls: int | None,
+    *,
+    run_in_background: bool = False,
+) -> None:
     """Set the shell_executor budget for the current agent invocation.
 
-    Call with ``max_calls=3`` before invoking 初芽 (3 calls, at most 60s each).
-    Call with ``max_calls=None`` before invoking 编码 Agent (no call/timeout cap).
-    Replaces the current shared budget and resets its call counter to 0.
+    Call with ``max_calls=3, run_in_background=True`` before invoking 初芽 so
+    shell commands are delegated and the main graph can continue. Call with
+    ``max_calls=None`` before invoking 编码 Agent to keep shell_executor
+    synchronous without call or timeout caps. Replaces the current shared
+    budget and resets its call counter to 0.
     """
     _shell_executor_budget.set(_ShellExecutorBudget(
         max_calls=max_calls,
         max_timeout=None if max_calls is None else 60,
+        run_in_background=run_in_background,
     ))
 
 
@@ -1405,6 +1413,8 @@ async def shell_executor(shell: str, timeout: int) -> str:
     - 只有你自己可以访问沙盒，用户无法访问沙盒。
     - 禁止将沙盒中的路径告诉用户。你必须通过描述、调用工具或上传到 GitHub 仓库的方式向用户展示沙盒中的文件。
     - 除重要文件外，请将你的所有产物创建在 /tmp 中。
+    - 初芽调用时，命令会转交后台 shell Agent，工具立即返回；命令结果稍后以 Agent 通知注入对话。
+    - 编码 Agent 调用时，命令保持同步执行，工具会等待命令结束或 timeout。
     """
     budget = _shell_executor_budget.get()
     max_timeout = budget.max_timeout if budget is not None else 60
@@ -1422,6 +1432,28 @@ async def shell_executor(shell: str, timeout: int) -> str:
         )
 
     runtime = get_current_group_runtime()
+    if budget is not None and budget.run_in_background:
+        task = (
+            "执行下面的 shell 命令；命令进程正常退出后立即结束任务，"
+            f"总超时为 {timeout} 秒。不要改写命令，也不要等待用户输入：\n\n"
+            f"```bash\n{shell}\n```"
+        )
+        context = (
+            "初芽在当前对话中需要执行一个可能耗时的 shell 命令。"
+            "主对话不能等待命令完成，因此请在后台执行并在命令结束后返回完整输出。"
+        )
+        print(
+            f"🧩 [shell_executor] delegating chat command to background_shell: "
+            f"group={runtime.group_id} timeout={timeout}s"
+        )
+        dispatch_result = await agent_dispatch.ainvoke({
+            "agent_name": "background_shell",
+            "task": task,
+            "context": context,
+            "notified_user_id": runtime.conversation.current_query_user_id or 0,
+        })
+        return f"命令已转入后台执行，初芽可以继续当前对话。{dispatch_result}"
+
     print("Executing shell: \n\r", shell)
     await ensure_container_running(runtime.group_id)
     result = await run_cmd(shell, timeout=timeout, group_id=runtime.group_id)
@@ -2609,8 +2641,8 @@ async def respond_to_shell_prompt(
 def end_conversation() -> str:
     """结束当前对话。
 
-    执行此工具后，你不会再接收到任何聊天消息，直到有人主动提及你。
-    当用户希望你不回话时使用。
+    执行此工具后，你不会再接收到任何聊天消息，直到有人再次主动提及你。
+    仅当用户明确告诉你「结束对话」或「不再回复」时才调用此工具。否则不要忽视用户的任何消息。
     """
     callback = get_current_group_runtime().end_conversation_callback
     if callback is None:

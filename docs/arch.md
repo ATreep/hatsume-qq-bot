@@ -460,7 +460,7 @@ flowchart LR
 | 工具 | 作用 |
 |---|---|
 | search_image | 通过 Pexels 搜索真实照片，返回图片 URL 与摄影师来源信息 |
-| shell_executor | 当前容器 `/work` 同步命令；普通聊天每轮最多三次，每次 timeout 为 1 至 60 秒，程序在执行前拒绝超限参数 |
+| shell_executor | 当前容器 `/work` 命令；初芽调用时每轮最多三次、timeout 为 1 至 60 秒，并转交后台 shell Agent 后立即返回；coding_agent 调用时保持同步执行且不设调用次数/timeout 上限 |
 | find_memory | 主动检索长期记忆 |
 | view_image | 使用轻量模型读取网络或沙盒图片并返回文字描述 |
 | generate_image | 图片生成，支持参考图与 60 秒限流 |

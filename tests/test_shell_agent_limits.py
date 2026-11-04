@@ -20,10 +20,15 @@ class ShellAgentLimitTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.run = AsyncMock(return_value="executed")
         self.ready = AsyncMock()
+        self.dispatch = AsyncMock(return_value="Agent 已启动。")
         self.ns = {"tool": tool, "contextvars": contextvars, "threading": threading,
                    "dataclass": dataclass, "field": field, "run_cmd": self.run,
                    "ensure_container_running": self.ready,
-                   "get_current_group_runtime": lambda: SimpleNamespace(group_id=123)}
+                   "agent_dispatch": SimpleNamespace(ainvoke=self.dispatch),
+                   "get_current_group_runtime": lambda: SimpleNamespace(
+                       group_id=123,
+                       conversation=SimpleNamespace(current_query_user_id=456),
+                   )}
         nodes = [n for n in TREE.body if
                  isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and n.name in NAMES
                  or isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name)
@@ -46,6 +51,19 @@ class ShellAgentLimitTests(unittest.IsolatedAsyncioTestCase):
     async def test_unbound_context_defaults_to_chat_cap(self):
         self.assertIn("60 秒", await self.call(61))
         self.run.assert_not_awaited()
+
+    async def test_chat_mode_delegates_without_waiting_for_shell(self):
+        self.ns["set_shell_executor_limit"](3, run_in_background=True)
+        result = await self.call(30)
+        self.assertIn("转入后台", result)
+        self.run.assert_not_awaited()
+        self.ready.assert_not_awaited()
+        self.dispatch.assert_awaited_once()
+        payload = self.dispatch.await_args.args[0]
+        self.assertEqual(payload["agent_name"], "background_shell")
+        self.assertEqual(payload["notified_user_id"], 456)
+        self.assertIn("printf test", payload["task"])
+        self.assertIn("30 秒", payload["task"])
 
     async def test_nonpositive_timeout_is_rejected(self):
         for timeout in [0, -1]:

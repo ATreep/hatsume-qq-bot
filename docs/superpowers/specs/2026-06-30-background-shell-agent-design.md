@@ -6,7 +6,7 @@
 
 ## 1. Problem
 
-The chat agent's `shell_executor` tool calls `subprocess.run(capture_output=True)`, which blocks the LangGraph conversation graph until the command completes. This makes interactive commands (e.g., `gh auth login`, `gcloud auth login`) unusable — they output a URL, wait for user browser interaction, and the graph stalls indefinitely.
+Historically, the chat agent's `shell_executor` waited for the command result, which blocked the LangGraph conversation graph until completion. The current implementation delegates chat-agent shell calls to the existing `background_shell` Agent; synchronous shell execution is retained for `coding_agent`, which needs each result for its next decision.
 
 The existing `agent_allocate` + background agent pattern (`coding_agent`, `generate_video`) shows the correct architecture but has two gaps:
 - Agents only notify once, at completion — cannot inject mid-progress output while staying alive
