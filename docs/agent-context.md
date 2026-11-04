@@ -42,7 +42,7 @@ multimodal input, and generated output. Summarization compresses text history;
 it does not resize image/audio/video payloads or prevent an oversized system
 prompt or a single oversized user message.
 
-初芽调用 `shell_executor` 时，命令会交给后台 `background_shell` Agent，主图不会等待 shell 结束；命令完成后通过 Agent 通知重新注入结果。`coding_agent` 调用同一工具时保持同步等待，以便继续根据命令输出作出下一步决策。
+初芽不直接持有 `shell_executor`；所有沙盒命令必须通过 `agent_dispatch` 派发给 `coding_agent` 或 `background_shell`。`coding_agent` 调用 `shell_executor` 时保持同步等待，以便继续根据命令输出作出下一步决策；`background_shell` 负责长时间或交互式命令的后台执行与通知。
 
 Focused checks (use local Python, never the project `.venv`):
 

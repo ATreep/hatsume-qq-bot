@@ -56,7 +56,7 @@ flowchart LR
 | 声音发送 | send_voice | 支持 HTTP/HTTPS 和沙盒 file://；网络文件下载到 /tmp，按后缀仅允许 MP3，其他格式保留文件并返回沙盒路径 | graph/tools.py |
 | 模型与供应商切换 | 管理员 /model、/provider | 全局模型角色与连接分别保存到 models.yml、providers.yml，下一次调用生效并保留到重启后 | handlers/tools.py、model_commands.py、model_config.py、model_factory.py、models.py |
 | ADMIN MODE | `ADMIN_QQ_ID` 本人发送含大写 `BYPASS` 的普通消息 | 程序校验顶层发送者和当前消息正文；本轮 chat_agent 保持当前高级模型、防御性移除历史 `image_url`/`img_url` 输入段并注入完整沙盒操作授权，下一轮恢复未过滤输入 | graph/nodes.py、models.py、prompts.py |
-| 本地 Shell | 管理员 /ccsh、/cc 或 shell_executor | 在当前 `hatsume-containerization` 的 `/work` 执行，home 为 `/root`，源码位于 `/work/hatsume`；进程、计数和延迟逻辑停用按群隔离 | handlers/tools.py、graph/tools.py、infra.py |
+| 本地 Shell | 管理员 /ccsh、/cc；Agent 使用 shell_executor | 管理员命令在当前 `hatsume-containerization` 的 `/work` 执行；初芽不能直接调用 shell_executor，必须通过 agent_dispatch 派发 coding_agent 或 background_shell，home 为 `/root`，源码位于 `/work/hatsume`；进程、计数和延迟逻辑按群隔离 | handlers/tools.py、graph/tools.py、graph/agents.py、infra.py |
 | 后台长任务 | agent_dispatch(background_shell, ...) | 后台运行长时间或交互式命令，周期判断继续、通知、输入、结束或终止 | graph/agents.py、infra.py |
 | 编码 Agent | agent_dispatch(coding_agent, ...) | 使用代码模型与 Shell、Skill、搜索、图像工具处理复杂开发任务 | graph/agents.py、prompts.py |
 | Agent 通知 | 后台 Agent 中间输出或完成 | 注入当前对话；无活跃对话时为目标群启动新图；Bot 断线竞态下保留带 `agent` 标记的队列消息并记录日志，等待路由恢复后的下一次对话投递 | graph/tools.py、graph/nodes.py、handlers/dialogue.py |
@@ -460,7 +460,7 @@ flowchart LR
 | 工具 | 作用 |
 |---|---|
 | search_image | 通过 Pexels 搜索真实照片，返回图片 URL 与摄影师来源信息 |
-| shell_executor | 当前容器 `/work` 命令；初芽调用时每轮最多三次、timeout 为 1 至 60 秒，并转交后台 shell Agent 后立即返回；coding_agent 调用时保持同步执行且不设调用次数/timeout 上限 |
+| shell_executor | 仅供 coding_agent、web_researcher 等后台 Agent 在当前容器 `/work` 执行同步命令；不注册给初芽，初芽必须通过 agent_dispatch 派发 Agent |
 | find_memory | 主动检索长期记忆 |
 | view_image | 使用轻量模型读取网络或沙盒图片并返回文字描述 |
 | generate_image | 图片生成，支持参考图与 60 秒限流 |
@@ -493,7 +493,7 @@ flowchart LR
 | end_conversation | 用户要求不再回复时立即结束当前对话，直到再次被主动提及 |
 | create_character_proxy(proxied_user_id, during_time=180) / terminate_character_proxy | 根据 RAM 代理开关互斥提供；持续时间以分钟计，默认 180，范围 1 至 1440，超时自动终止 |
 
-configure_tool_callbacks() 在每次新图启动时把发送回调、当前用户、媒体限流和结束回调写入目标 `GroupRuntime`。节点和工具通过 task-local binding 读取当前群；缺少绑定时失败关闭。媒体次数、代理、Skill manager 和 Agent task 引用按群保存；Hook 工具同样只读取 task-local 群且不接受任意 group_id，消息匹配 Hook 的触发群号即其所属群。Shell 工具次数另用 ContextVar 区分普通聊天与 coding_agent。`get_chat_tools()` 根据当前群代理状态过滤生命周期工具：关闭时只有 create_character_proxy，开启时只有 terminate_character_proxy。
+configure_tool_callbacks() 在每次新图启动时把发送回调、当前用户、媒体限流和结束回调写入目标 `GroupRuntime`。节点和工具通过 task-local binding 读取当前群；缺少绑定时失败关闭。媒体次数、代理、Skill manager 和 Agent task 引用按群保存；Hook 工具同样只读取 task-local 群且不接受任意 group_id，消息匹配 Hook 的触发群号即其所属群。Shell 工具预算通过 ContextVar 绑定后台 Agent 的执行上下文，初芽只能使用 agent_dispatch 间接执行沙盒命令。`get_chat_tools()` 根据当前群代理状态过滤生命周期工具：关闭时只有 create_character_proxy，开启时只有 terminate_character_proxy。
 
 ### 6.2 Hooks（heartbeat 与消息匹配）
 
@@ -554,7 +554,7 @@ sequenceDiagram
 
 - web_researcher 使用轻量模型，工具列表严格为 TinyFish LangChain SDK 的 `[tinyfish_search, tinyfish_fetch]` 加必要的 Shell/Skill 辅助工具；每次搜索和抓取会在控制台打印参数摘要、结果长度或错误类型，但不打印凭证；通过既有 agent_dispatch 的群属实例、后台任务和通知流程返回带来源链接的研究报告；chat_agent 的网络搜索统一派发给此 Agent。
 - coding_agent 使用代码模型，可调用 shell_executor、Skill 工具、网页与 Pexels 图片搜索、图片生成；它的 Shell 调用次数与 timeout 均不设上限，命令仍按调用时指定的正整数 timeout 终止。
-- Shell 预算通过 ContextVar 绑定每次调用上下文，同轮 chat_agent 的并行工具共享三次计数。chat_agent 的单次 timeout 上限为 60 秒；未绑定预算时也采用 60 秒上限。coding_agent 在自己的后台任务中设置不限次数与 timeout 的预算，不改变父聊天任务的限制。非法 timeout 不消耗调用次数，也不启动命令。
+- Shell 预算通过 ContextVar 绑定每次后台 Agent 调用上下文。初芽不直接持有 shell_executor，只能通过 agent_dispatch 派发 coding_agent 或 background_shell；coding_agent 在自己的后台任务中设置不限次数与 timeout 的预算，不改变父聊天任务的限制。非法 timeout 不消耗调用次数，也不启动命令。
 - background_shell 先把任务解析为单条命令、终止条件和总超时，然后后台启动进程并增量读取日志。
 - 后台决策支持 DONE、KILL、CONTINUE:N、NOTIFY:N 与 INPUT_NEEDED:<timeout>:<description>。
 - 每次派发生成唯一 instance_id，并永久记录所属群、任务、上下文、用户、开始时间、状态和结果；派发 task 通过 task-local instance 绑定更新这一条精确记录，后台进程与 stdin request 也保存同一 instance_id，不按同类型 Agent 的“最新实例”猜测所有者。所有查询和 `/agents [群号]` 都按群过滤。

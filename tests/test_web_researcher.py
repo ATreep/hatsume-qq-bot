@@ -100,4 +100,5 @@ class WebResearcherTests(unittest.IsolatedAsyncioTestCase):
                             and any(isinstance(t, ast.Name) and t.id == "CHAT_TOOLS" for t in n.targets))
         names = [n.id for n in registration.value.elts if isinstance(n, ast.Name)]
         self.assertNotIn("web_search", names)
+        self.assertNotIn("shell_executor", names)
         self.assertIn("agent_dispatch", names)

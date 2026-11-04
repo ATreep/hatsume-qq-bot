@@ -2653,7 +2653,6 @@ def end_conversation() -> str:
 # Single registration point consumed by graph.nodes. Add new chat-facing tools here.
 CHAT_TOOLS = [
     search_image,
-    shell_executor,
     find_memory,
     search_history_messages,
     view_image,
