@@ -20,7 +20,7 @@ HUGGINGFACE_ACCOUNT = getattr(_config, "HUGGINGFACE_ACCOUNT", "")
 SOUL_PATH = Path(__file__).resolve().parents[3] / "data" / "hatsume-plugin" / "SOUL.md"
 
 TTS_VOICE_PROMPT = (
-    "清爽、稚气而有活力的青春少女声，像一位开朗聪明的高中女生自然聊天。"
+    "清爽、稚气而有活力的青春少女声，像一位开朗聪明的可爱小女孩自然聊天。"
     "音调明亮但不尖，不夹嗓、不撒娇；语速自然偏快，语气轻松灵活，"
     "带有真实的笑意和即时反应，避免成熟、低沉、刻意表演和棒读。"
  )
