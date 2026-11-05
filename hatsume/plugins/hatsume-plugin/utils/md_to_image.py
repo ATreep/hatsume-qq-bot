@@ -418,6 +418,12 @@ def _mermaid_theme(dark_mode: bool) -> dict[str, object]:
             "noteBkgColor": "#5c2d45",
             "noteTextColor": "#f7eaf0",
             "textColor": "#f7eaf0",
+            "mainBkg": "#4a2639",
+            "rectBkgColor": "#5c2d45",
+            "sectionBkgColor": "#351d2b",
+            "altSectionBkgColor": "#2b2428",
+            "sectionBkgColor2": "#4a2639",
+            "excludeBkgColor": "#3a2833",
             "secondaryBorderColor": "#d06b92",
             "tertiaryBorderColor": "#b9577f",
             "radius": "14",
@@ -451,7 +457,7 @@ def _mermaid_theme(dark_mode: bool) -> dict[str, object]:
             "pieStrokeColor": "#2b2428",
             "pieOuterStrokeColor": "#f08bad",
             "pieOpacity": "1",
-            "xyChart": {"plotColorPalette": "#f08bad,#d06b92,#b9577f,#8f4567"},
+            "xyChart": {"backgroundColor": "#2b2428", "plotColorPalette": "#f08bad,#d06b92,#b9577f,#8f4567"},
             "clusterBkg": "#351d2b",
             "clusterBorder": "#d06b92",
             "edgeLabelBackground": "#2b2428",
@@ -480,6 +486,12 @@ def _mermaid_theme(dark_mode: bool) -> dict[str, object]:
         "noteBkgColor": "#ffe0ec",
         "noteTextColor": "#4a3340",
         "textColor": "#4a3340",
+        "mainBkg": "#fff0f7",
+        "rectBkgColor": "#ffe0ec",
+        "sectionBkgColor": "#ffd0e1",
+        "altSectionBkgColor": "#ffeafc",
+        "sectionBkgColor2": "#fff0f7",
+        "excludeBkgColor": "#f9d8e5",
         "secondaryBorderColor": "#ef9fbd",
         "tertiaryBorderColor": "#d8759b",
         "radius": "14",
@@ -513,7 +525,7 @@ def _mermaid_theme(dark_mode: bool) -> dict[str, object]:
         "pieStrokeColor": "#4a3340",
         "pieOuterStrokeColor": "#d4456a",
         "pieOpacity": "1",
-        "xyChart": {"plotColorPalette": "#d4456a,#c23d68,#b9577f,#8f4567"},
+        "xyChart": {"backgroundColor": "#ffeafc", "plotColorPalette": "#d4456a,#c23d68,#b9577f,#8f4567"},
         "clusterBkg": "#ffe0ec",
         "clusterBorder": "#ef9fbd",
         "edgeLabelBackground": "#ffeafc",
@@ -609,6 +621,11 @@ async def _markdown_to_html(md_text: str) -> str:
 .hatsume-mermaid.is-rendered .hatsume-mermaid-fallback{display:none}
 .hatsume-mermaid.is-failed .hatsume-mermaid-output{display:none}
 @media(prefers-color-scheme:dark){.hatsume-mermaid{border-color:#d06b92;background:#2b2428;box-shadow:0 8px 24px rgba(0,0,0,.22)}.hatsume-mermaid-output svg .edgeLabel rect{fill:#2b2428!important;stroke:#d06b92!important}}
+"""
+    mermaid_css += f"""
+.hatsume-mermaid{{border-color:{mermaid_theme['clusterBorder']};background:{mermaid_theme['background']}}}
+.hatsume-mermaid-output svg{{background:{mermaid_theme['background']}}}
+.hatsume-mermaid-output svg .edgeLabel rect{{fill:{mermaid_theme['background']}!important;stroke:{mermaid_theme['clusterBorder']}!important}}
 """
     if mermaid_blocks:
         css += mermaid_css
