@@ -29,6 +29,12 @@ class AgentContractTests(unittest.TestCase):
         self.assertIn("below {CHAT_INTENT_CONFIDENCE_THRESHOLD:.2f}", text)
         self.assertNotIn("below 0.40", text)
 
+    def test_jev_intent_judge_has_no_conversation_end_choice(self):
+        text = (PLUGIN / "graph/nodes.py").read_text(encoding="utf-8")
+        self.assertIn('"chat_intent": {', text)
+        self.assertNotIn('"chat_end": {', text)
+        self.assertNotIn('Jev chose to end the conversation.', text)
+
     def test_send_text_documents_optional_memories(self):
         text = (PLUGIN / "graph/tools.py").read_text(encoding="utf-8")
         self.assertIn("memories: list[MemoryRecordInput] | None = None", text)

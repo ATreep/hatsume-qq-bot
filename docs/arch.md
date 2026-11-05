@@ -235,16 +235,16 @@ stateDiagram-v2
     [*] --> human
     human --> finish: 五分钟超时或 __end__
     human --> chat_llm: 获得用户输入
-    chat_llm --> human: AI 和工具执行完成；或 Jev 请求结束
+    chat_llm --> human: AI 和工具执行完成
     finish --> [*]
 ~~~
 
 - human_node 每 0.3 秒检查 human_queue，五分钟无输入时写入 __end__。
-- ai_node 在处理普通用户输入时与 chat_intend_judge 一起调用 Jev 的 Choice 判断 chat_end；输入使用最近对话状态。普通静态图片可保留 image_url/img_url 多模态内容段供当前 mercury-decide 决策模型判断；GIF 在发送决策请求前先交给视觉模型转换为文字描述，因为决策模型不支持 GIF。系统注入、辅助上下文和角色代理消息绕过 chat_end 判断；Jev 选择“结束”时请求结束，由 human_node 写入 __end__ 并结束对话。
+- ai_node 在处理普通用户输入时调用 Jev 的 Choice 判断 chat_intent；输入使用最近对话状态。普通静态图片可保留 image_url/img_url 多模态内容段供当前 mercury-decide 决策模型判断；GIF 在发送决策请求前先交给视觉模型转换为文字描述，因为决策模型不支持 GIF。系统注入、辅助上下文和角色代理消息绕过该判断；对话结束仅由超时、内部控制流或 `end_conversation` 工具触发。
 - 图历史超过 60 条 LangGraph 消息时，删除最早的一对 Human/AI 消息。
 - ai_node 自动检索记忆，注入 Skill 列表、运行中 Agent 状态、当前群定时任务概览、当前群待办、可选表情图片提示和调用时的本地日期时间，再用 CHAT_TOOLS 创建 LangChain Agent。进入节点时先删除所有已满 72 小时的待办；Todo 数据库不可用时只注入不可用状态，不中断普通回复。主调用异常最多重试五次；若结果只有工具调用、工具结果、空白或 `[xxx: xxx]` 类控制标记且未请求结束对话，则携带本次 Agent 消息状态额外调用一次。递归上限为 60。
 - ai_node 每轮读取辅助队列的非破坏性快照，临时放在当前 Human 内容之前；同一辅助上下文会持续进入后续轮次，直到新写入触发压缩。发送前移除 reply、memory 与 face 标签；图历史会移除 reply 控制标记，但保留现有 face 与 memory 标签历史语义。
-- ai_node 只解析当前 HumanMessage 中顶层 `type=message` 的 JSON。每轮先用 `get_intent_model()`（Jev）在同一个 System One 请求中判断 chat_intend_judge 与 chat_end；判断为 skip 时不创建或调用 chat_agent，判断为 respond 时打印回复类型与原因后继续。决策请求保留当前消息和最近状态中的 `image_url`/`img_url` 内容段；其中 GIF 会先由视觉模型生成文字描述并替换为文本，其他图片才由 mercury-decide 直接依据图片判断意图；系统注入任务绕过判断以保证执行。发送者 QQ ID 等于非空 `ADMIN_QQ_ID` 且该消息的直接正文包含大小写敏感的 `BYPASS` 时，本地 `sys_prompt` 追加 ADMIN MODE，chat_agent 保持当前高级模型，并在不修改 LangGraph 历史的前提下从全部模型输入消息复制过滤历史 `image_url` 与 `img_url` 内容段；回复引用、合并转发、辅助上下文和历史消息均不能触发，下一轮恢复未过滤输入与基础角色 Prompt。当前普通消息图片同时以沙盒 Markdown 路径和 `image_url` data URI 输入，回复图片仍使用沙盒 Markdown 路径。
+- ai_node 只解析当前 HumanMessage 中顶层 `type=message` 的 JSON。每轮先用 `get_intent_model()`（Jev）在同一个 System One 请求中判断 chat_intend_judge；判断为 skip 时不创建或调用 chat_agent，判断为 respond 时打印回复类型与原因后继续。决策请求保留当前消息和最近状态中的 `image_url`/`img_url` 内容段；其中 GIF 会先由视觉模型生成文字描述并替换为文本，其他图片才由 mercury-decide 直接依据图片判断意图；系统注入任务绕过判断以保证执行。发送者 QQ ID 等于非空 `ADMIN_QQ_ID` 且该消息的直接正文包含大小写敏感的 `BYPASS` 时，本地 `sys_prompt` 追加 ADMIN MODE，chat_agent 保持当前高级模型，并在不修改 LangGraph 历史的前提下从全部模型输入消息复制过滤历史 `image_url` 与 `img_url` 内容段；回复引用、合并转发、辅助上下文和历史消息均不能触发，下一轮恢复未过滤输入与基础角色 Prompt。当前普通消息图片同时以沙盒 Markdown 路径和 `image_url` data URI 输入，回复图片仍使用沙盒 Markdown 路径。
 - ai_node 在每次 chat_agent 调用中通过共享 middleware 强制第一个可执行工具调用为 `send_text`；其他工具在此前只返回警告，不执行。首次尝试即消耗该门槛，即使 `send_text` 后续返回校验或发送错误；门槛状态跨 MCP 工具加载重建的 Agent 保留，并在下一次 ai_node 调用重置。随后 ai_node 在最终可见文本确定后，把本次被回复消息的发送者与可见文本中每个 `[CQ:at,qq=...]` 指向的成员加入本群 `chat_peers`，不依赖发送是否成功；非法目标、未知发送者和 Bot 自身不入列。被加入者后续消息因此进入 pending 主对话而不是辅助上下文。
 - Agent、Timer、Heartbeat Hook 的系统注入在写入 `human_queue` 或启动新图前，也会把结构化通知对象登记到本群 `chat_peers`；`user_id=0`、非法 ID、重复 ID 和 Bot 自身跳过。Message-match Hook 另外登记触发消息发送者，群成员加入登记新成员。Sandbox Channel 的 `user_id` 仅是来源字段，不作为通知对象。完整入口与标记对照见 `docs/human-message-queue-injection.md`。
 - chat_agent 调用 end_conversation 后，ConversationState 立即关闭聊天并清空 chat_peers；ai_node 抑制该轮文本和表情发送，human_node 随即路由到 finish。下一次主动提及通过 activate_chat() 解除结束标记。
@@ -275,7 +275,7 @@ flowchart LR
     ReplySeg -. 发送失败 .-> Plain
 ~~~
 
-Agent/Timer 从 handlers/dialogue.py 启动的新对话复用同一直接群发送 helper。graph/nodes.py 的 `_start_direct_conv()` 继续通过既有的 lazy import 调用该 helper，避免新增另一套回复拼装逻辑；该导入只在 fallback 启动路径运行。当前对话与新对话的系统触发消息都会在 `human_queue` 中携带内部来源标记；`human_node` 消费时移除该标记，`ai_node` 据此跳过 chat_end 判断并继续处理系统任务。
+Agent/Timer 从 handlers/dialogue.py 启动的新对话复用同一直接群发送 helper。graph/nodes.py 的 `_start_direct_conv()` 继续通过既有的 lazy import 调用该 helper，避免新增另一套回复拼装逻辑；该导入只在 fallback 启动路径运行。当前对话与新对话的系统触发消息都会在 `human_queue` 中携带内部来源标记；`human_node` 消费时移除该标记，`ai_node` 据此跳过 chat_intent 判断并继续处理系统任务。
 
 ### 3.7 当前清理边界
 
@@ -291,7 +291,7 @@ Agent/Timer 从 handlers/dialogue.py 启动的新对话复用同一直接群发�
 - 插件入口用 `is_type(GroupIncreaseNoticeEvent)` 精确匹配 OneBot `group_increase`；仅当群号存在于 memory 层 activated-group RAM 集合且加入者不是 Bot 自身时处理。
 - handler 通过 OneBot 查询新成员群名片，失败时沿用 QQ 号，并用 `get_qq_avatar_url()` 生成头像 URL。系统 Prompt 包含用户名、QQ 号与头像，要求 at 欢迎、简短自我介绍并说明聊天以外的能力。
 - 新成员 session 总会通过 `ConversationState.activate_chat()` 加入 `chat_peers`。已有活跃对话或仍在收尾的图时，Prompt 以 `group_increase` 系统触发标记直接进入 `human_queue`，不启动第二个图；没有对话时复用 `_start_conv_for_trigger()` 启动现有 LangGraph 流程。
-- 该系统触发标记由 `human_node` 消费并移除，同时让 `ai_node` 跳过 chat_end 判断。欢迎回复继续使用统一的直接群发送、Markdown、at 与重试逻辑。
+- 该系统触发标记由 `human_node` 消费并移除，同时让 `ai_node` 跳过 chat_intent 判断。欢迎回复继续使用统一的直接群发送、Markdown、at 与重试逻辑。
 
 ## 4. 记忆保存与检索
 
@@ -527,7 +527,7 @@ TodoStore 使用进程级惰性单例、WAL、参数化 SQL、显式 commit 和 
 
 handlers/dialogue.py 在普通消息入口检查原始 at 消息段。其他群成员明确 @ 被代理用户时，只调用 ConversationState.activate_chat(session_id) 把该发送者加入 chat_peers；后续防抖、队列、LangGraph 和回复发送完全复用现有对话流程。
 
-ai_node 在调用 Jev chat_end 判断前解析当前消息正文；正文包含当前被代理用户昵称或任一外号时直接继续对话。匹配不扫描发送者等元数据，避免同名发送者造成误判。
+ai_node 在调用 Jev chat_intent 判断前解析当前消息正文；正文包含当前被代理用户昵称或任一外号时直接继续对话。匹配不扫描发送者等元数据，避免同名发送者造成误判。
 
 ai_node 在代理开启时把行为画像和带时区的自动结束时间附加到 role system prompt。该 Prompt 规定只有当前消息明确 @ 被代理用户时才模仿；与初芽的普通对话、Agent 通知和 Timer 通知继续使用初芽身份。终止工具执行后，下一次 ai_node 不再注入该 Prompt。
 

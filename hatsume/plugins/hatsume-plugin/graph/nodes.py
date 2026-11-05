@@ -1291,9 +1291,8 @@ async def ai_node(state: MessagesState) -> dict:
     else:
         last_human_msg = HumanMessage(state["messages"][-1].content)
 
-    print("Start Jev chat intent/end judge...")
+    print("Start Jev chat intent judge...")
     t_jev_start = time.time()
-    chat_end_bypassed = runtime.last_was_auxiliary_only
     chat_detection_bypassed = CHAT_DETECTION_BYPASS_KEYWORD in _current_message_text(
         last_content
     )
@@ -1307,13 +1306,13 @@ async def ai_node(state: MessagesState) -> dict:
     else:
         try:
             # Jev is a System One model: send the current state and a closed
-            # Choice question pair to its ``/systemone`` endpoint.  The model
-            # does not generate JSON text, so both typed answers can be
-            # consumed directly without parsing generated prose.
+            # Choice question to its ``/systemone`` endpoint.  The model does
+            # not generate JSON text, so its typed answer can be consumed
+            # directly without parsing generated prose.
             jev_chain = get_systemone_chain()
             # mercury-decide natively accepts image_url/img_url blocks.  Keep
             # them in the decision state so an image-only message remains
-            # eligible for visual intent and chat-end decisions.
+            # eligible for visual intent classification.
             decision_last_human_msg = last_human_msg
             recent_messages = _without_bootstrap_role_prompt(
                 state['messages'][-6:]
@@ -1352,27 +1351,9 @@ async def ai_node(state: MessagesState) -> dict:
                         "instructions": "当前消息最符合哪一种回复意图？判断 `current_message`，并参考 `recent_messages` 理解上下文。",
                         "criteria": CHAT_INTENT_URGENCY_TYPES,
                     },
-                    "chat_end": {
-                        "type": "choice",
-                        "instructions": "用户是否想结束与初芽的当前对话？判断 `current_message` 是否表示想要结束当前聊天或在转向其他的话题。",
-                        "criteria": {
-                            "结束": "用户透露出想结束当前话题；或用户开始讨论另一个话题， 且不再关注当前话题。",
-                            "继续": "用户仍在提问、补充信息、回应初芽，或明确希望继续互动。",
-                        },
-                    },
                 },
                 route="/systemone"
             )
-            chat_end_answer = _jev_answer(jev_response, "chat_end") or {}
-            chat_end_choice = str(chat_end_answer.get("choice", "继续"))
-            if (
-                not chat_end_bypassed
-                and chat_end_choice == "结束"
-            ):
-                print("[chat_end] Jev chose to end the conversation.")
-                conversation_state.request_end_conversation()
-                return {"messages": []}
-
             chat_intent_answer = _jev_answer(jev_response, "chat_intent") or {}
             chat_intent_choice = str(chat_intent_answer.get("choice", "无需回复"))
             chat_intent_confidence = chat_intent_answer.get("confidence")
