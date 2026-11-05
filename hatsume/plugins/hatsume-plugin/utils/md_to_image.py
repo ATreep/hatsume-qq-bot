@@ -79,7 +79,7 @@ def _is_dark_mode() -> bool:
 
 _DARK_MODE_CSS = """
 html,body{background-color:#1a1418}
-.markdown-body{--hm-ink:#eadde3;--hm-muted:#b6a4ae;--hm-accent:#f0a0b8;--hm-accent-strong:#f3afc3;--hm-surface:rgba(45,34,42,.72);--hm-soft:#3a2833;--hm-border:#513847;--hm-glow:rgba(240,130,166,.10);--hm-glow-soft:rgba(183,112,145,.08);--hm-shine:rgba(255,220,232,.06);background-color:var(--hm-surface);color:var(--hm-ink);border-color:var(--hm-border);box-shadow:0 8px 24px rgba(0,0,0,.28)}
+.markdown-body{--hm-ink:#eadde3;--hm-muted:#b6a4ae;--hm-accent:#f0a0b8;--hm-accent-strong:#f3afc3;--hm-surface:rgba(45,34,42,.48);--hm-soft:#3a2833;--hm-border:#513847;--hm-glow:rgba(240,130,166,.10);--hm-glow-soft:rgba(183,112,145,.08);--hm-shine:rgba(255,220,232,.06);background-color:var(--hm-surface);color:var(--hm-ink);border-color:var(--hm-border);box-shadow:0 8px 24px rgba(0,0,0,.28)}
 .markdown-body h1,.markdown-body h2{color:#f0a0b8;border-bottom-color:#3d2a35}
 .markdown-body h3,.markdown-body h4{color:#d8cdd2}
 .markdown-body h5,.markdown-body h6{color:#b0a0a8}
@@ -406,7 +406,7 @@ def _mermaid_theme(dark_mode: bool) -> dict[str, object]:
     """Return Mermaid base-theme variables matching the Markdown palette."""
     if dark_mode:
         return {
-            "background": "rgba(43,36,40,.78)",
+            "background": "rgba(43,36,40,.34)",
             "primaryColor": "#4a2639",
             "primaryTextColor": "#fff0f6",
             "primaryBorderColor": "#f08bad",
@@ -418,12 +418,12 @@ def _mermaid_theme(dark_mode: bool) -> dict[str, object]:
             "noteBkgColor": "#5c2d45",
             "noteTextColor": "#f7eaf0",
             "textColor": "#f7eaf0",
-            "mainBkg": "rgba(74,38,57,.78)",
-            "rectBkgColor": "rgba(92,45,69,.72)",
-            "sectionBkgColor": "rgba(53,29,43,.62)",
-            "altSectionBkgColor": "rgba(43,36,40,.42)",
-            "sectionBkgColor2": "rgba(74,38,57,.62)",
-            "excludeBkgColor": "rgba(58,40,51,.62)",
+            "mainBkg": "rgba(74,38,57,.34)",
+            "rectBkgColor": "rgba(92,45,69,.48)",
+            "sectionBkgColor": "rgba(53,29,43,.38)",
+            "altSectionBkgColor": "rgba(43,36,40,.26)",
+            "sectionBkgColor2": "rgba(74,38,57,.38)",
+            "excludeBkgColor": "rgba(58,40,51,.38)",
             "secondaryBorderColor": "#d06b92",
             "tertiaryBorderColor": "#b9577f",
             "radius": "14",
@@ -457,8 +457,8 @@ def _mermaid_theme(dark_mode: bool) -> dict[str, object]:
             "pieStrokeColor": "#2b2428",
             "pieOuterStrokeColor": "#f08bad",
             "pieOpacity": "1",
-            "xyChart": {"backgroundColor": "rgba(43,36,40,.42)", "plotColorPalette": "#f08bad,#d06b92,#b9577f,#8f4567"},
-            "clusterBkg": "rgba(53,29,43,.62)",
+            "xyChart": {"backgroundColor": "rgba(43,36,40,.26)", "plotColorPalette": "#f08bad,#d06b92,#b9577f,#8f4567"},
+            "clusterBkg": "rgba(53,29,43,.38)",
             "clusterBorder": "#d06b92",
             "edgeLabelBackground": "#2b2428",
             "actorBkg": "#4a2639",
@@ -474,7 +474,7 @@ def _mermaid_theme(dark_mode: bool) -> dict[str, object]:
             "fontFamily": "-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif",
         }
     return {
-        "background": "rgba(255,234,252,.68)",
+        "background": "rgba(255,234,252,.42)",
         "primaryColor": "#fff0f7",
         "primaryTextColor": "#4a3340",
         "primaryBorderColor": "#d4456a",
@@ -486,12 +486,12 @@ def _mermaid_theme(dark_mode: bool) -> dict[str, object]:
         "noteBkgColor": "#ffe0ec",
         "noteTextColor": "#4a3340",
         "textColor": "#4a3340",
-        "mainBkg": "rgba(255,240,247,.68)",
-        "rectBkgColor": "rgba(255,224,236,.62)",
-        "sectionBkgColor": "rgba(255,208,225,.52)",
+        "mainBkg": "rgba(255,240,247,.42)",
+        "rectBkgColor": "rgba(255,224,236,.38)",
+        "sectionBkgColor": "rgba(255,208,225,.34)",
         "altSectionBkgColor": "rgba(255,234,252,.36)",
-        "sectionBkgColor2": "rgba(255,240,247,.52)",
-        "excludeBkgColor": "rgba(249,216,229,.52)",
+        "sectionBkgColor2": "rgba(255,240,247,.34)",
+        "excludeBkgColor": "rgba(249,216,229,.34)",
         "secondaryBorderColor": "#ef9fbd",
         "tertiaryBorderColor": "#d8759b",
         "radius": "14",
@@ -526,7 +526,7 @@ def _mermaid_theme(dark_mode: bool) -> dict[str, object]:
         "pieOuterStrokeColor": "#d4456a",
         "pieOpacity": "1",
         "xyChart": {"backgroundColor": "rgba(255,234,252,.36)", "plotColorPalette": "#d4456a,#c23d68,#b9577f,#8f4567"},
-        "clusterBkg": "rgba(255,224,236,.62)",
+        "clusterBkg": "rgba(255,224,236,.38)",
         "clusterBorder": "#ef9fbd",
         "edgeLabelBackground": "#ffeafc",
         "actorBkg": "#fff0f7",
@@ -692,8 +692,8 @@ async def _markdown_to_html(md_text: str) -> str:
         + _CODE_WRAP_CSS
         + (
             ".markdown-body .highlight pre,.markdown-body .codehilite pre,.markdown-body pre{"
-            f"background-color:{'rgba(31,23,29,.62)' if dark_mode else 'rgba(255,255,255,.38)'}!important;"
-            f"border-color:{'rgba(208,107,146,.72)' if dark_mode else 'rgba(239,159,189,.72)'}!important;"
+            f"background-color:{'rgba(31,23,29,.28)' if dark_mode else 'rgba(255,255,255,.22)'}!important;"
+            f"border-color:{'rgba(208,107,146,.38)' if dark_mode else 'rgba(239,159,189,.38)'}!important;"
             "}"
         )
         + (_DARK_MODE_CSS if dark_mode else "") +

@@ -23,7 +23,7 @@
 
 # Mermaid 视觉回归
 
-修改 MD2IMG 的 Mermaid 样式时，必须使用 `examples/md2img-mermaid-demo.py` 重新生成浅色和深色截图，并检查 10 种代表性图表均成功生成 SVG、容器宽度未超出视口、圆角与 Markdown 卡片一致且底部猫爪纹理能透过半透明图表表面可见。截图只通过现有无头浏览器链路生成，不得引入桌面 GUI 自动化。
+修改 MD2IMG 的 Mermaid 样式时，必须使用 `examples/md2img-mermaid-demo.py` 重新生成浅色和深色截图，并检查 10 种代表性图表均成功生成 SVG、容器宽度未超出视口、圆角与 Markdown 卡片一致且底部猫爪纹理能清晰透过低不透明度图表表面可见。截图只通过现有无头浏览器链路生成，不得引入桌面 GUI 自动化。
 
 # 项目专业术语
 
