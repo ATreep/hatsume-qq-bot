@@ -14,6 +14,11 @@ DEMO = r'''# Mermaid 图表主题效果
 
 下面展示同一张 Markdown 卡片中多种 Mermaid 图表的主题效果。
 
+```python
+# 代码块也使用半透明表面，让底部猫爪纹理透出
+render(theme="pink")
+```
+
 ## 流程与交互
 
 ```mermaid

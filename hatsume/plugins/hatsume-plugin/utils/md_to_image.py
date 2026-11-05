@@ -406,7 +406,7 @@ def _mermaid_theme(dark_mode: bool) -> dict[str, object]:
     """Return Mermaid base-theme variables matching the Markdown palette."""
     if dark_mode:
         return {
-            "background": "#2b2428",
+            "background": "rgba(43,36,40,.78)",
             "primaryColor": "#4a2639",
             "primaryTextColor": "#fff0f6",
             "primaryBorderColor": "#f08bad",
@@ -418,12 +418,12 @@ def _mermaid_theme(dark_mode: bool) -> dict[str, object]:
             "noteBkgColor": "#5c2d45",
             "noteTextColor": "#f7eaf0",
             "textColor": "#f7eaf0",
-            "mainBkg": "#4a2639",
-            "rectBkgColor": "#5c2d45",
-            "sectionBkgColor": "#351d2b",
-            "altSectionBkgColor": "#2b2428",
-            "sectionBkgColor2": "#4a2639",
-            "excludeBkgColor": "#3a2833",
+            "mainBkg": "rgba(74,38,57,.78)",
+            "rectBkgColor": "rgba(92,45,69,.72)",
+            "sectionBkgColor": "rgba(53,29,43,.62)",
+            "altSectionBkgColor": "rgba(43,36,40,.42)",
+            "sectionBkgColor2": "rgba(74,38,57,.62)",
+            "excludeBkgColor": "rgba(58,40,51,.62)",
             "secondaryBorderColor": "#d06b92",
             "tertiaryBorderColor": "#b9577f",
             "radius": "14",
@@ -457,8 +457,8 @@ def _mermaid_theme(dark_mode: bool) -> dict[str, object]:
             "pieStrokeColor": "#2b2428",
             "pieOuterStrokeColor": "#f08bad",
             "pieOpacity": "1",
-            "xyChart": {"backgroundColor": "#2b2428", "plotColorPalette": "#f08bad,#d06b92,#b9577f,#8f4567"},
-            "clusterBkg": "#351d2b",
+            "xyChart": {"backgroundColor": "rgba(43,36,40,.42)", "plotColorPalette": "#f08bad,#d06b92,#b9577f,#8f4567"},
+            "clusterBkg": "rgba(53,29,43,.62)",
             "clusterBorder": "#d06b92",
             "edgeLabelBackground": "#2b2428",
             "actorBkg": "#4a2639",
@@ -474,7 +474,7 @@ def _mermaid_theme(dark_mode: bool) -> dict[str, object]:
             "fontFamily": "-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif",
         }
     return {
-        "background": "#ffeafc",
+        "background": "rgba(255,234,252,.68)",
         "primaryColor": "#fff0f7",
         "primaryTextColor": "#4a3340",
         "primaryBorderColor": "#d4456a",
@@ -486,12 +486,12 @@ def _mermaid_theme(dark_mode: bool) -> dict[str, object]:
         "noteBkgColor": "#ffe0ec",
         "noteTextColor": "#4a3340",
         "textColor": "#4a3340",
-        "mainBkg": "#fff0f7",
-        "rectBkgColor": "#ffe0ec",
-        "sectionBkgColor": "#ffd0e1",
-        "altSectionBkgColor": "#ffeafc",
-        "sectionBkgColor2": "#fff0f7",
-        "excludeBkgColor": "#f9d8e5",
+        "mainBkg": "rgba(255,240,247,.68)",
+        "rectBkgColor": "rgba(255,224,236,.62)",
+        "sectionBkgColor": "rgba(255,208,225,.52)",
+        "altSectionBkgColor": "rgba(255,234,252,.36)",
+        "sectionBkgColor2": "rgba(255,240,247,.52)",
+        "excludeBkgColor": "rgba(249,216,229,.52)",
         "secondaryBorderColor": "#ef9fbd",
         "tertiaryBorderColor": "#d8759b",
         "radius": "14",
@@ -525,8 +525,8 @@ def _mermaid_theme(dark_mode: bool) -> dict[str, object]:
         "pieStrokeColor": "#4a3340",
         "pieOuterStrokeColor": "#d4456a",
         "pieOpacity": "1",
-        "xyChart": {"backgroundColor": "#ffeafc", "plotColorPalette": "#d4456a,#c23d68,#b9577f,#8f4567"},
-        "clusterBkg": "#ffe0ec",
+        "xyChart": {"backgroundColor": "rgba(255,234,252,.36)", "plotColorPalette": "#d4456a,#c23d68,#b9577f,#8f4567"},
+        "clusterBkg": "rgba(255,224,236,.62)",
         "clusterBorder": "#ef9fbd",
         "edgeLabelBackground": "#ffeafc",
         "actorBkg": "#fff0f7",
@@ -690,6 +690,12 @@ async def _markdown_to_html(md_text: str) -> str:
         "radial-gradient(circle at 45px 23px,rgba(244,170,194,.065) 0 3px,transparent 3.5px),"
         "radial-gradient(circle at 54px 29px,rgba(244,170,194,.065) 0 3px,transparent 3.5px)}}"
         + _CODE_WRAP_CSS
+        + (
+            ".markdown-body .highlight pre,.markdown-body .codehilite pre,.markdown-body pre{"
+            f"background-color:{'rgba(31,23,29,.62)' if dark_mode else 'rgba(255,255,255,.38)'}!important;"
+            f"border-color:{'rgba(208,107,146,.72)' if dark_mode else 'rgba(239,159,189,.72)'}!important;"
+            "}"
+        )
         + (_DARK_MODE_CSS if dark_mode else "") +
         "</style>"
         "</head>"

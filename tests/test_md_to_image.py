@@ -108,11 +108,11 @@ def test_mermaid_theme_has_light_and_dark_palettes(md_module):
     assert light["noteBkgColor"] == "#ffe0ec"
     assert light["pie1"] == "#d4456a"
     assert light["xyChart"]["plotColorPalette"].startswith("#d4456a")
-    assert dark["background"] == "#2b2428"
+    assert dark["background"] == "rgba(43,36,40,.78)"
     assert dark["pie1"] == "#f08bad"
-    assert dark["sectionBkgColor"] == "#351d2b"
-    assert dark["altSectionBkgColor"] == "#2b2428"
-    assert dark["xyChart"]["backgroundColor"] == "#2b2428"
+    assert dark["sectionBkgColor"] == "rgba(53,29,43,.62)"
+    assert dark["altSectionBkgColor"] == "rgba(43,36,40,.42)"
+    assert dark["xyChart"]["backgroundColor"] == "rgba(43,36,40,.42)"
 
 
 def test_markdown_to_html_contains_mermaid_contract(md_module, monkeypatch):
@@ -137,4 +137,7 @@ def test_markdown_to_html_contains_mermaid_contract(md_module, monkeypatch):
     assert "开始" in page
     assert "window.__hatsume_mermaid_ready" in page
     assert "<script>window.mermaid={};</script>" in page
+
+    code_page = asyncio.run(md_module._markdown_to_html("```python\\nprint('paw')\\n```"))
+    assert "background-color:rgba(255,255,255,.38)!important" in code_page
 
