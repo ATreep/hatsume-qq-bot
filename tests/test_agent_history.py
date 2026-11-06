@@ -45,9 +45,13 @@ class AgentHistoryTests(unittest.IsolatedAsyncioTestCase):
             yield
         async def resolve(*_args):
             return None
+        event_spec = importlib.util.spec_from_file_location('history_runtime_events', ROOT / 'runtime_events.py')
+        event_module = importlib.util.module_from_spec(event_spec)
+        sys.modules[event_spec.name] = event_module
+        event_spec.loader.exec_module(event_module)
         self.ns = {'__package__': self.package, 'Any': Any, 'Annotated': Annotated,
                    'Field': Field, 'asyncio': asyncio, 'json': json,
-                   '_langchain_tool': langchain_tool,
+                   '_langchain_tool': langchain_tool, 'remember_tool_origin': event_module.remember_tool_origin,
                    'get_current_group_runtime': lambda: self.runtime,
                    'bind_group_runtime': bind_runtime,
                    '_resolve_notified_user_name': resolve,

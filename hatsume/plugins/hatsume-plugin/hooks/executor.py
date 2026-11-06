@@ -360,13 +360,23 @@ async def execute_hook(
 
                     inject_fn = resolved_inject
                 try:
-                    _heartbeat_log(f"inject {context} event_bytes={stdout_bytes}")
+                    _heartbeat_log(
+                        f"inject {context} trigger_type=heartbeat run_at={run_at} "
+                        f"event_bytes={stdout_bytes}"
+                    )
                     inject_fn(
                         group_id=group_id,
                         hook_name=hook_name,
                         prompt=str(record["prompt"]),
                         event_text=result.stdout,
                         notified_user_ids=record.get("notified_user_ids"),
+                        event_key=f"hook:{group_id}:{hook_id}:heartbeat:{run_at}",
+                        event_data={
+                            "hook_id": int(hook_id),
+                            "trigger_type": HOOK_TRIGGER_HEARTBEAT,
+                            "run_at": run_at,
+                            "fired_at": run_at,
+                        },
                     )
                 except Exception as exc:  # noqa: BLE001 - callback boundary
                     error = _redacted_error(f"Hook injection failed: {exc}")

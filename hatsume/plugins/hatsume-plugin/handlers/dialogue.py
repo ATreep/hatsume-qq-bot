@@ -33,6 +33,7 @@ from ..config import (
 )
 from ..memory import is_group_activated
 from ..graph.builder import graph
+from ..runtime_events import RuntimeEvent, enqueue_runtime_event
 from ..group_runtime import (
     GroupRuntime,
     bind_group_runtime,
@@ -42,7 +43,6 @@ from ..infra import find_sandbox_user_image, save_sandbox_user_image
 from ..graph.nodes import (
     append_auxiliary_message_async,
     get_role_sys_prompt,
-    make_system_trigger_message,
     set_current_query_user_id,
 )
 from ..utils import (
@@ -622,35 +622,32 @@ async def get_human_message(
 def _start_conv_for_trigger(
     user_id: int,
     group_id: int,
-    notify_msg: str,
+    event: RuntimeEvent,
     *,
-    trigger_type: str = "agent",
     bot: Bot | None = None,
 ) -> None:
-    """Start a new conversation for an external trigger when not currently chatting.
-
-    Uses bot.send_group_msg() to target the specific group directly.
-    trigger_type: "agent", "timer", "hook", or "sandbox_channel" — controls user_id=None
-    behavior. Agent and Hook triggers use user_id=None when user_id==0 (no
-    specific user to notify). Timer triggers always pass the effective user_id.
-    """
+    """Start or queue a typed event without losing its identity or source."""
     from ..graph.tools import configure_tool_callbacks as configure_tools
+    if not isinstance(event, RuntimeEvent) or event.group_id != group_id:
+        raise ValueError("A typed runtime event for this group is required")
+    trigger_type = event.event_type
 
     runtime = (
         group_runtime_registry.bind_bot(group_id, bot)
         if bot is not None
         else group_runtime_registry.get_or_create(group_id)
     )
+    if runtime.stopping:
+        enqueue_runtime_event(runtime.conversation, event)
+        print(f"[runtime-event] retained during shutdown group={group_id}", flush=True)
+        return
     try:
         target_bot = bot if bot is not None else group_runtime_registry.get_bot(group_id)
     except LookupError:
         # Agent/timer completions can race with a Bot disconnect. Keep the
         # trigger queued so the next normal message can deliver it after the
         # route is restored, but never let a fire-and-forget task fail.
-        queued_message = make_system_trigger_message(notify_msg, trigger_type)
-        state = runtime.conversation
-        if queued_message not in state.human_queue:
-            state.human_queue.append(queued_message)
+        enqueue_runtime_event(runtime.conversation, event)
         print(
             f"⚠️ [_start_conv_for_trigger] No connected bot for group={group_id}; "
             f"queued trigger={trigger_type} for later delivery"
@@ -686,8 +683,7 @@ def _start_conv_for_trigger(
                 _send_to_group,
                 configure_tools,
                 user_id=effective_user_id,
-                system_task_text=notify_msg,
-                system_trigger_type=trigger_type,
+                runtime_event=event,
             )
 
     asyncio.create_task(_run())
@@ -696,14 +692,14 @@ def _start_conv_for_trigger(
 # Register the callback with tools.py (must happen after imports resolve)
 from ..graph.tools import configure_agent_notification_callback  # noqa: E402
 configure_agent_notification_callback(
-    lambda uid, gid, msg: _start_conv_for_trigger(uid, gid, msg, trigger_type="agent")
+    lambda uid, gid, event: _start_conv_for_trigger(uid, gid, event)
 )
 
 # Register timer callback with executor (mirrors agent notification registration above)
 try:
     from ..timer.executor import set_timer_conv_callback
     set_timer_conv_callback(
-        lambda uid, gid, msg: _start_conv_for_trigger(uid, gid, msg, trigger_type="timer")
+        lambda uid, gid, event: _start_conv_for_trigger(uid, gid, event)
     )
 except ImportError:
     pass  # Graceful degradation when timer executor deps aren't available
@@ -744,19 +740,15 @@ async def handle_group_increase(
     conversation_exists = conv_state.is_chatting or conv_state.is_graph_running
     conv_state.activate_chat(event.get_session_id())
 
-    if conversation_exists:
-        conv_state.human_queue.append(
-            make_system_trigger_message(prompt, "group_increase")
-        )
-        return
-
-    _start_conv_for_trigger(
-        event.user_id,
-        event.group_id,
-        prompt,
-        trigger_type="group_increase",
-        bot=bot,
+    runtime_event = RuntimeEvent(
+        event_type="group_increase", source="group_increase", group_id=event.group_id, text=prompt,
+        payload={"user_id": event.user_id, "member_name": member_name, "avatar_url": get_qq_avatar_url(event.user_id)},
+        notified_user_ids=(event.user_id,),
     )
+    if conversation_exists:
+        enqueue_runtime_event(conv_state, runtime_event)
+        return
+    _start_conv_for_trigger(event.user_id, event.group_id, runtime_event, bot=bot)
 
 
 # ---------------------------------------------------------------------------
@@ -770,8 +762,7 @@ async def start_new_conversation(
     user_id: int | None = None,
     messages: list[dict] | None = None,
     sources: list[dict] | None = None,
-    system_task_text: str | None = None,
-    system_trigger_type: str = "system_task",
+    runtime_event: RuntimeEvent | None = None,
     flush_idle: bool = False,
 ) -> None:
     """Set up and invoke the LangGraph conversation from scratch."""
@@ -780,6 +771,10 @@ async def start_new_conversation(
     conv_state = runtime.conversation
     with bind_group_runtime(runtime):
         async with runtime.graph_start_lock:
+            if runtime.stopping:
+                if runtime_event is not None:
+                    enqueue_runtime_event(conv_state, runtime_event)
+                return
             conv_state.end_requested = False
 
             configure_tools_fn(
@@ -798,10 +793,8 @@ async def start_new_conversation(
                 conv_state.human_queue.extend(messages)
                 conv_state.human_source_queue.extend(sources or [])
 
-            if system_task_text is not None:
-                conv_state.human_queue.append(
-                    make_system_trigger_message(system_task_text, system_trigger_type)
-                )
+            if runtime_event is not None:
+                enqueue_runtime_event(conv_state, runtime_event)
 
             existing_task = conv_state._graph_task
             if isinstance(existing_task, asyncio.Task) and not existing_task.done():
@@ -823,8 +816,10 @@ async def start_new_conversation(
             graph_task = asyncio.create_task(_invoke_graph())
             conv_state._graph_task = graph_task
 
+        completed_normally = False
         try:
             await graph_task
+            completed_normally = True
         except asyncio.CancelledError:
             print(f"🛑 [graph:{runtime.group_id}] Conversation cancelled")
         finally:
@@ -838,6 +833,12 @@ async def start_new_conversation(
                         await get_mcp_manager().close_conversation(runtime.group_id)
                     except Exception as exc:
                         print(f"⚠️ [mcp] Conversation cleanup failed: {exc}")
+                    if completed_normally and not runtime.stopping:
+                        pending_event = next((item for item in conv_state.human_queue if isinstance(item, RuntimeEvent)), None)
+                        if pending_event is not None:
+                            target_user = next(iter(pending_event.notified_user_ids), 0)
+                            _start_conv_for_trigger(target_user, runtime.group_id, pending_event)
+
 
 
 # ---------------------------------------------------------------------------
@@ -1130,6 +1131,7 @@ async def _dispatch_message_hooks(bot: Bot, event: GroupMessageEvent) -> None:
             user_id=event.user_id,
             text=text,
             resolve_user_name=resolve_user_name,
+            message_id=event.message_id,
         )
     except Exception as exc:  # noqa: BLE001 - Hook failures must not break chat
         print(f"❌ Message Hook dispatch failed: {exc}")

@@ -27,9 +27,10 @@ number as `group_id` when sending a Sandbox Channel message back to the task's g
 also identifies the socket and the global `sandbox-channel-guide` skill.
 
 The receiver selects the group runtime using `channel_message.group_id`. If that group's
-conversation is running, it queues the message with the internal
-`_hatsume_system_trigger="sandbox_channel"` marker; otherwise it triggers a new
-conversation for that group. Use a group configured for the bot to serve.
+conversation is running, it queues a typed `RuntimeEvent`; otherwise it triggers a new
+conversation for that group using the same event envelope. The model receives a runtime-authored
+`receive_event__injected` assistant tool call followed by its matching tool result, never a human
+message. Sender metadata and the source record remain in the payload on both paths. Use a group configured for the bot to serve.
 
 ## Socket protocol
 

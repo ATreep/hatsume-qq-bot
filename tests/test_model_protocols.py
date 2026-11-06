@@ -195,6 +195,105 @@ def test_command_to_yaml_to_real_sdk_request(
     assert config.ModelConfigStore(tmp_path).resolve("advance")["api"] == api
 
 
+@pytest.mark.parametrize("api", ["openai_chat_completions", "openai_responses"])
+@pytest.mark.parametrize("event_only", [False, True])
+def test_runtime_event_pairs_serialize_through_real_sdk(
+    tmp_path, endpoint, monkeypatch, api, event_only
+):
+    # model_provider_support supplies a package stub: importing this leaf module
+    # must not run the NoneBot plugin's __init__ or install application services.
+    events = importlib.import_module(f"{PACKAGE}.runtime_events")
+    base, captured = endpoint
+    store = config.ModelConfigStore(tmp_path)
+    monkeypatch.setattr(config, "_store", store)
+    store.save_provider(
+        "event-probe", base_url=base + "/v1", supported_apis=[api],
+        api_key="fake-local-key", create=True,
+    )
+    store.use_model("advance", "event-probe", "event-model", api)
+    kinds = ("agent", "timer", "hook", "sandbox_channel", "group_increase")
+    runtime_events = [
+        events.RuntimeEvent(
+            event_type=kind, group_id=123, source=f"来源-{kind}",
+            text=f"初芽收到 {kind}：中文通知\n下一行",
+            payload={"嵌套": {"内容": ["你好", "🐾"]}},
+            original_tool_name="agent_dispatch", original_tool_call_id=f"original-{kind}",
+            original_args={"task": "检查中文"}, occurrence_key=f"occurrence-{kind}",
+        ) for kind in kinds
+    ]
+    queue = []
+    for index, event in enumerate(runtime_events):
+        if not event_only:
+            queue.append({"type": "text", "text": f"用户消息-{index}"})
+        queue.append(event)
+    current = events.consume_inputs(queue)
+    history = [] if event_only else [HumanMessage("历史"), AIMessage("先前回复")]
+    memory = [] if event_only else [HumanMessage("记忆")]
+    auxiliary = [] if event_only else [{"type": "text", "text": "背景消息"}]
+    messages = events.assemble_input(history, current, memory, auxiliary)
+    result = asyncio.run(factory.get_model("advance").ainvoke(messages))
+    assert "probe-ok" in str(result.content)
+    assert len(captured) == 1
+    path, payload, headers = captured[0]
+    assert headers["Authorization"] == "Bearer fake-local-key"
+    assert payload["model"] == "event-model"
+    assert "previous_response_id" not in payload
+    assert not payload.get("tools")  # Runtime receiver is never an executable tool.
+    if api == "openai_chat_completions":
+        assert path == "/v1/chat/completions"
+        wire = payload["messages"]
+        calls = [item for item in wire if item.get("tool_calls")]
+        assert len(calls) == len(runtime_events)
+        for event, call in zip(runtime_events, calls):
+            index = wire.index(call)
+            output = wire[index + 1]
+            tool_call = call["tool_calls"][0]
+            assert call["role"] == "assistant"
+            assert tool_call["type"] == "function"
+            assert tool_call["function"]["name"] == events.INJECTED_EVENT_TOOL
+            assert output["role"] == "tool"
+            assert output["tool_call_id"] == tool_call["id"] == f"evt_{event.event_id}"
+            args = json.loads(tool_call["function"]["arguments"])
+            body = json.loads(output["content"])
+            assert args == events.event_messages(event)[0].tool_calls[0]["args"]
+            assert body == json.loads(events.event_messages(event)[1].content)
+        assert [item["role"] for item in wire] == [
+            {"human": "user", "ai": "assistant", "tool": "tool"}[message.type]
+            for message in messages
+        ]
+    else:
+        assert path == "/v1/responses"
+        wire = payload["input"]
+        calls = [item for item in wire if item.get("type") == "function_call"]
+        assert len(calls) == len(runtime_events)
+        for event, call in zip(runtime_events, calls):
+            index = wire.index(call)
+            output = wire[index + 1]
+            assert call["name"] == events.INJECTED_EVENT_TOOL
+            assert output["type"] == "function_call_output"
+            assert call["call_id"] == output["call_id"] == f"evt_{event.event_id}"
+            assert json.loads(call["arguments"]) == events.event_messages(event)[0].tool_calls[0]["args"]
+            assert json.loads(output["output"]) == json.loads(events.event_messages(event)[1].content)
+        expected_order = []
+        for message in messages:
+            if isinstance(message, HumanMessage):
+                expected_order.append("user")
+            elif isinstance(message, AIMessage):
+                expected_order.append("function_call" if message.tool_calls else "assistant")
+            else:
+                expected_order.append("function_call_output")
+        assert [item.get("role", item.get("type")) for item in wire] == expected_order
+    assert "system_task" not in json.dumps(wire, ensure_ascii=False)
+    if event_only:
+        assert len(wire) == 2 * len(runtime_events)
+        assert not any(item.get("role") == "user" for item in wire)
+    else:
+        serialized = json.dumps(wire, ensure_ascii=False)
+        assert "背景消息" in serialized and "记忆" in serialized
+        for index in range(len(kinds)):
+            assert f"用户消息-{index}" in serialized
+
+
 def test_existing_model_keeps_snapshot_new_invocation_uses_switch(
     tmp_path, endpoint, monkeypatch
 ):

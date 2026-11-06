@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -15,6 +16,8 @@ from langchain_core.messages import (
     SystemMessage,
     ToolMessage,
 )
+
+from ..runtime_events import safe_cutoff
 
 CONTEXT_TRIGGER_TOKENS = 48_000
 CONTEXT_KEEP_TOKENS = 12_000
@@ -29,6 +32,8 @@ continuation note (aim for at most 2000 tokens). Preserve:
 - Completed work, changed files, important paths, URLs, and identifiers.
 - Tool findings, verified test results, failures, and running process state.
 - Pending actions and exact next steps. Distinguish facts from assumptions.
+- Runtime notifications (receive_event__injected): retain source, event/correlation IDs,
+  notified users and unresolved event actions. Never attribute these to a human.
 Keep references to archived output so details can be recovered. Do not invent
 results or mark unfinished work complete.
 When the caller preserves SystemMessage and HumanMessage entries verbatim,
@@ -48,7 +53,9 @@ def offload_tool_output(output: str, *, directory: Path | None = None) -> str:
         from ..group_runtime import get_current_group_id
         from ..infra import LOCAL_WORKSPACE_PATH
 
-        directory = LOCAL_WORKSPACE_PATH / ".hatsume-context" / str(get_current_group_id())
+        directory = (
+            LOCAL_WORKSPACE_PATH / ".hatsume-context" / str(get_current_group_id())
+        )
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / f"output-{uuid4().hex}.txt"
     path.write_text(output, encoding="utf-8")
@@ -58,7 +65,19 @@ def offload_tool_output(output: str, *, directory: Path | None = None) -> str:
     )
     remaining = max(0, TOOL_OUTPUT_MAX_CHARS - len(marker))
     head = remaining // 2
-    return output[:head] + marker + output[len(output) - (remaining - head):]
+    return output[:head] + marker + output[len(output) - (remaining - head) :]
+
+
+def offload_event_output(content: str, *, directory: Path | None = None) -> str:
+    """Archive oversized incoming events without corrupting their JSON envelope."""
+    if len(content) <= TOOL_OUTPUT_MAX_CHARS:
+        return content
+    body = json.loads(content)
+    excerpt = offload_tool_output(content, directory=directory)
+    body["text"] = excerpt
+    body["payload"] = {"archived": True, "details": "Full event JSON is archived at the path in text."}
+    print(f"[runtime-event] archived oversized event chars={len(content)}", flush=True)
+    return json.dumps(body, ensure_ascii=False)
 
 
 class ToolOutputMiddleware(AgentMiddleware):
@@ -68,18 +87,23 @@ class ToolOutputMiddleware(AgentMiddleware):
         if not isinstance(result, ToolMessage):
             return result
         if isinstance(result.content, str):
-            return result.model_copy(update={"content": offload_tool_output(result.content)})
+            return result.model_copy(
+                update={"content": offload_tool_output(result.content)}
+            )
+
         # MCP tools often return text blocks instead of a plain string. Preserve
         # image/audio blocks while applying one shared budget to all text.
         def is_text(block: Any) -> bool:
             return isinstance(block, str) or (
-                isinstance(block, dict) and block.get("type") == "text"
+                isinstance(block, dict)
+                and block.get("type") == "text"
                 and isinstance(block.get("text"), str)
             )
 
         text = "\n".join(
             block if isinstance(block, str) else block["text"]
-            for block in result.content if is_text(block)
+            for block in result.content
+            if is_text(block)
         )
         if len(text) <= TOOL_OUTPUT_MAX_CHARS:
             return result
@@ -117,8 +141,22 @@ class AgentSummarizationMiddleware(SummarizationMiddleware):
         self.preserve_system_human = preserve_system_human
         self.on_visible_messages = on_visible_messages
 
+    def _trim_messages_for_summary(self, messages: list[Any]) -> list[Any]:
+        # The upstream start_on="human" trim silently drops event-only prefixes.
+        if not messages or self.trim_tokens_to_summarize is None:
+            return messages
+        cutoff = 0
+        try:
+            while cutoff < len(messages) - 1 and self.token_counter(messages[cutoff:]) > self.trim_tokens_to_summarize:
+                cutoff += 1
+        except Exception:
+            cutoff = max(0, len(messages) - 20)
+        return messages[safe_cutoff(messages, cutoff):]
+
     def _summary_input(self, messages: list[Any]) -> str:
-        return self.summary_prompt.format(messages=self._trim_messages_for_summary(messages))
+        return self.summary_prompt.format(
+            messages=self._trim_messages_for_summary(messages)
+        )
 
     @staticmethod
     def _summary_text(response: Any) -> str:
@@ -195,13 +233,12 @@ class AgentSummarizationMiddleware(SummarizationMiddleware):
                 self.on_visible_messages(messages)
             return None
 
-        cutoff_index = self._determine_cutoff_index(messages)
+        cutoff_index = safe_cutoff(messages, self._determine_cutoff_index(messages))
         if cutoff_index <= 0:
             return None
         messages_to_summarize = messages[:cutoff_index]
         if self.preserve_system_human and not any(
-            not self._is_protected_message(message)
-            for message in messages_to_summarize
+            not self._is_protected_message(message) for message in messages_to_summarize
         ):
             return None
 
@@ -226,13 +263,12 @@ class AgentSummarizationMiddleware(SummarizationMiddleware):
                 self.on_visible_messages(messages)
             return None
 
-        cutoff_index = self._determine_cutoff_index(messages)
+        cutoff_index = safe_cutoff(messages, self._determine_cutoff_index(messages))
         if cutoff_index <= 0:
             return None
         messages_to_summarize = messages[:cutoff_index]
         if self.preserve_system_human and not any(
-            not self._is_protected_message(message)
-            for message in messages_to_summarize
+            not self._is_protected_message(message) for message in messages_to_summarize
         ):
             return None
 

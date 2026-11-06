@@ -27,6 +27,7 @@ class GroupRuntime:
     group_id: int
     conversation: ConversationState = field(init=False)
     bot: Any = None
+    stopping: bool = False
     graph_start_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     # OneBot message sends must be serialized per group. LangGraph's ToolNode
     # executes multiple tool calls in one model turn concurrently, while some
@@ -38,6 +39,7 @@ class GroupRuntime:
     auxiliary_source_queue: list[dict] = field(default_factory=list)
     last_was_auxiliary_only: bool = False
     last_was_system_trigger: bool = False
+    current_input_messages: list[Any] = field(default_factory=list)
 
     send_text_count: int = 0
     send_image_count: int = 0
@@ -123,6 +125,7 @@ class GroupRuntimeRegistry:
     """Own the stable process-local runtime for every observed QQ group."""
 
     def __init__(self) -> None:
+        self._stopping = False
         self._runtimes: dict[int, GroupRuntime] = {}
         self._group_bots: dict[int, Any] = {}
 
@@ -130,7 +133,7 @@ class GroupRuntimeRegistry:
         normalized = validate_group_id(group_id)
         runtime = self._runtimes.get(normalized)
         if runtime is None:
-            runtime = GroupRuntime(normalized)
+            runtime = GroupRuntime(normalized, stopping=self._stopping)
             runtime.bot = self._group_bots.get(normalized)
             self._runtimes[normalized] = runtime
         return runtime
@@ -209,6 +212,9 @@ class GroupRuntimeRegistry:
         return tuple(self._runtimes.values())
 
     async def shutdown(self) -> None:
+        self._stopping = True
+        for runtime in self.values():
+            runtime.stopping = True
         graph_tasks: list[asyncio.Task[Any]] = []
         for runtime in self.values():
             state = runtime.conversation
@@ -257,6 +263,7 @@ class GroupRuntimeRegistry:
 
     def clear_for_tests(self) -> None:
         """Drop registry entries after tests have cleaned their tasks."""
+        self._stopping = False
         self._runtimes.clear()
         self._group_bots.clear()
         set_current_group_runtime(None)

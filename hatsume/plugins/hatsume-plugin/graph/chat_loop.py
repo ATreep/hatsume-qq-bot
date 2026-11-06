@@ -6,13 +6,21 @@ from uuid import uuid4
 
 from langchain.agents.middleware import AgentMiddleware
 from langchain.messages import HumanMessage, ToolMessage
+from ..runtime_events import (
+    INJECTED_EVENT_TOOL,
+    is_event_message,
+    bind_tool_origin,
+    reset_tool_origin,
+)
 
 CHAT_LOOP_DELEGATION_ROUNDS = 7
 CHAT_LOOP_DELEGATION_MESSAGE = (
     "[SYSTEM] 你不应该调用太多次工具，请你立即将当前任务分发给 Agent，"
     "然后使用 send_text 工具向用户说明情况。"
 )
-SEND_TEXT_FIRST_WARNING = "You must call send_text first before calling any other tools."
+SEND_TEXT_FIRST_WARNING = (
+    "You must call send_text first before calling any other tools."
+)
 
 
 class SendTextFirstMiddleware(AgentMiddleware):
@@ -34,12 +42,21 @@ class SendTextFirstMiddleware(AgentMiddleware):
         return ToolMessage(
             content=SEND_TEXT_FIRST_WARNING,
             tool_call_id=str(tool_call_id),
-            name=str(tool_call.get("name", "")) if isinstance(tool_call, dict) else None,
+            name=str(tool_call.get("name", ""))
+            if isinstance(tool_call, dict)
+            else None,
             status="error",
         )
 
     async def awrap_tool_call(self, request: Any, handler: Any) -> Any:
         tool_name = self._tool_name(request)
+        if tool_name == INJECTED_EVENT_TOOL:
+            return ToolMessage(
+                content="Runtime-only event receiver; model invocation is forbidden.",
+                tool_call_id=str(request.tool_call.get("id", "")),
+                name=tool_name,
+                status="error",
+            )
         async with self._lock:
             if not self._send_text_started:
                 if tool_name != "send_text":
@@ -53,10 +70,21 @@ class SendTextFirstMiddleware(AgentMiddleware):
                 # even if send_text later returns a validation or send error.
                 self._send_text_started = True
                 print("[初芽] first tool call accepted: send_text", flush=True)
-        return await handler(request)
+        token = bind_tool_origin(request.tool_call)
+        try:
+            return await handler(request)
+        finally:
+            reset_tool_origin(token)
 
     def wrap_tool_call(self, request: Any, handler: Any) -> Any:
         tool_name = self._tool_name(request)
+        if tool_name == INJECTED_EVENT_TOOL:
+            return ToolMessage(
+                content="Runtime-only event receiver; model invocation is forbidden.",
+                tool_call_id=str(request.tool_call.get("id", "")),
+                name=tool_name,
+                status="error",
+            )
         if not self._send_text_started:
             if tool_name != "send_text":
                 print(
@@ -67,7 +95,11 @@ class SendTextFirstMiddleware(AgentMiddleware):
                 return self._blocked_result(request)
             self._send_text_started = True
             print("[初芽] first tool call accepted: send_text", flush=True)
-        return handler(request)
+        token = bind_tool_origin(request.tool_call)
+        try:
+            return handler(request)
+        finally:
+            reset_tool_origin(token)
 
 
 class ChatLoopDelegationMiddleware(AgentMiddleware):
@@ -86,7 +118,7 @@ class ChatLoopDelegationMiddleware(AgentMiddleware):
         if not self._started:
             self._seen_messages.update(
                 message.id or id(message)
-                for message in messages[:self.initial_message_count]
+                for message in messages[: self.initial_message_count]
             )
             self._started = True
         # One AI message can request multiple tools: count rounds, not tools.
@@ -96,16 +128,24 @@ class ChatLoopDelegationMiddleware(AgentMiddleware):
             if key in self._seen_messages:
                 continue
             self._seen_messages.add(key)
-            if message.type == "ai" and getattr(message, "tool_calls", None):
+            if (
+                message.type == "ai"
+                and getattr(message, "tool_calls", None)
+                and not is_event_message(message)
+            ):
                 self._rounds += 1
         print(f"[初芽] completed_tool_rounds={self._rounds}", flush=True)
         if self._rounds < CHAT_LOOP_DELEGATION_ROUNDS or self._reminded:
             return None
         self._reminded = True
-        return {"messages": [HumanMessage(
-            content=CHAT_LOOP_DELEGATION_MESSAGE,
-            id=self.reminder_id,
-        )]}
+        return {
+            "messages": [
+                HumanMessage(
+                    content=CHAT_LOOP_DELEGATION_MESSAGE,
+                    id=self.reminder_id,
+                )
+            ]
+        }
 
     async def abefore_model(self, state: Any, runtime: Any) -> dict[str, Any] | None:
         return self.before_model(state, runtime)

@@ -290,7 +290,7 @@ Agent/Timer 从 handlers/dialogue.py 启动的新对话复用同一直接群发�
 
 - 插件入口用 `is_type(GroupIncreaseNoticeEvent)` 精确匹配 OneBot `group_increase`；仅当群号存在于 memory 层 activated-group RAM 集合且加入者不是 Bot 自身时处理。
 - handler 通过 OneBot 查询新成员群名片，失败时沿用 QQ 号，并用 `get_qq_avatar_url()` 生成头像 URL。系统 Prompt 包含用户名、QQ 号与头像，要求 at 欢迎、简短自我介绍并说明聊天以外的能力。
-- 新成员 session 总会通过 `ConversationState.activate_chat()` 加入 `chat_peers`。已有活跃对话或仍在收尾的图时，Prompt 以 `group_increase` 系统触发标记直接进入 `human_queue`，不启动第二个图；没有对话时复用 `_start_conv_for_trigger()` 启动现有 LangGraph 流程。
+- 新成员 session 总会通过 `ConversationState.activate_chat()` 加入 `chat_peers`。已有活跃对话或仍在收尾的图时，欢迎信息以 `RuntimeEvent(event_type="group_increase")` 直接进入 `human_queue`，不启动第二个图；没有对话时复用 `_start_conv_for_trigger()` 启动现有 LangGraph 流程。
 - 该系统触发标记由 `human_node` 消费并移除，同时让 `ai_node` 跳过 chat_end 判断。欢迎回复继续使用统一的直接群发送、Markdown、at 与重试逻辑。
 
 ## 4. 记忆保存与检索
@@ -503,7 +503,7 @@ configure_tool_callbacks() 在每次新图启动时把发送回调、当前用�
 
 脚本必须带 shebang 且可执行，由 `asyncio.create_subprocess_exec` 在当前容器 `/work` 下直接启动。exit 0 表示无变化；exit 10 且非空 stdout 表示事件；其他退出码、空 exit-10、超过 8 KiB stdout、超时或启动失败只更新失败状态。创建和换脚本设置 `HATSUME_HOOK_VALIDATION=1` 试跑，不注入、不更新运行状态，脚本必须在此模式下不推进游标。Heartbeat Hook 可持久化 `notified_user_ids` QQ 号列表；触发注入时若列表非空，系统提示 Agent @ 相关用户，并根据事件是否一次性或需持续更新决定调用 `delete_hook` 或 `update_hook`。
 
-`inject_hook()` 是独立公开注入函数。活动群图将 `hook` 标记消息追加到本群 human_queue；空闲群用已有 graph-start lock 和 direct-conversation 路径启动新图。注入前会把 `notified_user_ids` 登记到本群 `chat_peers`，内部标记绕过结束检测并在模型输入前移除，不创建 Hook 专属 Agent 或第二张图。
+`inject_hook()` 是独立公开注入函数。活动群图将 `RuntimeEvent(event_type="hook")` 追加到本群 human_queue；空闲群用已有 graph-start lock 和 direct-conversation 路径启动新图。注入前会把 `notified_user_ids` 登记到本群 `chat_peers`，内部标记绕过结束检测并在模型输入前移除，不创建 Hook 专属 Agent 或第二张图。
 
 `hooks/message_trigger.py` 负责消息匹配触发：`user_chat_handle` 在每次收到群消息时先取该群 enabled 的 message_match Hook（机器人自己发送的消息被忽略，避免自触发循环），用消息纯文本（最多扫描 2000 字符）做 `re.search`。命中的 Hook 直接注入，事件正文包含时间、群号、发送者、命中正则、命中片段与消息原文，不运行脚本、不污染其他 Hook；注入成功更新 `last_run_at` 并清零失败计数，注入异常写入 `last_error` 与 `consecutive_failures`，单个 Hook 失败不影响同批其他 Hook，也不影响正常聊天流程。注入成功后把触发者加入本群 `chat_peers`（`activate_chat("group_<群号>_<QQ>")`），该会话立即视为活跃，触发者后续消息继续进入对话；注入失败或没有 Hook 命中时不动会话状态。触发后 Hook 保留，只有 `delete_hook` 才会删除。
 
@@ -874,3 +874,9 @@ data/ 是运行时目录，常见内容包括：
 - hatsume/plugins/hatsume-plugin/virtual/script.sh 等 legacy 运行时脚本；当前前台与后台命令传输均不再读取或写入该文件。
 
 因此公开仓库不能直接启动生产 Bot，但依赖安装、源码修改和离线单元测试不依赖这些私有资产。任何持久化、队列顺序、图边、模块所有权或外部集成变化，都必须同步更新本文档。
+
+## 异步事件消息协议
+
+`runtime_events.py` 是非用户事件的统一边界。Agent（含后台 shell 进度、stdin 请求/重发）、Timer/auto-response、两类 Hook、Sandbox Channel 和群成员加入均以 RuntimeEvent 入队；`human_node` 保留 FIFO 并生成完整 `receive_event__injected` AI tool-call / ToolMessage 交换。普通用户内容仍是 HumanMessage。
+
+`ai_node` 按完整当前输入批次构建上下文，不再假定最后一条是 HumanMessage；回复目标和管理员识别只使用真实用户输入。事件不会进入可执行工具列表或计入工具轮次。通用 system_task 启动接口已移除。队列仍是内存，不提供持久化 outbox；详细字段、去重和恢复边界见 `human-message-queue-injection.md`。

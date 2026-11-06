@@ -239,7 +239,12 @@ def _synchronize_current_auto_response(store: TimerStore, group_id: int) -> None
 
 
 async def _execute_auto_response(
-    task: dict[str, Any], store: TimerStore, *, triggered_at: float
+    task: dict[str, Any],
+    store: TimerStore,
+    *,
+    triggered_at: float,
+    event_data: dict[str, Any],
+    event_key: str,
 ) -> None:
     """Process an auto-response point and immediately schedule its successor."""
     group_id = int(task["group_id"])
@@ -266,11 +271,17 @@ async def _execute_auto_response(
 
         from ..graph.nodes import inject_timer
 
+        print(
+            f"[timer-v2] inject source=auto_response group_id={group_id} "
+            f"event_key={event_key}"
+        )
         inject_timer(
             user_id=0,
             group_id=group_id,
             timer_prompt=task["prompt"],
             start_conversation_cb=_timer_start_conv_cb,
+            event_data=event_data,
+            event_key=event_key,
         )
     finally:
         _synchronize_current_auto_response(store, group_id)
@@ -498,6 +509,18 @@ async def _execute_point(
             task, point, int(point["processed_occurrences"])
         )
 
+    event_data = {
+        "source": "auto_response" if task["task_type"] == "auto_response" else "timer",
+        "task_id": int(task["id"]),
+        "point_id": point_id,
+        "occurrence": scheduled_at,
+        "scheduled_at": scheduled_at,
+        "occurrence_index": int(point["processed_occurrences"]),
+        "task_type": str(task["task_type"]),
+        "schedule_type": str(task["schedule_type"]),
+    }
+    event_key = f"timer:{task['id']}:{point_id}:{scheduled_at}"
+
     if task["task_type"] == "auto_response":
         group_id = int(task["group_id"])
         active, routable = _get_auto_response_state(group_id)
@@ -508,7 +531,13 @@ async def _execute_point(
             cancel_point_job(point_id)
             return
         if store.mark_occurrence_processed(point_id, scheduled_at):
-            await _execute_auto_response(task, store, triggered_at=scheduled_at)
+            await _execute_auto_response(
+                task,
+                store,
+                triggered_at=scheduled_at,
+                event_data=event_data,
+                event_key=event_key,
+            )
         return
 
     user_id = int(task["user_id"])
@@ -532,7 +561,12 @@ async def _execute_point(
 
     try:
         await _inject_timer_to_graph(
-            user_id, group_id, str(task["prompt"]), user_name=user_name
+            user_id,
+            group_id,
+            str(task["prompt"]),
+            user_name=user_name,
+            event_data=event_data,
+            event_key=event_key,
         )
     except Exception:
         print(f"[timer-v2] Timer injection failed for task {task['id']}")
@@ -555,14 +589,20 @@ async def _inject_timer_to_graph(
     group_id: int,
     task_prompt: str,
     user_name: str | None = None,
+    *,
+    event_data: dict[str, Any] | None = None,
+    event_key: str | None = None,
 ) -> None:
     """Inject a normal timer occurrence into the shared conversation graph."""
     from ..graph.nodes import inject_timer
 
+    print(f"[timer-v2] inject source=timer group_id={group_id} event_key={event_key}")
     inject_timer(
         user_id=user_id,
         group_id=group_id,
         timer_prompt=task_prompt,
         start_conversation_cb=_timer_start_conv_cb,
         notified_user_name=user_name,
+        event_data=event_data,
+        event_key=event_key,
     )

@@ -1038,7 +1038,11 @@ Rules:
                     f"以下是命令的输出：\n\n"
                     f"{await asyncio.to_thread(offload_tool_output, full_output)}"
                 )
-                print("Injecting command intermediate output to graph")
+                delivery_id = uuid.uuid4().hex
+                print(
+                    f"[shell-event] inject source=shell_progress agent_id={instance_id} "
+                    f"proc_id={proc_id} delivery_id={delivery_id} elapsed={elapsed}s"
+                )
                 inject_agent_notification(
                     user_id=user_id,
                     group_id=group_id,
@@ -1047,6 +1051,15 @@ Rules:
                     task=task,
                     notified_user_name=notified_user_name,
                     start_conversation_cb=_agent_notification_callback,
+                    agent_id=instance_id,
+                    event_source="shell_progress",
+                    event_key=f"agent:{instance_id}:shell_progress:{delivery_id}",
+                    event_data={
+                        "proc_id": proc_id,
+                        "delivery_id": delivery_id,
+                        "elapsed_seconds": elapsed,
+                        "total_timeout_seconds": total_timeout,
+                    },
                 )
             elif decision.startswith("INPUT_NEEDED:"):
                 # Parse: INPUT_NEEDED:<timeout>:<description>
@@ -1069,7 +1082,7 @@ Rules:
                     agent_state["stdin_seq"] = seq + 1
                     agent_state["stdin_request_id"] = request_id
 
-                # Create queue and notify chat agent
+                # Create queue and notify 初芽
                 queue: asyncio.Queue[str | None] = asyncio.Queue()
                 register_stdin_request(request_id, group_id, queue)
 
@@ -1084,7 +1097,11 @@ Rules:
                     f"关联任务：{task[:300]}\n"
                     f"请使用 respond_to_shell_prompt 工具回复所需信息。"
                 )
-                print(f"BG Shell stdin request: {request_id=} {stdin_description=} {stdin_timeout=}")
+                delivery_id = uuid.uuid4().hex
+                print(
+                    f"[shell-event] inject source=stdin_request agent_id={instance_id} "
+                    f"request_id={request_id} delivery_id={delivery_id} timeout={stdin_timeout}s"
+                )
                 inject_agent_notification(
                     user_id=user_id,
                     group_id=group_id,
@@ -1093,6 +1110,15 @@ Rules:
                     task=task,
                     notified_user_name=notified_user_name,
                     start_conversation_cb=_agent_notification_callback,
+                    agent_id=instance_id,
+                    event_source="stdin_request",
+                    event_key=f"agent:{instance_id}:stdin_request:{delivery_id}",
+                    event_data={
+                        "proc_id": proc_id,
+                        "request_id": request_id,
+                        "delivery_id": delivery_id,
+                        "timeout_seconds": stdin_timeout,
+                    },
                 )
 
                 # Wait for response with timeout
@@ -1161,6 +1187,11 @@ Rules:
                         f"(SYSTEM) Agent 'background_shell' 重新请求输入。\n"
                         f"之前的回复不充分，请重新提供。"
                     )
+                    delivery_id = uuid.uuid4().hex
+                    print(
+                        f"[shell-event] inject source=stdin_reissue agent_id={instance_id} "
+                        f"request_id={request_id} delivery_id={delivery_id} timeout={reissue_timeout}s"
+                    )
                     inject_agent_notification(
                         user_id=user_id,
                         group_id=group_id,
@@ -1169,6 +1200,15 @@ Rules:
                         task=task,
                         notified_user_name=notified_user_name,
                         start_conversation_cb=_agent_notification_callback,
+                        agent_id=instance_id,
+                        event_source="stdin_reissue",
+                        event_key=f"agent:{instance_id}:stdin_reissue:{delivery_id}",
+                        event_data={
+                            "proc_id": proc_id,
+                            "request_id": request_id,
+                            "delivery_id": delivery_id,
+                            "timeout_seconds": reissue_timeout,
+                        },
                     )
 
                     try:

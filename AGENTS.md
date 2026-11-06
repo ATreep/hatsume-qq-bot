@@ -82,111 +82,12 @@ Sandbox Channel 允许在沙箱中运行的代码或服务通过 Unix Domain Soc
 详见 `docs/sandbox-channel.md` 和全局技能 `sandbox-channel-guide.md`
 
 
-# 初芽触发事件分类（源码标识：`chat_agent`）
+# 异步事件迁移与回归
 
-初芽的输入来源必须按“来源类型”和“图内触发标记”区分记录。图内系统消息使用
-`hatsume/plugins/hatsume-plugin/graph/nodes.py` 中的
-`SYSTEM_TRIGGER_KEY = "_hatsume_system_trigger"` 标记；标记值通常是
-`agent`、`timer`、`hook`、`group_increase` 或 `sandbox_channel`。普通用户消息没有这个标记。
-
-## 1. 普通群消息（human message）
-
-- 入口：`user_chat_handle()`，由 `user_chat`、`start_chat_by_at`、`start_chat_by_mentioned`
-  等 NoneBot 消息处理器进入。
-- 消息先进入当前群的 `human_queue`；只有发送者已经是 `chat_peers`，或通过 `@` 入口激活会话后，
-  才会启动或继续 LangGraph 对话。
-- 这是用户输入，不属于系统触发事件，不添加 `_hatsume_system_trigger`。
-- 消息匹配 Hook 在普通消息处理前执行，因此同一条群消息可能同时保留为普通用户输入，并触发一个或多个
-  `message_match` Hook。
-
-## 2. 持久化 Hook
-
-Hook 数据保存在 `hooks/hooks.db`，数据库字段 `trigger_type` 目前只有两种值：
-
-### 2.1 Heartbeat Hook（`trigger_type="heartbeat"`）
-
-- 由 APScheduler 按 `interval_seconds` 周期执行；间隔不得小于 300 秒，只对已启用且有 Bot 路由的群注册任务。
-- 执行脚本返回退出码 `10` 且 stdout 非空时，才表示“有事件”，调用 `inject_hook()` 注入。
-- 退出码 `0` 且 stdout 为空表示本轮无事件；超时、非法输出、其他退出码只记录失败，不注入对话。
-- 事件进入会话时使用 `_hatsume_system_trigger="hook"`；活跃会话追加到 `human_queue`，非活跃会话以
-  `trigger_type="hook"` 启动新对话。
-
-### 2.2 Message-match Hook（`trigger_type="message_match"`）
-
-- 在每条群文本消息进入普通聊天逻辑前检查，扫描文本前 2,000 个字符。
-- 使用 `match_pattern` 正则匹配，可用 `match_user_id` 限定触发人；`0` 表示不限定触发人。
-- 命中后构造包含群号、发送者、正则和原文的事件说明，并复用 `inject_hook()`，因此图内标记同样是
-  `_hatsume_system_trigger="hook"`。
-- 一条消息可以命中多个启用的 Message-match Hook；单个 Hook 的失败不能阻断其他 Hook 或普通聊天。
-
-两种 Hook 在图内都显示为 `hook`，需要通过数据库的 `trigger_type`、Hook 名称和事件说明区分具体来源。
-
-## 3. 定时任务（Timer）
-
-### 3.1 用户创建的 timer-v2 任务
-
-- 创建工具：`create_daily_timer`、`create_weekly_timer`、`create_monthly_timer`、`create_at_timer`。
-- `schedule_type` 分别为 `daily`、`weekly`、`monthly`、`at`；每个计划拆成可持久化、可幂等处理的
-  schedule point。
-- 到期后调用 `inject_timer()`，图内标记为 `_hatsume_system_trigger="timer"`。
-- `user_id > 0` 时附带被通知用户信息；`user_id=0` 时不要求 @ 用户。活跃会话直接入队，非活跃会话以
-  `trigger_type="timer"` 启动。
-- 重启恢复时只补偿容忍窗口内最近一次到期点，已经处理的 occurrence 不重复执行。
-
-### 3.2 内部 Auto-response 定时任务
-
-- `task_type="auto_response"`，由系统为已激活群生成未来的随机 exact-time 任务。
-- 同样通过 `inject_timer()`、`_hatsume_system_trigger="timer"` 进入会话，但 `user_id` 固定为 `0`。
-- 群未激活、没有路由、处于免打扰时间或已有活跃会话时会跳过本次发送，并同步下一次计划。
-
-Timer 的 `schedule_type` 与 Hook 的 `trigger_type` 是不同层级的字段，不要把 `timer`、`heartbeat` 或
-`message_match` 混写。
-
-## 4. Sandbox Channel
-
-- 外部沙盒程序通过 `/tmp/hatsume_channel.sock` 发送一行 JSON，由
-  `SandboxChannelMessage` 校验后交给 `handle_sandbox_channel_message()`。
-- 活跃图运行时，消息通过 `make_system_trigger_message(..., "sandbox_channel")` 追加到
-  `human_queue`，携带 `_hatsume_system_trigger="sandbox_channel"`；非活跃会话启动时使用
-  `trigger_type="sandbox_channel"`。
-- 这类消息的来源应记录为 Sandbox Channel，不要误记为普通用户消息、Heartbeat Hook 或 Timer。
-- 发送协议、字段和错误响应详见 `docs/sandbox-channel.md` 与
-  `data/hatsume-plugin/skills/sandbox-channel-guide.md`。
-
-## 5. Agent 执行返回
-
-- `agent_dispatch()` 创建后台 Agent 实例，状态经历 `running`、`done` 或 `cancelled`；成功或异常都会形成
-  一条最终结果记录。
-- Agent 完成后由 `inject_agent_notification()` 将 Agent 名称、Agent ID、原始任务、派发背景和执行结果
-  组合成系统消息。
-- 活跃会话把结果追加到 `human_queue`，并使用 `_hatsume_system_trigger="agent"`；非活跃会话以
-  `trigger_type="agent"` 启动新对话。
-- 同一结果在当前会话队列中不会重复注入。主初芽负责读取结果、决定是否调用发送工具并向用户汇报；
-  后台 Agent 本身不直接向 QQ 用户发送回复。
-- `agent_work_history()` 只读取 Agent 的工具调用和输出历史，不会产生新的初芽触发事件。
-
-## 6. 群成员加入
-
-- 入口：`GroupIncreaseNoticeEvent` → `handle_group_increase()`。
-- 仅对已激活群处理；活跃会话追加带 `_hatsume_system_trigger="group_increase"` 的欢迎消息，非活跃会话以
-  `trigger_type="group_increase"` 启动。
-- 该事件使用新成员 QQ 号和头像生成欢迎提示，属于系统通知，不属于普通群消息或 Agent 返回。
-
-## 7. human_queue 注入与 chat_peers
-
-- Agent 回调、Timer、Heartbeat Hook 的结构化通知对象在写入 `human_queue` 或启动新图前，立即加入目标群的 `chat_peers`；无通知对象的 `user_id=0` 不加入。
-- Hook 的 `notified_user_ids`、Timer/Agent 的 `user_id` 都会过滤 `0`、非正整数、Bot 自身和重复值；Sandbox Channel 的 `user_id` 只表示来源，不代表需要 @ 的对象。
-- Message-match Hook 的触发者由 `activate_trigger_peer()` 加入，群成员加入由 `activate_chat()` 加入；最终回复中的 CQ at 和回复目标仍由 `send_text` 登记。
-- 详细队列入口、系统标记和分支行为见 `docs/human-message-queue-injection.md`。
-
-## 8. 其他内部标记与非初芽事件
-
-- `start_new_conversation()` 的 `system_trigger_type` 默认值为 `system_task`，供未归类的内部启动调用使用；
-  新增调用点必须明确写出实际来源，不能默认丢失分类。
-- `PokeNotifyEvent` 当前只触发随机图片发送，不进入初芽会话队列，因此不记录为上述任何一种
-  初芽触发类型。
-- `ai_node` 完成本轮模型调用只是一次普通图执行结果，不等同于“Agent 执行返回”；只有
-  `agent_dispatch()` 创建的后台 Agent 完成后回注，才使用 `agent` 触发分类。
+- 初芽的普通用户消息与异步事件不能混为同一个用户身份。新增来源必须在 `docs/human-message-queue-injection.md` 说明类别、通知对象、活跃/空闲/断线行为以及去重边界。
+- 事件协议的改动必须同时验证：仅事件启动、用户/事件混排、完整 call/result 对、历史裁剪与压缩、接收器禁止模型主动调用、真实工具轮次不受事件影响。
+- 后台 shell 的进度、stdin 请求与重发都属于迁移范围；重发不能因复用 request ID 被误去重。
+- 不要把消息表示升级宣称为可靠投递升级；持久化 outbox、跨重启重放和 exactly-once 必须单独设计、验证和说明。
 
 
 # Agent ID、历史和停止

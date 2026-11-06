@@ -8,7 +8,7 @@ import sys
 import tempfile
 from types import ModuleType, SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from langchain.agents import create_agent
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
@@ -244,6 +244,27 @@ class ContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(files[0].read_text(), original)
         self.assertIn(str(files[0]), result.content)
 
+    def test_event_only_summary_input_preserves_call_and_result(self):
+        middleware = self.context.build_context_middleware(self.model())[-1]
+        call = AIMessage("", tool_calls=[{"name": "receive_event__injected", "args": {}, "id": "event"}])
+        result = ToolMessage("important timer occurrence", tool_call_id="event")
+        for messages in ([call, result], [call, result, HumanMessage("later human")]):
+            trimmed = middleware._trim_messages_for_summary(messages)
+            self.assertIn(call, trimmed)
+            self.assertIn(result, trimmed)
+            self.assertIn("important timer occurrence", middleware._summary_input(messages))
+
+    def test_large_event_archive_retains_valid_json_and_provenance(self):
+        original = json.dumps({"event_id": "evt", "event_type": "timer", "correlation_id": "task42", "text": "long" * 3000, "payload": {"full": "tail"}})
+        compacted = self.context.offload_event_output(original, directory=self.directory)
+        body = json.loads(compacted)
+        self.assertEqual(body["event_id"], "evt")
+        self.assertEqual(body["correlation_id"], "task42")
+        self.assertTrue(body["payload"]["archived"])
+        archive = next(self.directory.glob("output-*.txt"))
+        self.assertEqual(archive.read_text(), original)
+        self.assertIn(str(archive), body["text"])
+
     async def test_small_and_multimodal_outputs_are_preserved(self):
         middleware = self.context.ToolOutputMiddleware()
         for content in ("small output", [{"type": "image_url", "image_url": {"url": "https://example.test/img.png"}}]):
@@ -334,9 +355,85 @@ class ContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(len(model._summaries), 1)
         self.assertEqual(len(notifications), 1)
         self.assertLess(len(notifications[0]["result"]), 2200)
+        event = notifications[0]
+        self.assertEqual(event["agent_id"], instance)
+        self.assertEqual(event["event_source"], "shell_progress")
+        self.assertEqual(event["event_data"]["elapsed_seconds"], 30)
+        self.assertEqual(event["event_data"]["total_timeout_seconds"], 1000)
+        self.assertIn(event["event_data"]["delivery_id"], event["event_key"])
         self.assertLess(len(result), 2200)
         files = list((self.directory / ".hatsume-context/123").glob("*.txt"))
         self.assertTrue(any(len(p.read_text()) > 100_000 for p in files))
+
+    async def run_shell_notifications(self, decisions, resolutions=(), *, cancelled=False):
+        model = self.model(AIMessage(json.dumps({"cmd": "fixture", "description": "until finished", "total_timeout": 1000})))
+        self.install_agent_fixtures(model)
+        infra = sys.modules[f"{PACKAGE}.infra"]
+        async def ready(group_id):
+            pass
+        infra.ensure_container_running = ready
+        infra.start_background_cmd = lambda *args, **kwargs: "process.log"
+        infra.read_background_output = lambda path, offset: ("fixture output", offset + 1)
+        infra.get_background_process = lambda *args, **kwargs: (SimpleNamespace(poll=lambda: None), None)
+        infra.kill_background_cmd = Mock(return_value="", __name__="kill_background_cmd")
+        notifications = []
+        def inject(**kwargs):
+            notifications.append(kwargs)
+            if kwargs["event_source"] in ("stdin_request", "stdin_reissue"):
+                queue = self.agents._stdin_queues[kwargs["event_data"]["request_id"]]
+                queue.put_nowait("fixture reply")
+        sys.modules[f"{PACKAGE}.graph.nodes"] = SimpleNamespace(inject_agent_notification=inject)
+        async def no_wait(seconds):
+            pass
+        scripted = iter(decisions)
+        async def decide(payload):
+            action = next(scripted)
+            if isinstance(action, BaseException):
+                raise action
+            return {"messages": [AIMessage(action)]}
+        response_model = SimpleNamespace(ainvoke=AsyncMock(side_effect=[
+            AIMessage(json.dumps({"cmd": "fixture", "description": "until finished", "total_timeout": 1000})),
+            *[AIMessage(value) for value in resolutions],
+        ]))
+        sys.modules[f"{PACKAGE}.models"] = SimpleNamespace(get_code_model=lambda: response_model)
+        instance = self.agents.add_agent_instance("background_shell", group_id=123, task="monitor")
+        with self.agents.bind_agent_instance(instance), patch.object(asyncio, "sleep", no_wait), \
+             patch("langchain.agents.create_agent", return_value=SimpleNamespace(ainvoke=decide)), \
+             patch.object(self.context, "build_context_middleware", return_value=[]), \
+             patch.object(self.agents, "_write_stdin", lambda proc, text: True):
+            if cancelled:
+                with self.assertRaises(asyncio.CancelledError):
+                    await self.agents._run_background_shell("monitor process", 0)
+            else:
+                await self.agents._run_background_shell("monitor process", 0)
+        self.assertEqual(self.agents._stdin_queues, {})
+        self.assertEqual(self.agents._stdin_request_groups, {})
+        return instance, notifications, infra.kill_background_cmd
+
+    async def test_shell_stdin_reissue_has_distinct_delivery_and_same_request(self):
+        instance, events, _ = await self.run_shell_notifications(
+            ["INPUT_NEEDED:10:first", "DONE"], ["REISSUE:20:again", "FINAL_INPUT:yes"])
+        self.assertEqual([event["event_source"] for event in events], ["stdin_request", "stdin_reissue"])
+        first, reissue = events
+        for event in events:
+            self.assertEqual(event["agent_id"], instance)
+            self.assertIn(event["event_data"]["delivery_id"], event["event_key"])
+        self.assertEqual(first["event_data"]["request_id"], reissue["event_data"]["request_id"])
+        self.assertEqual(first["event_data"]["proc_id"], reissue["event_data"]["proc_id"])
+        self.assertNotEqual(first["event_data"]["delivery_id"], reissue["event_data"]["delivery_id"])
+        self.assertNotEqual(first["event_key"], reissue["event_key"])
+        self.assertEqual([event["event_data"]["timeout_seconds"] for event in events], [10, 20])
+
+    async def test_shell_repeated_progress_notifications_have_distinct_keys(self):
+        _, events, _ = await self.run_shell_notifications(["NOTIFY:30", "NOTIFY:30", "DONE"])
+        self.assertEqual(len(events), 2)
+        self.assertNotEqual(events[0]["event_key"], events[1]["event_key"])
+        self.assertNotEqual(events[0]["event_data"]["delivery_id"], events[1]["event_data"]["delivery_id"])
+
+    async def test_shell_cancellation_preserves_process_cleanup(self):
+        _, events, kill = await self.run_shell_notifications([asyncio.CancelledError()], cancelled=True)
+        self.assertEqual(events, [])
+        kill.assert_called_once()
 
 
 if __name__ == "__main__":

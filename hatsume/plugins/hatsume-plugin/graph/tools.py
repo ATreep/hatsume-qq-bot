@@ -29,6 +29,7 @@ from ..infra import (
     read_sandbox_image_data_uri,
     run_cmd,
 )
+from ..runtime_events import RuntimeEvent, remember_tool_origin
 from ..group_runtime import (
     bind_group_runtime,
     get_current_group_runtime,
@@ -154,7 +155,7 @@ def tool(*args: Any, **kwargs: Any) -> Any:
 # Deferred references — group-owned runtime state is configured before use
 # ---------------------------------------------------------------------------
 # Agent notification callback (set by chat.py)
-_agent_notification_callback: Callable[[int, int, str], None] | None = None
+_agent_notification_callback: Callable[[int, int, RuntimeEvent], None] | None = None
 
 
 async def _resolve_notified_user_name(user_id: int, group_id: int | None) -> str | None:
@@ -253,9 +254,9 @@ def configure_tool_callbacks(
         runtime.update_generate_image_time_callback = update_generate_image_time
 
 
-def configure_agent_notification_callback(cb: Callable[[int, int, str], None]) -> None:
+def configure_agent_notification_callback(cb: Callable[[int, int, RuntimeEvent], None]) -> None:
     """Register callback for starting conversation when agent finishes outside active chat.
-    Callback signature: cb(user_id: int, group_id: int, notify_msg: str) -> None"""
+    Callback signature: cb(user_id: int, group_id: int, event: RuntimeEvent) -> None"""
     global _agent_notification_callback
     _agent_notification_callback = cb # type: ignore
 
@@ -1475,6 +1476,7 @@ async def _create_scheduled_timer(
     if prompt_error := store.validate_prompt(prompt):
         return prompt_error
     task_id = store.create_task(group_id, user_id, prompt, plan)
+    remember_tool_origin(group_id, "timer", task_id)
     add_jobs_for_task(task_id, store)
     return (
         f"定时任务已创建（ID: {task_id}）\n"
@@ -2131,6 +2133,7 @@ async def create_heartbeat_hook(
             created_by=requester_id,
             notified_user_ids=notified_user_ids,
         )
+        remember_tool_origin(runtime.group_id, "hook", record["id"])
         try:
             register_hook_job(record, store)
         except Exception:
@@ -2184,6 +2187,7 @@ async def create_message_hook(
         )
     except Exception as exc:  # noqa: BLE001 - tool boundary returns safe text
         return f"错误：创建消息触发 Hook 失败：{exc}"
+    remember_tool_origin(runtime.group_id, "hook", record["id"])
     user_scope = (
         "任意成员" if not record["match_user_id"] else f"QQ {record['match_user_id']}"
     )
@@ -2467,6 +2471,8 @@ async def agent_dispatch(
         terminal_status=None,
     )
 
+    remember_tool_origin(group_id, "agent", instance_id)
+
     async def _run_and_notify() -> None:
         with bind_group_runtime(runtime):
             notified_user_name = None
@@ -2539,6 +2545,9 @@ async def agent_dispatch(
                     context=context,
                     notified_user_name=notified_user_name,
                     start_conversation_cb=_agent_notification_callback,
+                    agent_id=instance_id,
+                    event_source="completion",
+                    event_key=f"{instance_id}:terminal",
                 )
             else:
                 print("❌ _agent_notification_callback is None, agent result lost")

@@ -5,6 +5,7 @@ from __future__ import annotations
 import traceback
 from typing import TYPE_CHECKING
 
+from ..runtime_events import RuntimeEvent, enqueue_runtime_event
 from ..group_runtime import bind_group_runtime, group_runtime_registry
 from ..handlers.dialogue import _start_conv_for_trigger
 from .sandbox_channel import SandboxChannelMessage
@@ -42,38 +43,19 @@ async def handle_sandbox_channel_message(channel_message: SandboxChannelMessage)
             ] if channel_message.user_id > 0 else [],
         }
 
+        event = RuntimeEvent(
+            event_type="sandbox_channel", source="sandbox_channel", group_id=channel_message.group_id,
+            text=channel_message.content,
+            payload={"timestamp": channel_message.timestamp, "user_id": channel_message.user_id,
+                     "agent_name": channel_message.agent_name, "priority": channel_message.priority,
+                     "source_record": source_entry},
+        )
         with bind_group_runtime(runtime):
             if conv_state.is_graph_running:
-                # Keep Sandbox Channel input marked as a system trigger so the
-                # human node can preserve trigger semantics while normalizing
-                # the queued message into a HumanMessage.
-                from ..graph.nodes import make_system_trigger_message
-
-                conv_state.human_queue.append(
-                    make_system_trigger_message(
-                        channel_message.content,
-                        "sandbox_channel",
-                    )
-                )
+                enqueue_runtime_event(conv_state, event)
                 conv_state.human_source_queue.append(source_entry)
-                print(
-                    "💬 [sandbox_channel] Injected message into queue "
-                    f"(group={channel_message.group_id}, "
-                    f"agent={channel_message.agent_name}, "
-                    f"len={len(channel_message.content)})"
-                )
             else:
-                print(
-                    "💬 [sandbox_channel] Starting conversation with injected message "
-                    f"(group={channel_message.group_id}, "
-                    f"agent={channel_message.agent_name})"
-                )
-                _start_conv_for_trigger(
-                    channel_message.user_id or 0,
-                    channel_message.group_id,
-                    channel_message.content,
-                    trigger_type="sandbox_channel",
-                )
+                _start_conv_for_trigger(channel_message.user_id or 0, channel_message.group_id, event)
     except Exception as exc:
         print(f"❌ Error handling Sandbox Channel message: {exc}")
         traceback.print_exc()

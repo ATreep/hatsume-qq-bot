@@ -42,7 +42,7 @@ class ConversationState:
     idle_source_queue: list[dict] = field(default_factory=list)
     pending_queue: list[dict] = field(default_factory=list)
     pending_source_queue: list[dict] = field(default_factory=list)
-    human_queue: list[dict] = field(default_factory=list)
+    human_queue: list[Any] = field(default_factory=list)
     human_source_queue: list[dict] = field(default_factory=list)
 
     # Timing

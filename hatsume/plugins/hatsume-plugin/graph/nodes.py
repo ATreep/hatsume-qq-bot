@@ -65,8 +65,18 @@ from ..utils import (
     strip_thinking_tags,
 )
 from ..state import peer_session_id
+from ..runtime_events import (
+    RuntimeEvent,
+    assemble_input,
+    consume_inputs,
+    enqueue_runtime_event,
+    is_event_message,
+    stable_event_key,
+    tool_origin,
+    eviction_cutoff,
+)
 from .chat_loop import ChatLoopDelegationMiddleware, SendTextFirstMiddleware
-from .context import build_context_middleware
+from .context import build_context_middleware, offload_event_output
 from .tools import (
     get_chat_tools,
     get_current_group_id,
@@ -80,7 +90,6 @@ JSON_CODE_FENCE_PATTERN = re.compile(
     r"^\s*```(?:json)?[ \t]*\r?\n(?P<json>.*?)\r?\n[ \t]*```\s*$",
     re.IGNORECASE | re.DOTALL,
 )
-SYSTEM_TRIGGER_KEY = "_hatsume_system_trigger"
 ADMIN_MODE_KEYWORD = "BYPASS"
 CHAT_DETECTION_BYPASS_KEYWORD = "初芽"
 
@@ -158,24 +167,8 @@ def _chat_intent_is_eligible(result: ChatIntentJudgeResult) -> bool:
     )
 
 
-def _message_contains_system_trigger(value: Any) -> bool:
-    if isinstance(value, Mapping):
-        if SYSTEM_TRIGGER_KEY in value:
-            return True
-        return any(_message_contains_system_trigger(item) for item in value.values())
-    if isinstance(value, (list, tuple)):
-        return any(_message_contains_system_trigger(item) for item in value)
-    return False
-
-
-def _has_injected_human_message(state: MessagesState) -> bool:
-    if _runtime().last_was_system_trigger:
-        return True
-    return any(
-        _message_contains_system_trigger(getattr(message, "content", message))
-        for message in state.get("messages", [])
-        if getattr(message, "type", None) == "human"
-    )
+def _has_runtime_event_input() -> bool:
+    return any(is_event_message(message) for message in _runtime().current_input_messages)
 
 
 def _combined_system_prompt() -> str:
@@ -765,7 +758,7 @@ def _iter_replyable_top_level_messages(
         # send_text returns this marker after a successful bot send.  It is
         # the platform ID of an AI-authored message and remains available to
         # later turns until context compaction removes the ToolMessage.
-        if getattr(message, "type", None) == "tool":
+        if getattr(message, "type", None) == "tool" and getattr(message, "name", None) == "send_text":
             for match in REPLYABLE_TOOL_MESSAGE_ID_PATTERN.finditer(
                 str(getattr(message, "content", ""))
             ):
@@ -823,15 +816,6 @@ def _refresh_replyable_messages(
 # ---------------------------------------------------------------------------
 # Notification injection (agent & timer)
 # ---------------------------------------------------------------------------
-def make_system_trigger_message(text: str, trigger_type: str) -> dict[str, str]:
-    """Build an internally marked queue entry for non-human graph input."""
-    return {
-        "type": "text",
-        "text": text,
-        SYSTEM_TRIGGER_KEY: trigger_type,
-    }
-
-
 def _build_notified_user_prompt(user_id: int, user_name: str | None = None) -> str:
     if user_id == 0:
         return ""
@@ -873,12 +857,16 @@ def inject_agent_notification(
     context: str = "",
     notified_user_name: str | None = None,
     start_conversation_cb: Any = None,
+    agent_id: str | None = None,
+    event_source: str = "completion",
+    event_key: str | None = None,
+    event_data: dict | None = None,
 ) -> None:
     """Inject an agent result into the conversation flow."""
     context_line = f"📋 派发背景：{context}\n" if context else ""
     notified_user_prompt = _build_notified_user_prompt(user_id, notified_user_name)
     lifecycle_line = "状态：终态；阶段：finished；进度：100%\n"
-    agent_id = result.splitlines()[0].removeprefix("Agent ID: ").strip()
+    agent_id = agent_id or (result.splitlines()[0].removeprefix("Agent ID: ").strip() if result.startswith("Agent ID: ") else None)
     if agent_id:
         from .agents import get_agent_instance
 
@@ -889,8 +877,9 @@ def inject_agent_notification(
                 f"阶段：{agent_state.get('phase', 'unknown')}；"
                 f"进度：{agent_state.get('progress', 0)}%\n"
             )
+    event_label = "执行完毕" if event_source == "completion" else "后台事件"
     notify_msg = (
-        f"(SYSTEM) Agent '{agent_name}' 执行完毕。\n"
+        f"Agent '{agent_name}' {event_label}。\n"
         f"{notified_user_prompt}"
         f"{lifecycle_line}"
         f"{context_line}"
@@ -902,36 +891,14 @@ def inject_agent_notification(
         f"{result}"
     )
 
-    print(notify_msg)
-
-    runtime = group_runtime_registry.get_or_create(group_id)
-    state = runtime.conversation
-    _register_injected_chat_peers(group_id, [user_id])
-    queued_message = make_system_trigger_message(notify_msg, "agent")
-    # A graph can still be draining its final turn after ``is_chatting`` has
-    # been cleared. Keep the notification on that graph's queue so a second
-    # graph is not started for the same completion event.
-    if state.is_chatting or getattr(state, "is_graph_running", False):
-        if queued_message not in state.human_queue:
-            state.human_queue.append(queued_message)
-        else:
-            print(
-                f"🧩 [inject_agent_notification] Ignored duplicate result for {agent_name}"
-            )
-        print(f"🧩 [inject_agent_notification] Injected {agent_name} result into human_queue")
-    else:
-        if start_conversation_cb is not None:
-            print(f"🧩 [inject_agent_notification] Starting new conversation for {agent_name} result")
-            try:
-                start_conversation_cb(user_id, group_id, notify_msg)
-            except Exception as exc:  # noqa: BLE001 - delivery must not fail Agent task
-                print(
-                    f"⚠️ [inject_agent_notification] Failed to start conversation: "
-                    f"group={group_id} agent={agent_name} error={exc}"
-                )
-        else:
-            _start_direct_conv(user_id, group_id, notify_msg)
-
+    data = dict(event_data or {})
+    event = RuntimeEvent(
+        event_type="agent", group_id=group_id, source=event_source, text=notify_msg,
+        payload={**data, "agent_id": agent_id, "agent_name": agent_name, "task": task, "context": context, "result": result},
+        notified_user_ids=tuple(_register_injected_chat_peers(group_id, [user_id])),
+        correlation_id=agent_id, **tool_origin(group_id, "agent", agent_id), occurrence_key=event_key or stable_event_key(agent_id, agent_name, event_source, result, task),
+    )
+    _deliver_runtime_event(user_id, event, start_conversation_cb)
 
 
 def inject_timer(
@@ -940,6 +907,8 @@ def inject_timer(
     timer_prompt: str,
     start_conversation_cb: Any = None,
     notified_user_name: str | None = None,
+    event_data: dict | None = None,
+    event_key: str | None = None,
 ) -> None:
     """Inject a timer prompt into the conversation flow.
 
@@ -959,18 +928,15 @@ def inject_timer(
         )
         print(f"⏰ [inject_timer] Timer message for user {user_id}: {timer_prompt[:80]}...")
 
-    runtime = group_runtime_registry.get_or_create(group_id)
-    state = runtime.conversation
-    _register_injected_chat_peers(group_id, [user_id])
-    if state.is_chatting:
-        state.human_queue.append(make_system_trigger_message(timer_msg, "timer"))
-        print(f"⏰ [inject_timer] Injected timer into human_queue for user {user_id}")
-    else:
-        if start_conversation_cb is not None:
-            print(f"⏰ [inject_timer] Starting new conversation for timer (user {user_id})")
-            start_conversation_cb(user_id, group_id, timer_msg)
-        else:
-            _start_direct_conv(user_id, group_id, timer_msg)
+    data = dict(event_data or {})
+    event = RuntimeEvent(
+        event_type="timer", group_id=group_id, source=str(data.get("source", "timer")), text=timer_msg,
+        payload={**data, "prompt": timer_prompt, "user_id": user_id},
+        notified_user_ids=tuple(_register_injected_chat_peers(group_id, [user_id])),
+        **tool_origin(group_id, "timer", data.get("task_id")),
+        correlation_id=str(data["task_id"]) if data.get("task_id") is not None else None, occurrence_key=event_key,
+    )
+    _deliver_runtime_event(user_id, event, start_conversation_cb)
 
 
 def inject_hook(
@@ -981,6 +947,8 @@ def inject_hook(
     event_text: str,
     notified_user_ids: list[int] | None = None,
     start_conversation_cb: Any = None,
+    event_data: dict | None = None,
+    event_key: str | None = None,
 ) -> None:
     """Inject one Hook event into the owning group's conversation flow."""
     normalized_name = str(hook_name).strip() or "unnamed"
@@ -1017,39 +985,35 @@ def inject_hook(
         "## Hook 事件说明\n"
         f"{normalized_event}"
     )
-    runtime = group_runtime_registry.get_or_create(group_id)
-    state = runtime.conversation
-    _register_injected_chat_peers(group_id, normalized_notified_user_ids)
-    if state.is_chatting:
-        state.human_queue.append(make_system_trigger_message(hook_msg, "hook"))
-        print(f"🪝 [inject_hook] Injected Hook {normalized_name} into human_queue")
-        return
-    if start_conversation_cb is not None:
-        start_conversation_cb(0, group_id, hook_msg)
-    else:
-        _start_direct_conv(0, group_id, hook_msg, trigger_type="hook")
-
-
-def _start_direct_conv(
-    user_id: int,
-    group_id: int,
-    notify_msg: str,
-    *,
-    trigger_type: str = "timer",
-) -> None:
-    """Start a new graph conversation targeting a specific group directly.
-
-    Used when no callback is registered (e.g., /autoresponse debug command).
-    Sends messages to the target group via bot.send_group_msg().
-    """
-    from ..handlers.dialogue import _start_conv_for_trigger
-
-    _start_conv_for_trigger(
-        user_id,
-        group_id,
-        notify_msg,
-        trigger_type=trigger_type,
+    data = dict(event_data or {})
+    event = RuntimeEvent(
+        event_type="hook", group_id=group_id, source=str(data.get("trigger_type", "hook")), text=hook_msg,
+        payload={**data, "hook_name": normalized_name, "prompt": normalized_prompt, "event_text": normalized_event},
+        notified_user_ids=tuple(_register_injected_chat_peers(group_id, normalized_notified_user_ids)),
+        **tool_origin(group_id, "hook", data.get("hook_id")),
+        correlation_id=str(data["hook_id"]) if data.get("hook_id") is not None else None, occurrence_key=event_key,
     )
+    _deliver_runtime_event(0, event, start_conversation_cb)
+
+
+def _deliver_runtime_event(user_id: int, event: RuntimeEvent, callback: Any = None) -> None:
+    state = group_runtime_registry.get_or_create(event.group_id).conversation
+    if state.is_chatting or state.is_graph_running:
+        enqueue_runtime_event(state, event)
+        return
+    try:
+        if callback is not None:
+            callback(user_id, event.group_id, event)
+        else:
+            _start_direct_conv(user_id, event.group_id, event)
+    except Exception as exc:
+        enqueue_runtime_event(state, event)
+        print(f"[runtime-event] startup failed; retained group={event.group_id} type={event.event_type} error={type(exc).__name__}", flush=True)
+
+
+def _start_direct_conv(user_id: int, group_id: int, event: RuntimeEvent) -> None:
+    from ..handlers.dialogue import _start_conv_for_trigger
+    _start_conv_for_trigger(user_id, group_id, event)
 
 
 # ---------------------------------------------------------------------------
@@ -1214,7 +1178,7 @@ def _get_ai_answer() -> Any:
     return _conversation_state().ai_answer
 
 
-def _get_human_queue() -> list[dict]:
+def _get_human_queue() -> list[Any]:
     return _conversation_state().human_queue
 
 
@@ -1274,23 +1238,14 @@ async def ai_node(state: MessagesState) -> dict:
 
     _MEMORY_TOTAL_LIMIT = 50
     last_content = state["messages"][-1].content
-    chatting_user_ids = extract_user_ids_from_content(last_content)
-    admin_mode_enabled = is_admin_mode_message(last_content, ADMIN_QQ_ID)
 
+    current_inputs = runtime.current_input_messages or [state["messages"][-1]]
+    current_humans = [message for message in current_inputs if getattr(message, "type", None) == "human"]
+    human_content = [part for message in current_humans for part in (message.content if isinstance(message.content, list) else [{"type": "text", "text": message.content}])]
+    chatting_user_ids = extract_user_ids_from_content(human_content)
+    admin_mode_enabled = is_admin_mode_message(human_content, ADMIN_QQ_ID)
     aux_queue, aux_sources = _snapshot_auxiliary_queue()
-    if aux_queue:
-        last_human_content = state["messages"][-1].content
-        if isinstance(last_human_content, str):
-            last_human_content = [{"type": "text", "text": last_human_content}]
-        merged_content = (
-            [{"type": "text", "text": "## 背景聊天记录："}]
-            + aux_queue
-            + [{"type": "text", "text": "## 当前聊天记录："}]
-            + last_human_content
-        )
-        last_human_msg: Any = HumanMessage(merged_content)  # type: ignore
-    else:
-        last_human_msg = HumanMessage(state["messages"][-1].content)
+    last_human_msg: Any = HumanMessage(human_content) if current_humans else current_inputs[-1]
 
     print("Start Jev chat intent/end judge...")
     t_jev_start = time.time()
@@ -1298,7 +1253,7 @@ async def ai_node(state: MessagesState) -> dict:
     chat_detection_bypassed = CHAT_DETECTION_BYPASS_KEYWORD in _current_message_text(
         last_content
     )
-    if _has_injected_human_message(state):
+    if _has_runtime_event_input():
         print("[jev_judge] Bypassed for injected system message")
     elif chat_detection_bypassed:
         print(
@@ -1537,15 +1492,16 @@ async def ai_node(state: MessagesState) -> dict:
                 HumanMessage(build_memory_context_prompt(memory_summary))
             ]
         )
+        input_ids = {message.id for message in current_inputs}
         conversation_history = _without_bootstrap_role_prompt(
-            state["messages"][:-1]
+            [message for message in state["messages"] if message.id not in input_ids]
         )
-        agent_messages = conversation_history + mem_msg + [last_human_msg]
+        agent_messages = assemble_input(conversation_history, current_inputs, mem_msg, aux_queue)
         if admin_mode_enabled:
             agent_messages = _without_image_url_parts(agent_messages)
         # The context middleware refreshes this set again after any compaction.
         # Do not retain IDs that disappear from the model-visible context.
-        current_human_ids = _extract_replyable_message_ids([state["messages"][-1]])
+        current_human_ids = _extract_replyable_message_ids(current_humans)
         _refresh_replyable_messages(
             agent_messages,
             current_human_ids=current_human_ids,
@@ -1710,28 +1666,24 @@ async def human_node(state: MessagesState) -> dict:
     runtime.last_was_auxiliary_only = (
         not human_queue and bool(runtime.auxiliary_messages_queue)
     )
-    runtime.last_was_system_trigger = any(
-        isinstance(part, dict) and SYSTEM_TRIGGER_KEY in part
-        for part in human_queue
-    )
-    human_queue = [
-        {key: value for key, value in part.items() if key != SYSTEM_TRIGGER_KEY}
-        if isinstance(part, dict)
-        else part
-        for part in human_queue
-    ]
-
+    for item in human_queue:
+        if isinstance(item, RuntimeEvent):
+            _register_injected_chat_peers(item.group_id, list(item.notified_user_ids))
+    current_messages = consume_inputs(human_queue)
+    for message in current_messages:
+        if message.type == "tool" and is_event_message(message):
+            try:
+                message.content = await asyncio.to_thread(offload_event_output, str(message.content))
+            except Exception as exc:
+                print(f"[runtime-event] archive failed; retaining full event error={type(exc).__name__}", flush=True)
+    runtime.current_input_messages = current_messages
+    runtime.last_was_system_trigger = any(is_event_message(message) for message in current_messages)
     history_updates: list[Any] = []
     if len(state["messages"]) >= 60:
-        ids = [
-            message.id
-            for message in state["messages"]
-            if message.type in {"human", "ai"} and isinstance(message.id, str)
-        ]
-        if len(ids) >= 2:
-            history_updates.extend([RemoveMessage(ids[0]), RemoveMessage(ids[1])])
-
-    return {"messages": [*history_updates, HumanMessage(human_queue)]}  # type: ignore
+        cutoff = eviction_cutoff(state["messages"], 2)
+        history_updates = [RemoveMessage(message.id) for message in state["messages"][:cutoff] if isinstance(message.id, str)]
+    print(f"[runtime-event] consumed inputs={len(human_queue)} messages={len(current_messages)} system={runtime.last_was_system_trigger}", flush=True)
+    return {"messages": [*history_updates, *current_messages]}
 
 
 # ---------------------------------------------------------------------------
@@ -1742,8 +1694,11 @@ async def finish_conversation_node(state: MessagesState) -> dict:
     print("Enter finish_conversation_node")
 
     runtime.last_was_system_trigger = False
+    runtime.current_input_messages.clear()
     _set_graph_running(False)
+    pending_events = [item for item in runtime.conversation.human_queue if isinstance(item, RuntimeEvent)]
     _clear_human_queue()
+    runtime.conversation.human_queue.extend(pending_events)
     runtime.conversation.end_requested = False
     runtime.conversation.checked_agent_ids.clear()
 
@@ -1772,6 +1727,10 @@ async def finish_conversation_node(state: MessagesState) -> dict:
                     "type": "text",
                     "text": mask_secret_keys(f"[Tool Call] {name}: {args}")[:3000],
                 })
+            continue
+
+        if msg.type == "tool" and is_event_message(msg):
+            conv_messages.append({"type": "text", "text": mask_secret_keys(f"[Runtime Event] {msg.content}")})
             continue
 
         if msg.type == "tool":

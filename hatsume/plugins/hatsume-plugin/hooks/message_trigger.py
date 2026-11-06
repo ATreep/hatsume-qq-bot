@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import time
+import uuid
 from collections.abc import Awaitable, Callable, Iterable
 from typing import Any
 
@@ -104,6 +105,7 @@ async def dispatch_message_hooks(
     store: HookStore | None = None,
     inject_fn: Callable[..., None] | None = None,
     now: float | None = None,
+    message_id: int | str | None = None,
 ) -> list[str]:
     """Fire every message-match Hook triggered by one group message."""
     if store is None:
@@ -135,6 +137,7 @@ async def dispatch_message_hooks(
         inject_fn = resolved_inject
 
     fired_at = time.time() if now is None else float(now)
+    delivery_id = uuid.uuid4().hex if message_id is None else str(message_id)
     fired: list[str] = []
     for record, matched_text in matches:
         hook_name = str(record["name"])
@@ -154,6 +157,14 @@ async def dispatch_message_hooks(
                 hook_name=hook_name,
                 prompt=str(record["prompt"]),
                 event_text=event_text,
+                event_key=f"hook:{group_id}:{record['id']}:message_match:{delivery_id}",
+                event_data={
+                    "hook_id": int(record["id"]),
+                    "trigger_type": HOOK_TRIGGER_MESSAGE,
+                    "fired_at": fired_at,
+                    "message_id": message_id,
+                    "user_id": user_id,
+                },
             )
         except Exception as exc:  # noqa: BLE001 - one Hook must not break the batch
             error = f"Hook injection failed: {exc}"
@@ -162,7 +173,11 @@ async def dispatch_message_hooks(
             continue
         store.record_trigger(int(record["id"]), fired_at)
         fired.append(hook_name)
-        print(f"🪝 [hook-message] fired hook={hook_name!r} group_id={group_id} user_id={user_id}")
+        print(
+            f"[hook-message] fired hook_id={record['id']} trigger_type=message_match "
+            f"group_id={group_id} user_id={user_id} fired_at={fired_at} "
+            f"message_id={message_id}"
+        )
     if fired and activate_trigger_peer(group_id, user_id):
         print(f"🪝 [hook-message] peer session active group_id={group_id} user_id={user_id}")
     return fired
