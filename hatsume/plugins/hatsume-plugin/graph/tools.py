@@ -788,7 +788,7 @@ async def send_text(
     不能传“happy”。不发送表情时传 null。
 
     ## 静默模式
-    当你认为不需要向用户发送提醒，则传递 text 为空或 null，以启用静默模式。
+    当你认为不需要向用户发送提醒，则传递 text 为空以启用静默模式。
     静默模式不会发送文字、回复或表情；仅在提供 memories 时记录记忆，此时不要求发送通道已就绪。
     """
     runtime = get_current_group_runtime()
