@@ -775,7 +775,6 @@ async def send_text(
 ) -> str:
     """向当前群发送文字，并可附带回复、可选记忆和表情控制参数。
 
-    每轮 ai_node 最多调用两次。
     memories 仅在确实需要保存长期记忆时传入；省略或传空列表不会阻止文字发送。
     CQ at 标记必须包含在 text 中，且每个标记只能指定一个 QQ 用户；不能 @ 全体成员。
     特殊控制标记请使用对应参数，不能写入 text。
@@ -794,8 +793,6 @@ async def send_text(
     runtime = get_current_group_runtime()
     memory_records = memories or []
     message_text = (text or "").strip()
-    if runtime.send_text_count >= 2:
-        return "文字发送失败：一轮 ai_node 中最多发送2条文字。"
     if not message_text:
         runtime.send_text_count += 1
         memory_count = await _record_memories(memory_records, runtime)
@@ -818,6 +815,11 @@ async def send_text(
         )
 
     runtime.send_text_count += 1
+    print(
+        f"[send_text] send attempt={runtime.send_text_count} "
+        f"text_chars={len(message_text)} has_reply={reply_to_message_id is not None}",
+        flush=True,
+    )
     message_text = mask_secret_keys(message_text)
     at_matches = list(CQ_AT_PATTERN.finditer(message_text))
     if not at_matches:

@@ -22,6 +22,11 @@ policy in `hatsume/plugins/hatsume-plugin/graph/context.py`.
   for large logs; monitoring no longer resends the entire accumulated log on
   every decision.
 - Background Agent state includes a bounded lifecycle phase/progress summary, a shared workspace marker, terminal status, and completion timestamps. Final history records include status, summary, verification fields, changed-file names, and remaining-issue summaries; raw workspace paths and full tool output are not user-facing reports.
+- `send_text` has no fixed per-`ai_node` invocation quota: third and later
+  calls still attempt delivery, and silent calls or failed sends do not exhaust
+  a text-send allowance. The per-invocation counter is diagnostic only. Existing
+  reply-target validation, send-channel errors, media quotas, the seven-round
+  delegation reminder, and the graph recursion limit remain unchanged.
 - Chat delegation counts completed tool rounds independently of message history,
   including across MCP tool-loading passes. Compaction does not reset the count
   or cause the seven-round reminder to repeat.
@@ -48,6 +53,7 @@ Focused checks (use local Python, never the project `.venv`):
 
 ```sh
 python3 -m unittest discover -s tests -p test_agent_context.py
+python3 -m unittest discover -s tests -p test_send_text.py
 python3 -m unittest discover -s tests -p test_web_researcher.py
 python3 -m unittest discover -s tests -p test_shell_agent_limits.py
 ```
