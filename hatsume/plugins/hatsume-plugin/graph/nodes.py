@@ -1525,7 +1525,11 @@ async def ai_node(state: MessagesState) -> dict:
             ),
         )
         active_mcp_tools: list[Any] = []
-        for attempt in range(2):
+        mcp_pass_used = False
+        send_text_retry_used = False
+        attempt = 0
+        while True:
+            attempt += 1
             t_pass_start = time.monotonic()
             chat_agent = create_agent(
                 model_chosen,
@@ -1582,12 +1586,13 @@ async def ai_node(state: MessagesState) -> dict:
 
             requested = consume_requested_tools()
             print(
-                f"[chat_agent] pass={attempt + 1} completed "
+                f"[chat_agent] pass={attempt} completed "
                 f"elapsed={time.monotonic() - t_pass_start:.3f}s "
                 f"requested_mcp={requested!r} active_mcp_tools={len(active_mcp_tools)}",
                 flush=True,
             )
-            if requested and attempt == 0:
+            if requested and not mcp_pass_used:
+                mcp_pass_used = True
                 grouped: dict[str, list[str]] = {}
                 for server_name, tool_name in requested:
                     grouped.setdefault(server_name, []).append(tool_name)
@@ -1606,6 +1611,14 @@ async def ai_node(state: MessagesState) -> dict:
                     ))
                 invocation_messages = response_messages
                 continue
+            if not send_text_retry_used:
+                retry_prompt = send_text_first_middleware.retry_prompt(response_messages)
+                if retry_prompt is not None:
+                    send_text_retry_used = True
+                    invocation_messages = [*response_messages, retry_prompt]
+                    continue
+            if not send_text_first_middleware.send_text_started:
+                print("⚠️ [初芽] retry ended without calling send_text", flush=True)
             break
 
         t_invocation_end = time.monotonic()

@@ -22,6 +22,12 @@ policy in `hatsume/plugins/hatsume-plugin/graph/context.py`.
   for large logs; monitoring no longer resends the entire accumulated log on
   every decision.
 - Background Agent state includes a bounded lifecycle phase/progress summary, a shared workspace marker, terminal status, and completion timestamps. Final history records include status, summary, verification fields, changed-file names, and remaining-issue summaries; raw workspace paths and full tool output are not user-facing reports.
+- If 初芽 ends without attempting `send_text`, its final output is retained in
+  context and included in a system reminder requiring `send_text`, followed by one
+  additional invocation. An empty `text` preserves silent operation. This retry
+  is independent of the dynamic MCP continuation; if the retry also ends without
+  calling `send_text`, it logs a warning and stops. An attempted call satisfies
+  the rule even if sending fails; this is not a delivery guarantee.
 - `send_text` has no fixed per-`ai_node` invocation quota: third and later
   calls still attempt delivery, and silent calls or failed sends do not exhaust
   a text-send allowance. The per-invocation counter is diagnostic only. Existing

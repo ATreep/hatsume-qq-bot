@@ -5,7 +5,7 @@ from typing import Any
 from uuid import uuid4
 
 from langchain.agents.middleware import AgentMiddleware
-from langchain.messages import HumanMessage, ToolMessage
+from langchain.messages import HumanMessage, SystemMessage, ToolMessage
 from ..runtime_events import (
     INJECTED_EVENT_TOOL,
     is_event_message,
@@ -29,6 +29,23 @@ class SendTextFirstMiddleware(AgentMiddleware):
     def __init__(self) -> None:
         self._send_text_started = False
         self._lock = asyncio.Lock()
+
+    @property
+    def send_text_started(self) -> bool:
+        """Whether this invocation attempted send_text, even if it failed."""
+        return self._send_text_started
+
+    def retry_prompt(self, messages: list[Any]) -> SystemMessage | None:
+        """Request one continuation when the agent ended without send_text."""
+        if self._send_text_started:
+            return None
+        output = getattr(messages[-1], "content", "") if messages else ""
+        print("⚠️ [初芽] ended without send_text; requesting one retry", flush=True)
+        return SystemMessage(content=(
+            "[SYSTEM] 你刚才直接结束了，但没有调用 send_text。"
+            "你必须调用 send_text；如果无需向用户发送内容，请使用空 text。"
+            f"\n你刚才的输出：\n{output}"
+        ))
 
     @staticmethod
     def _tool_name(request: Any) -> str:

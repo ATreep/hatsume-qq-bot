@@ -131,6 +131,35 @@ class ContextTests(unittest.IsolatedAsyncioTestCase):
         result = await middleware.awrap_tool_call(later_request, mcp_handler)
         self.assertEqual(result, "mcp result")
 
+    async def test_missing_send_text_retry_includes_output_and_allows_silence(self):
+        @tool
+        def send_text(text: str) -> str:
+            """Send text or remain silent with an empty string."""
+            return "silent" if not text else "sent"
+
+        model = self.model(
+            AIMessage("draft answer"),
+            AIMessage("", tool_calls=[{"name": "send_text", "args": {"text": ""}, "id": "send"}]),
+            AIMessage("done"),
+        )
+        gate = self.chat_loop.SendTextFirstMiddleware()
+        first = create_agent(model, tools=[send_text], middleware=[gate])
+        result = await first.ainvoke({"messages": [HumanMessage("task")]})
+        prompt = gate.retry_prompt(result["messages"])
+        self.assertIsInstance(prompt, SystemMessage)
+        self.assertIn("draft answer", prompt.content)
+        self.assertIn("必须调用 send_text", prompt.content)
+        second = create_agent(model, tools=[send_text], middleware=[gate])
+        result = await second.ainvoke({"messages": [*result["messages"], prompt]})
+        self.assertTrue(gate.send_text_started)
+        self.assertIsNone(gate.retry_prompt(result["messages"]))
+        self.assertTrue(any(isinstance(m, ToolMessage) and m.content == "silent" for m in result["messages"]))
+
+    def test_missing_send_text_retry_handles_empty_output(self):
+        gate = self.chat_loop.SendTextFirstMiddleware()
+        prompt = gate.retry_prompt([AIMessage("")])
+        self.assertIn("必须调用 send_text", prompt.content)
+
     def install_agent_fixtures(self, model):
         async def shell_executor(shell: str, timeout: int = 30) -> str:
             """Read a fixture log."""
