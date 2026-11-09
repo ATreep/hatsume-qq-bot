@@ -131,6 +131,36 @@ class ContextTests(unittest.IsolatedAsyncioTestCase):
         result = await middleware.awrap_tool_call(later_request, mcp_handler)
         self.assertEqual(result, "mcp result")
 
+    async def test_send_text_has_three_attempt_limit_and_last_chance_reminder(self):
+        middleware = self.chat_loop.SendTextFirstMiddleware()
+        handler = AsyncMock(side_effect=["first", RuntimeError("send failed"), "third"])
+
+        for call_id in ("one", "two"):
+            request = SimpleNamespace(tool_call={"name": "send_text", "id": call_id})
+            if call_id == "two":
+                with self.assertRaisesRegex(RuntimeError, "send failed"):
+                    await middleware.awrap_tool_call(request, handler)
+            else:
+                self.assertEqual(await middleware.awrap_tool_call(request, handler), "first")
+
+        self.assertEqual(middleware.send_text_invocations, 2)
+        reminder = await middleware.abefore_model({"messages": []}, None)
+        self.assertEqual(
+            reminder["messages"][0].content,
+            self.chat_loop.SEND_TEXT_LAST_CHANCE_MESSAGE,
+        )
+        self.assertIsNone(await middleware.abefore_model({"messages": []}, None))
+
+        third = SimpleNamespace(tool_call={"name": "send_text", "id": "three"})
+        self.assertEqual(await middleware.awrap_tool_call(third, handler), "third")
+        fourth = SimpleNamespace(tool_call={"name": "send_text", "id": "four"})
+        blocked = await middleware.awrap_tool_call(fourth, handler)
+        self.assertEqual(blocked.status, "error")
+        self.assertEqual(blocked.tool_call_id, "four")
+        self.assertIn("at most three", blocked.content)
+        self.assertEqual(middleware.send_text_invocations, 3)
+        self.assertEqual(handler.await_count, 3)
+
     async def test_missing_send_text_retry_includes_output_and_allows_silence(self):
         @tool
         def send_text(text: str) -> str:

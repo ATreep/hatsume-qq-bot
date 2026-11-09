@@ -789,6 +789,9 @@ async def send_text(
 
     ## 发送频率
     请避免频繁调用 `send_text`。仅在系统要求时，或者有重要信息需给到用户时使用。
+    每次初芽调用最多允许 3 次 `send_text`；第 2 次调用后会收到系统提醒，
+    第 3 次必须等所有任务完成后再调用。第 4 次调用会被拒绝，不会发送消息。
+    次数按调用尝试统计，即使发送失败或使用静默模式也会计入；不要把次数当作成功投递保证。
     """
     runtime = get_current_group_runtime()
     memory_records = memories or []

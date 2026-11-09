@@ -18,22 +18,73 @@ CHAT_LOOP_DELEGATION_MESSAGE = (
     "[SYSTEM] 你不应该调用太多次工具，请你立即将当前任务分发给 Agent，"
     "然后使用 send_text 工具向用户说明情况。"
 )
+MAX_SEND_TEXT_INVOCATIONS = 3
 SEND_TEXT_FIRST_WARNING = (
     "You must call send_text first before calling any other tools."
+)
+SEND_TEXT_LAST_CHANCE_MESSAGE = (
+    "[SYSTEM] 你已经调用 send_text 两次，现在只剩最后一次调用机会。"
+    "请在所有任务完成后再调用 send_text。"
+)
+SEND_TEXT_LIMIT_WARNING = (
+    "send_text invocation limit reached: at most three calls are allowed per chat invocation."
 )
 
 
 class SendTextFirstMiddleware(AgentMiddleware):
-    """Require the first executable tool call in one chat invocation to be send_text."""
+    """Require send_text first and limit it to three calls per chat invocation."""
 
     def __init__(self) -> None:
         self._send_text_started = False
+        self._send_text_invocations = 0
+        self._send_text_last_chance_reminded = False
         self._lock = asyncio.Lock()
 
     @property
     def send_text_started(self) -> bool:
         """Whether this invocation attempted send_text, even if it failed."""
         return self._send_text_started
+
+    @property
+    def send_text_invocations(self) -> int:
+        """Number of send_text attempts, including calls whose handler failed."""
+        return self._send_text_invocations
+
+    def _before_send_text(self) -> ToolMessage | None:
+        if self._send_text_invocations >= MAX_SEND_TEXT_INVOCATIONS:
+            print(
+                "⚠️ [初芽] blocked send_text: invocation limit reached "
+                f"({MAX_SEND_TEXT_INVOCATIONS})",
+                flush=True,
+            )
+            return ToolMessage(
+                content=SEND_TEXT_LIMIT_WARNING,
+                tool_call_id="",
+                name="send_text",
+                status="error",
+            )
+        self._send_text_started = True
+        self._send_text_invocations += 1
+        print(
+            f"[初芽] send_text invocation="
+            f"{self._send_text_invocations}/{MAX_SEND_TEXT_INVOCATIONS}",
+            flush=True,
+        )
+        return None
+
+    def before_model(self, state: Any, runtime: Any) -> dict[str, Any] | None:
+        """Remind the model once after its second send_text attempt."""
+        if (
+            self._send_text_invocations < 2
+            or self._send_text_last_chance_reminded
+        ):
+            return None
+        self._send_text_last_chance_reminded = True
+        print("[初芽] inserted send_text last-chance reminder", flush=True)
+        return {"messages": [SystemMessage(content=SEND_TEXT_LAST_CHANCE_MESSAGE)]}
+
+    async def abefore_model(self, state: Any, runtime: Any) -> dict[str, Any] | None:
+        return self.before_model(state, runtime)
 
     def retry_prompt(self, messages: list[Any]) -> SystemMessage | None:
         """Request one continuation when the agent ended without send_text."""
@@ -75,18 +126,18 @@ class SendTextFirstMiddleware(AgentMiddleware):
                 status="error",
             )
         async with self._lock:
-            if not self._send_text_started:
-                if tool_name != "send_text":
-                    print(
-                        f"⚠️ [初芽] blocked first tool call: {tool_name!r}; "
-                        "send_text is required first",
-                        flush=True,
-                    )
-                    return self._blocked_result(request)
-                # Mark before execution: this records the first attempted call,
-                # even if send_text later returns a validation or send error.
-                self._send_text_started = True
-                print("[初芽] first tool call accepted: send_text", flush=True)
+            if not self._send_text_started and tool_name != "send_text":
+                print(
+                    f"⚠️ [初芽] blocked first tool call: {tool_name!r}; "
+                    "send_text is required first",
+                    flush=True,
+                )
+                return self._blocked_result(request)
+            if tool_name == "send_text":
+                limit_result = self._before_send_text()
+                if limit_result is not None:
+                    limit_result.tool_call_id = str(request.tool_call.get("id", ""))
+                    return limit_result
         token = bind_tool_origin(request.tool_call)
         try:
             return await handler(request)
@@ -102,16 +153,18 @@ class SendTextFirstMiddleware(AgentMiddleware):
                 name=tool_name,
                 status="error",
             )
-        if not self._send_text_started:
-            if tool_name != "send_text":
-                print(
-                    f"⚠️ [初芽] blocked first tool call: {tool_name!r}; "
-                    "send_text is required first",
-                    flush=True,
-                )
-                return self._blocked_result(request)
-            self._send_text_started = True
-            print("[初芽] first tool call accepted: send_text", flush=True)
+        if not self._send_text_started and tool_name != "send_text":
+            print(
+                f"⚠️ [初芽] blocked first tool call: {tool_name!r}; "
+                "send_text is required first",
+                flush=True,
+            )
+            return self._blocked_result(request)
+        if tool_name == "send_text":
+            limit_result = self._before_send_text()
+            if limit_result is not None:
+                limit_result.tool_call_id = str(request.tool_call.get("id", ""))
+                return limit_result
         token = bind_tool_origin(request.tool_call)
         try:
             return handler(request)

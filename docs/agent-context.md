@@ -28,11 +28,14 @@ policy in `hatsume/plugins/hatsume-plugin/graph/context.py`.
   is independent of the dynamic MCP continuation; if the retry also ends without
   calling `send_text`, it logs a warning and stops. An attempted call satisfies
   the rule even if sending fails; this is not a delivery guarantee.
-- `send_text` has no fixed per-`ai_node` invocation quota: third and later
-  calls still attempt delivery, and silent calls or failed sends do not exhaust
-  a text-send allowance. The per-invocation counter is diagnostic only. Existing
-  reply-target validation, send-channel errors, media quotas, the seven-round
-  delegation reminder, and the graph recursion limit remain unchanged.
+- Each `ai_node` invocation allows at most three `send_text` attempts. After the
+  second attempt, middleware inserts a one-time system reminder that the third
+  attempt is the last chance and must wait until all tasks are complete. A fourth
+  attempt is rejected before the tool handler runs. Attempts count even when the
+  send fails or uses silent mode; this is an invocation limit, not a delivery
+  guarantee. Existing reply-target validation, send-channel errors, media quotas,
+  the seven-round delegation reminder, and the graph recursion limit remain
+  unchanged.
 - Chat delegation counts completed tool rounds independently of message history,
   including across MCP tool-loading passes. Compaction does not reset the count
   or cause the seven-round reminder to repeat.
