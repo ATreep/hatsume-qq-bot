@@ -190,6 +190,58 @@ class ContextTests(unittest.IsolatedAsyncioTestCase):
         prompt = gate.retry_prompt([AIMessage("")])
         self.assertIn("必须调用 send_text", prompt.content)
 
+    async def test_completion_event_checks_last_tool_once_and_allows_no_send(self):
+        @tool
+        def send_text(text: str) -> str:
+            """Send text or remain silent."""
+            return "silent" if not text else "sent"
+
+        @tool
+        def inspect_task() -> str:
+            """Inspect a task."""
+            return "finished"
+
+        model = self.model(
+            AIMessage("", tool_calls=[{"name": "send_text", "args": {"text": ""}, "id": "s"}]),
+            AIMessage("", tool_calls=[{"name": "inspect_task", "args": {}, "id": "i"}]),
+            AIMessage("done"),
+            AIMessage("no further notification needed"),
+        )
+        gate = self.chat_loop.SendTextFirstMiddleware()
+        rounds = self.chat_loop.ChatLoopDelegationMiddleware(1)
+        agent = create_agent(model, tools=[send_text, inspect_task], middleware=[rounds, gate])
+        result = await agent.ainvoke({"messages": [HumanMessage("task")]})
+        reminder = gate.completion_reminder(123)
+        self.assertEqual(len(reminder), 2)
+        self.assertEqual(reminder[0].tool_calls[0]["id"], reminder[1].tool_call_id)
+        body = json.loads(reminder[1].content)
+        self.assertEqual(body["event_type"], "chat_loop")
+        self.assertEqual(body["payload"]["last_tool_name"], "inspect_task")
+        self.assertIn("是否需要调用 send_text", body["text"])
+        await agent.ainvoke({"messages": [*result["messages"], *reminder]})
+        self.assertEqual(rounds._rounds, 2)
+        self.assertEqual(gate.send_text_invocations, 1)
+        self.assertEqual(gate.completion_reminder(123), [])
+
+    async def test_completion_event_skips_final_send_even_if_failed(self):
+        for asynchronous in (False, True):
+            gate = self.chat_loop.SendTextFirstMiddleware()
+            request = SimpleNamespace(tool_call={"name": "send_text", "id": "failed"})
+            with self.assertRaisesRegex(RuntimeError, "failed"):
+                if asynchronous:
+                    await gate.awrap_tool_call(request, AsyncMock(side_effect=RuntimeError("failed")))
+                else:
+                    gate.wrap_tool_call(request, Mock(side_effect=RuntimeError("failed")))
+            self.assertEqual(gate.completion_reminder(123), [])
+
+    def test_completion_event_without_tools_and_ignores_receiver(self):
+        gate = self.chat_loop.SendTextFirstMiddleware()
+        receiver = SimpleNamespace(tool_call={"name": self.chat_loop.INJECTED_EVENT_TOOL, "id": "event"})
+        gate.wrap_tool_call(receiver, Mock())
+        reminder = gate.completion_reminder(123)
+        self.assertIsNone(json.loads(reminder[1].content)["payload"]["last_tool_name"])
+        self.assertEqual(gate.completion_reminder(123), [])
+
     def install_agent_fixtures(self, model):
         async def shell_executor(shell: str, timeout: int = 30) -> str:
             """Read a fixture log."""

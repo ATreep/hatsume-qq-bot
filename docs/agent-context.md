@@ -28,6 +28,17 @@ policy in `hatsume/plugins/hatsume-plugin/graph/context.py`.
   is independent of the dynamic MCP continuation; if the retry also ends without
   calling `send_text`, it logs a warning and stops. An attempted call satisfies
   the rule even if sending fails; this is not a delivery guarantee.
+- After the first complete agent invocation within `ai_node`, if the last
+  attempted tool is not `send_text` (including no tool calls), append a
+  `chat_loop / send_text_completion_check` runtime event and continue once.
+  The reminder asks 初芽 to reconsider whether `send_text` is needed, not to
+  send unconditionally. Synthetic event receivers are ignored. A final failed
+  or silent `send_text` attempt still suppresses this reminder. Tracking is
+  independent of history compaction and excludes prior invocations' tools.
+  If MCP tools were requested, the event is included in that same MCP
+  continuation rather than creating a separate pass. The existing no-`send_text`
+  fallback remains independently limited to one retry; neither reminder nor
+  continuation resets tool-round counts or sending quotas.
 - Each `ai_node` invocation allows at most three `send_text` attempts. After the
   second attempt, middleware inserts a one-time system reminder that the third
   attempt is the last chance and must wait until all tasks are complete. A fourth

@@ -35,11 +35,13 @@ ToolMessage(name="receive_event__injected", tool_call_id="evt_<event_id>",
 | Message-match Hook | hook / message_match | Hook ID、平台 message ID、发送者；无 message ID 时使用独立 delivery ID |
 | Sandbox Channel | sandbox_channel / sandbox_channel | 外部时间、来源 user_id、agent_name、priority 和 source record |
 | 群成员加入 | group_increase / group_increase | 新成员 QQ、昵称、头像与明确通知对象 |
+| 首次完整调用后的发送复查 | chat_loop / send_text_completion_check | 本轮最后尝试的工具名（无工具为 null）；每次 ai_node 最多一次 |
 
 没有通用 `system_task` 事件，也没有 `system_task_text` / `system_trigger_type` 启动参数。新增类别必须显式扩展事件类型及测试。Poke 仍直接发图，不进入初芽；普通图执行结果不是后台 Agent 返回。
 
 ## 路由与去重
 
+- 发送复查是 `ai_node` 内部事件，只在首次完整调用返回且末工具不是 `send_text` 时直接追加完整 call/result 对并续跑，不经过输入队列、不创建新会话、无特定通知对象、不改变 `chat_peers`。仅当前活跃调用可触发；空闲或断线不单独启动或重放。以本次调用的一次性检查状态去重，MCP 同次续跑携带同一事件；不提供跨重启保证。
 - Agent / Timer / Hook：有活跃会话或仍在运行的图时入队；否则经已有启动锁启动或合并到一个图。回调传完整 RuntimeEvent，不能退化成 text。
 - 无 Bot 路由：保留同一 envelope 在内存队列，等待路由恢复后的正常输入；不承诺主动重放。启动异常也保留事件并打印类型摘要。
 - Sandbox 和群成员加入保持原来的启动资格、群路由与业务门槛；source record 存在事件 payload，active/idle 都不丢失。

@@ -8,6 +8,8 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain.messages import HumanMessage, SystemMessage, ToolMessage
 from ..runtime_events import (
     INJECTED_EVENT_TOOL,
+    RuntimeEvent,
+    event_messages,
     is_event_message,
     bind_tool_origin,
     reset_tool_origin,
@@ -39,6 +41,28 @@ class SendTextFirstMiddleware(AgentMiddleware):
         self._send_text_invocations = 0
         self._send_text_last_chance_reminded = False
         self._lock = asyncio.Lock()
+        self._last_tool_name: str | None = None
+        self._completion_checked = False
+
+    def completion_reminder(self, group_id: int) -> list[Any]:
+        """Check only the first completed invocation, independent of compaction."""
+        if self._completion_checked:
+            return []
+        self._completion_checked = True
+        print(
+            f"[初芽] first invocation completed last_tool={self._last_tool_name!r} "
+            f"send_text_check={self._last_tool_name != 'send_text'}",
+            flush=True,
+        )
+        if self._last_tool_name == "send_text":
+            return []
+        return event_messages(RuntimeEvent(
+            event_type="chat_loop",
+            group_id=group_id,
+            source="send_text_completion_check",
+            text="初芽，请再次检查是否需要调用 send_text 工具；如果无需发送内容，可以直接结束。",
+            payload={"last_tool_name": self._last_tool_name},
+        ))
 
     @property
     def send_text_started(self) -> bool:
@@ -126,6 +150,7 @@ class SendTextFirstMiddleware(AgentMiddleware):
                 status="error",
             )
         async with self._lock:
+            self._last_tool_name = tool_name
             if not self._send_text_started and tool_name != "send_text":
                 print(
                     f"⚠️ [初芽] blocked first tool call: {tool_name!r}; "
@@ -153,6 +178,7 @@ class SendTextFirstMiddleware(AgentMiddleware):
                 name=tool_name,
                 status="error",
             )
+        self._last_tool_name = tool_name
         if not self._send_text_started and tool_name != "send_text":
             print(
                 f"⚠️ [初芽] blocked first tool call: {tool_name!r}; "

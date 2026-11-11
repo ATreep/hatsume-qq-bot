@@ -15,8 +15,8 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 INJECTED_EVENT_TOOL = "receive_event__injected"
 EVENT_MARKER = "hatsume_runtime_event"
-EventType = Literal["agent", "timer", "hook", "sandbox_channel", "group_increase"]
-EVENT_TYPES = {"agent", "timer", "hook", "sandbox_channel", "group_increase"}
+EventType = Literal["agent", "timer", "hook", "sandbox_channel", "group_increase", "chat_loop"]
+EVENT_TYPES = {"agent", "timer", "hook", "sandbox_channel", "group_increase", "chat_loop"}
 
 
 @dataclass(frozen=True)

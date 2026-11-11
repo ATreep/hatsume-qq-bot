@@ -1591,6 +1591,13 @@ async def ai_node(state: MessagesState) -> dict:
                 f"requested_mcp={requested!r} active_mcp_tools={len(active_mcp_tools)}",
                 flush=True,
             )
+            completion_reminder = (
+                send_text_first_middleware.completion_reminder(get_current_group_id())
+                if attempt == 1 else []
+            )
+            if completion_reminder:
+                response_messages = [*response_messages, *completion_reminder]
+                agent_tool_messages.extend(completion_reminder)
             if requested and not mcp_pass_used:
                 mcp_pass_used = True
                 grouped: dict[str, list[str]] = {}
@@ -1609,6 +1616,9 @@ async def ai_node(state: MessagesState) -> dict:
                         server_name,
                         [item for item in infos if item.name in names],
                     ))
+                invocation_messages = response_messages
+                continue
+            if completion_reminder:
                 invocation_messages = response_messages
                 continue
             if not send_text_retry_used:

@@ -17,7 +17,7 @@ from pydantic import PrivateAttr
 
 ROOT = Path(__file__).resolve().parents[1] / "hatsume/plugins/hatsume-plugin"
 PACKAGE = "_hatsume_runtime_event_tests"
-EVENT_TYPES = ("agent", "timer", "hook", "sandbox_channel", "group_increase")
+EVENT_TYPES = ("agent", "timer", "hook", "sandbox_channel", "group_increase", "chat_loop")
 
 
 @pytest.fixture
@@ -163,6 +163,7 @@ def test_consume_inputs_batches_only_adjacent_humans_and_keeps_mixed_order(modul
         humans[4],
         events[3],
         events[4],
+        events[5],
     ]
     snapshot = list(inputs)
     messages = module.consume_inputs(inputs)
@@ -176,6 +177,8 @@ def test_consume_inputs_batches_only_adjacent_humans_and_keeps_mixed_order(modul
         "ai",
         "tool",
         "human",
+        "ai",
+        "tool",
         "ai",
         "tool",
         "ai",
