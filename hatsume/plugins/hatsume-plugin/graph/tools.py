@@ -635,7 +635,8 @@ def get_avatar(qq_id: int) -> str:
 @tool
 async def view_image(image_url: str, prompt: str = "") -> str:
     """
-    使用指定视觉模型读取一张图片并回答提示词中的问题。此工具不会发送图片。
+    使用指定视觉模型读取一张图片并返回分析结果。此工具不会发送图片。
+    返回结果用户不可见，你必须通过 send_xxx 工具将图片内容传达给用户。
 
     ## 参数：
     - image_url: 图片地址，支持：
@@ -783,24 +784,23 @@ async def send_text(
     - `reply_to_message_id` 用于指定需要回复的消息ID。可以为用户的消息也可以为你自己的消息。
     - hatsumeface 必须严格填写系统提示中列出的原始情绪文字，必须逐字匹配；禁止使用英文名称、翻译、别名、同义词或自行改写。例如可选情绪是“开心”时只能传“开心”，不能传“happy”。不发送表情时传 null。
 
-    ## 静默模式
-    当你被要求或者你认为不需要向用户发送文字消息时，传递 text 为空以启用静默模式。
-    静默模式不会发送文字、回复或表情；仅在提供 memories 时记录记忆。
+    ## 文本校验与返回
+    text 必须包含非空白文字；省略、null、空字符串或 trim 后为空字符串都会返回错误，
+    不发送文字、回复或表情，也不记录 memories。不支持静默模式或仅记录记忆。
+    成功时返回发送结果及可用的消息 ID；发送通道未就绪、回复目标无效或发送失败时返回错误说明。
 
     ## 发送频率
     请避免频繁调用 `send_text`。仅在系统要求时，或者有重要信息需给到用户时使用。
     每次初芽调用最多允许 3 次 `send_text`；第 2 次调用后会收到系统提醒，
     第 3 次必须等所有任务完成后再调用。第 4 次调用会被拒绝，不会发送消息。
-    次数按调用尝试统计，即使发送失败或使用静默模式也会计入；不要把次数当作成功投递保证。
+    次数按调用尝试统计，即使文本校验失败或发送失败也会计入；不要把次数当作成功投递保证。
     """
     runtime = get_current_group_runtime()
     memory_records = memories or []
     message_text = (text or "").strip()
     if not message_text:
-        runtime.send_text_count += 1
-        memory_count = await _record_memories(memory_records, runtime)
-        print(f"[send_text] silent mode: recorded_memories={memory_count}")
-        return f"已启用静默模式，未发送文字或表情，已记录 {memory_count} 条记忆。"
+        print("⚠️ [send_text] rejected empty or whitespace-only text", flush=True)
+        return "❌ 文字发送失败：text 不能为空或仅包含空白字符；不支持静默模式。"
     answer = runtime.conversation.ai_answer
     if answer is None:
         return "文字发送失败：发送通道未就绪。"

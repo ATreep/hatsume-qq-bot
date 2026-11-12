@@ -93,21 +93,29 @@ class SendTextTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("send attempt=3", output.getvalue())
         self.assertIn("message_id=1005", output.getvalue())
 
-    async def test_silent_calls_do_not_block_later_messages(self):
-        for text in ("", None, "  " ):
-            self.assertIn("静默模式", await self.send(text))
+    async def test_empty_text_errors_without_side_effects_and_allows_later_send(self):
+        for text in ("", None, "  ", "\t\n", "　"):
+            result = await self.send(text, memories=[{"content": "must not record"}], hatsumeface="开心")
+            self.assertIn("文字发送失败", result)
+            self.assertIn("text 不能为空", result)
         self.sender.assert_not_awaited()
-        self.assertEqual(self.memories.await_count, 3)
+        self.memories.assert_not_awaited()
+        self.assertEqual(self.runtime.send_text_count, 0)
         for index in range(3):
             self.assertIn("文字已成功发送", await self.send(f"message {index}"))
         self.assertEqual(self.sender.await_count, 3)
 
-    async def test_repeated_silent_calls_work_without_send_channel(self):
+    async def test_empty_and_omitted_text_error_before_channel_or_reply_validation(self):
         self.runtime.conversation.ai_answer = None
-        for _ in range(4):
-            self.assertIn("静默模式", await self.send(""))
+        for text in (None, "", " \n "):
+            self.assertIn("text 不能为空", await self.send(text, reply_to_message_id=42))
+        self.assertIn("text 不能为空", await self.send_text.ainvoke({}))
         self.sender.assert_not_awaited()
-        self.assertEqual(self.memories.await_count, 4)
+        self.memories.assert_not_awaited()
+
+    async def test_nonempty_text_is_trimmed(self):
+        self.assertIn("文字已成功发送", await self.send(" \n hello \t"))
+        self.sender.assert_awaited_once_with(["hello"])
 
     async def test_failed_sends_do_not_block_later_messages(self):
         self.sender.side_effect = [False, RuntimeError("delivery unavailable"), 1003, 1004]

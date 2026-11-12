@@ -24,7 +24,9 @@ policy in `hatsume/plugins/hatsume-plugin/graph/context.py`.
 - Background Agent state includes a bounded lifecycle phase/progress summary, a shared workspace marker, terminal status, and completion timestamps. Final history records include status, summary, verification fields, changed-file names, and remaining-issue summaries; raw workspace paths and full tool output are not user-facing reports.
 - If 初芽 ends without attempting `send_text`, its final output is retained in
   context and included in a system reminder requiring `send_text`, followed by one
-  additional invocation. An empty `text` preserves silent operation. This retry
+  additional invocation. The reminder requires non-whitespace `text`; omitted,
+  null, empty or whitespace-only text returns an error without delivery or memory
+  recording. There is no silent mode. This retry
   is independent of the dynamic MCP continuation; if the retry also ends without
   calling `send_text`, it logs a warning and stops. An attempted call satisfies
   the rule even if sending fails; this is not a delivery guarantee.
@@ -33,7 +35,7 @@ policy in `hatsume/plugins/hatsume-plugin/graph/context.py`.
   `chat_loop / send_text_completion_check` runtime event and continue once.
   The reminder asks 初芽 to reconsider whether `send_text` is needed, not to
   send unconditionally. Synthetic event receivers are ignored. A final failed
-  or silent `send_text` attempt still suppresses this reminder. Tracking is
+  or invalid-text `send_text` attempt still suppresses this reminder. Tracking is
   independent of history compaction and excludes prior invocations' tools.
   If MCP tools were requested, the event is included in that same MCP
   continuation rather than creating a separate pass. The existing no-`send_text`
@@ -43,7 +45,7 @@ policy in `hatsume/plugins/hatsume-plugin/graph/context.py`.
   second attempt, middleware inserts a one-time system reminder that the third
   attempt is the last chance and must wait until all tasks are complete. A fourth
   attempt is rejected before the tool handler runs. Attempts count even when the
-  send fails or uses silent mode; this is an invocation limit, not a delivery
+  send fails or text validation fails; this is an invocation limit, not a delivery
   guarantee. Existing reply-target validation, send-channel errors, media quotas,
   the seven-round delegation reminder, and the graph recursion limit remain
   unchanged.

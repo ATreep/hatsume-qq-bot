@@ -161,15 +161,15 @@ class ContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(middleware.send_text_invocations, 3)
         self.assertEqual(handler.await_count, 3)
 
-    async def test_missing_send_text_retry_includes_output_and_allows_silence(self):
+    async def test_missing_send_text_retry_includes_output_and_requires_nonempty_text(self):
         @tool
         def send_text(text: str) -> str:
-            """Send text or remain silent with an empty string."""
-            return "silent" if not text else "sent"
+            """Send nonempty text."""
+            return "error: empty text" if not text.strip() else "sent"
 
         model = self.model(
             AIMessage("draft answer"),
-            AIMessage("", tool_calls=[{"name": "send_text", "args": {"text": ""}, "id": "send"}]),
+            AIMessage("", tool_calls=[{"name": "send_text", "args": {"text": "已处理"}, "id": "send"}]),
             AIMessage("done"),
         )
         gate = self.chat_loop.SendTextFirstMiddleware()
@@ -183,7 +183,9 @@ class ContextTests(unittest.IsolatedAsyncioTestCase):
         result = await second.ainvoke({"messages": [*result["messages"], prompt]})
         self.assertTrue(gate.send_text_started)
         self.assertIsNone(gate.retry_prompt(result["messages"]))
-        self.assertTrue(any(isinstance(m, ToolMessage) and m.content == "silent" for m in result["messages"]))
+        self.assertIn("非空白的 text", prompt.content)
+        self.assertNotIn("请使用空 text", prompt.content)
+        self.assertTrue(any(isinstance(m, ToolMessage) and m.content == "sent" for m in result["messages"]))
 
     def test_missing_send_text_retry_handles_empty_output(self):
         gate = self.chat_loop.SendTextFirstMiddleware()
@@ -193,8 +195,8 @@ class ContextTests(unittest.IsolatedAsyncioTestCase):
     async def test_completion_event_checks_last_tool_once_and_allows_no_send(self):
         @tool
         def send_text(text: str) -> str:
-            """Send text or remain silent."""
-            return "silent" if not text else "sent"
+            """Send nonempty text."""
+            return "error: empty text" if not text.strip() else "sent"
 
         @tool
         def inspect_task() -> str:
@@ -202,7 +204,7 @@ class ContextTests(unittest.IsolatedAsyncioTestCase):
             return "finished"
 
         model = self.model(
-            AIMessage("", tool_calls=[{"name": "send_text", "args": {"text": ""}, "id": "s"}]),
+            AIMessage("", tool_calls=[{"name": "send_text", "args": {"text": "已处理"}, "id": "s"}]),
             AIMessage("", tool_calls=[{"name": "inspect_task", "args": {}, "id": "i"}]),
             AIMessage("done"),
             AIMessage("no further notification needed"),

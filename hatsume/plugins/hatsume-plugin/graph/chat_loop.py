@@ -118,7 +118,7 @@ class SendTextFirstMiddleware(AgentMiddleware):
         print("⚠️ [初芽] ended without send_text; requesting one retry", flush=True)
         return SystemMessage(content=(
             "[SYSTEM] 你刚才直接结束了，但没有调用 send_text。"
-            "你必须调用 send_text；如果无需向用户发送内容，请使用空 text。"
+            "你必须调用 send_text，并提供非空白的 text；空文本会报错，不支持静默模式。"
             f"\n你刚才的输出：\n{output}"
         ))
 
