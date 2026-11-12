@@ -9,7 +9,7 @@
 
 ## 首次配置
 
-已有部署的配置已从旧源码和环境迁移到这两份文件，保留高级、轻量、迷你、代码、视觉、System One、Embedding 和 SenseNova 图片模型选择。运行时代码不再从环境读取模型 API Key。
+已有部署的配置已从旧源码和环境迁移到这两份文件，保留高级、轻量、迷你、代码、视觉、System One、Embedding 和 OpenAI 图片生成和编辑模型选择。运行时代码不再从环境读取模型 API Key。
 
 新部署可以复制 `examples/model-config/providers.yml` 和 `examples/model-config/models.yml`，然后填写自己的 Key 并选择实际可用的模型。这些示例只是格式示范，不代表迁移现有记忆向量的方案；若更换 Embedding 模型，必须同时重建已有记忆向量，并保持向量维度与当前存储一致。System One 保留独立的结构化协议：当前聊天判断使用 `/systemone`，共享桌面协调请求使用 `/decisions`，供应商必须支持对应路由。
 
@@ -75,7 +75,7 @@ roles:
 每次调用按顺序尝试：前一个条目抛出任何错误（HTTP 错误、连接失败、响应解析错误等）或超过 `timeout` 时，自动改用下一个；全部失败时抛出最后一个错误。每次调用都从主配置重新开始，不记忆上次失败的供应商。日志只记录失败条目的供应商、模型和错误类型/状态码。
 
 - `timeout` 是单个条目整次调用的上限，包含 SDK 自身的重试；同时作为 SDK 单次 HTTP 请求的超时，同步调用也受其限制。未设置时只依赖 SDK 默认超时，可能长时间等待后才切换。
-- 适用范围：聊天角色（含 `create_agent` 工具调用和同步 `invoke`）、`systemone`、`embedding`、`image_sensenova`、`tts`。单条目角色仍直接返回原 SDK 客户端，行为不变。
+- 适用范围：聊天角色（含 `create_agent` 工具调用和同步 `invoke`）、`systemone`、`embedding`、`image_gen`、`image_edit`、`tts`。单条目角色仍直接返回原 SDK 客户端，行为不变。
 - `systemone` 的请求状态必须是纯文本/JSON：当前消息和最近消息中的 OpenAI `image_url`/`img_url` 内容段会在发送前替换为 `Image N` 占位符，并按出现顺序移动到请求顶层的 `images` 数组（使用原始 data URL）。这样可避免 System One 将多模态内容误判为非法状态；图片模型会按 `Image 1`、`Image 2` 的顺序读取这些图片。由于当前意图决策模型不支持 GIF，GIF 图片会在构造 System One 状态前先交给视觉模型生成文字描述，不会以 GIF 原图发送给决策模型。
 - 工具调用时，每个条目使用自己 SDK 的工具格式；中途失败的对话历史会原样交给下一个条目。不同 API 之间切换时，供应商专有的推理内容等字段可能被下一个供应商忽略。
 - 调用方覆盖 `reasoning_effort` 时会应用到所有 OpenAI 条目；Google 备用条目保留自己的 thinking 设置（Google 主配置仍按原规则报错）。`thinking=False` 对所有条目生效。
@@ -138,10 +138,11 @@ API Key 只能直接写入 `providers.yml`，文件必须保持 owner-only 权�
 | `advance`, `lite`, `mini`, `coding`, `vision` | `openai_chat_completions`, `openai_responses`, `google_genai` |
 | `systemone` | `systemone` |
 | `embedding` | `openai_embeddings` |
-| `image_sensenova` | `sensenova_images` |
+| `image_gen` | `openai_image_gen` |
+| `image_edit` | `openai_image_edit` |
 | `tts` | `openai_chat_completions` |
 
-这次只新增三种标准聊天 API 的可切换适配器。SenseNova 图片和 System One 适配器保留，其供应商与模型选择也改为读取 YAML。需要特殊 `extra_body` 的聊天供应商可以保存为 `supported_apis: []`，本轮不能选为聊天模型。
+标准聊天 API、OpenAI 图片生成/编辑和 System One 的供应商与模型选择均读取 YAML。SenseNova 图片 API 与旧角色已移除。需要特殊 `extra_body` 的聊天供应商可以保存为 `supported_apis: []`，本轮不能选为聊天模型。
 
 | API | 可配置选项 |
 |---|---|
@@ -154,3 +155,22 @@ API Key 只能直接写入 `providers.yml`，文件必须保持 owner-only 权�
 ## 验证
 
 聚焦测试为 `tests/test_model_config.py`、`tests/test_model_commands.py`、`tests/test_model_protocols.py` 和 `tests/test_model_failover.py`。协议测试使用真实 SDK 访问本地 HTTP Server，不调用收费模型 API。使用本地 Python 环境分别并行运行；不要使用或修改项目 `.venv`，也不需要运行整个测试集合。
+
+## OpenAI 图片生成与编辑
+
+`generate_image` 保留统一入口：参考图列表为空时使用 `image_gen` 角色调用
+`POST /images/generations`；非空时使用 `image_edit` 角色调用 `POST /images/edits`。
+默认配置分别为 `magpie` 的 `group/image-gen` 和 `group/image-edit`，供应商需声明
+`openai_image_gen` 和 `openai_image_edit`。两种角色独立配置超时和同 API 的故障转移链。
+
+请求使用 JSON，包含 `model`、`prompt`、`n: 1`、`size: auto`；编辑请求额外包含
+`images: [{image_url: ...}]`。HTTP/HTTPS 和 data URI 原样传递；沙盒绝对路径或
+`file://` 路径仍通过当前群读取与图片字节校验转换为 data URI。不发送 SenseNova 的
+`watermark`、`prompt_extend`，也不强制 `response_format: url`。协议依据 OpenAI
+Images API 的 JSON 编辑请求（https://developers.openai.com/api/reference/resources/images/methods/edit）。
+
+返回 HTTP/HTTPS URL 时直接交给后续发送工具；返回 `b64_json` 时严格解码，写入临时
+宿主文件并复制到当前群沙盒的随机 `.png` 路径，宿主临时文件无论成功失败均删除。
+工具只返回短 URL 或 `file://` 路径，不向模型输出大段 base64；必须随后调用
+`send_image` 才会发送给用户。请求/结果日志仅记录角色、模型、引用图数量、描述长度和
+输出类型，不记录凭证、描述全文或图片内容。无效响应触发现有故障转移，取消继续向上传播。

@@ -119,7 +119,7 @@ def endpoint():
     "images,endpoint_name",
     [([], "generations"), (["https://example.test/source.png"], "edits")],
 )
-def test_retained_sensenova_image_api(
+def test_openai_image_api(
     tmp_path, endpoint, monkeypatch, images, endpoint_name
 ):
     models = importlib.import_module(f"{PACKAGE}.models")
@@ -130,20 +130,25 @@ def test_retained_sensenova_image_api(
     store.save_provider(
         "probe",
         base_url=base + "/v1",
-        supported_apis=["sensenova_images"],
+        supported_apis=["openai_image_gen", "openai_image_edit"],
         api_key="fake-local-key",
         create=True,
     )
-    store.use_model("image_sensenova", "probe", "sensenova-probe")
+    role = "image_edit" if images else "image_gen"
+    store.use_model(role, "probe", f"group/{role.replace('_', '-')}")
     with runtime.bind_group_runtime(runtime.GroupRuntime(group_id=123)):
         result = asyncio.run(
-            models.generate_image_for_sensenova("Draw a flower", images)
+            models.generate_image_for_openai("Draw a flower", images)
         )
     assert result == "https://example.test/result.png"
     path, payload, headers = captured[0]
     assert path == f"/v1/images/{endpoint_name}"
     assert headers["Authorization"] == "Bearer fake-local-key"
-    assert payload["model"] == "sensenova-probe"
+    assert payload["model"] == f"group/{role.replace('_', '-')}"
+    assert payload["prompt"] == "Draw a flower"
+    assert payload["n"] == 1
+    assert payload["size"] == "auto"
+    assert not {"watermark", "prompt_extend", "response_format"} & payload.keys()
     if images:
         assert payload["images"] == [{"image_url": images[0]}]
     else:

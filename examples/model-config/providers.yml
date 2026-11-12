@@ -22,3 +22,9 @@ providers:
     api_key: ''
     supported_apis:
       - systemone
+  magpie:
+    base_url: http://host.docker.internal:3425/v1
+    api_key: ''
+    supported_apis:
+      - openai_image_gen
+      - openai_image_edit

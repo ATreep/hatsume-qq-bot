@@ -24,7 +24,8 @@ ROLE_APIS = {
     **{name: CHAT_APIS for name in ("advance", "lite", "mini", "coding", "vision")},
     "systemone": frozenset({"systemone"}),
     "embedding": frozenset({"openai_embeddings"}),
-    "image_sensenova": frozenset({"sensenova_images"}),
+    "image_gen": frozenset({"openai_image_gen"}),
+    "image_edit": frozenset({"openai_image_edit"}),
     "tts": frozenset({"openai_chat_completions"}),
 }
 ALL_APIS = frozenset().union(*ROLE_APIS.values())

@@ -8,7 +8,7 @@ import pytest
 
 from model_provider_support import PACKAGE, PLUGIN, commands, config
 
-REMOVED_ROLES = ("image_openai", "image_volc", "image_kege", "video_1_0", "video_1_5")
+REMOVED_ROLES = ("image_sensenova", "image_openai", "image_volc", "image_kege", "video_1_0", "video_1_5")
 
 
 @pytest.mark.parametrize("role", REMOVED_ROLES)
@@ -17,7 +17,7 @@ def test_removed_roles_are_rejected(tmp_path, role):
     store.save_provider(
         "probe",
         base_url="https://example.test/v1",
-        supported_apis=["sensenova_images"],
+        supported_apis=["openai_image_gen"],
         api_key="test-key",
         create=True,
     )
@@ -29,7 +29,7 @@ def test_removed_roles_are_rejected(tmp_path, role):
 
 
 @pytest.mark.parametrize(
-    "api", ("openai_images", "ark_images", "kege_images", "ark_video")
+    "api", ("sensenova_images", "openai_images", "ark_images", "kege_images", "ark_video")
 )
 def test_removed_provider_apis_are_rejected(tmp_path, api):
     store = config.ModelConfigStore(tmp_path)
@@ -45,7 +45,7 @@ def test_removed_provider_apis_are_rejected(tmp_path, api):
 def test_removed_factories_and_video_tool_are_absent():
     models = importlib.import_module(f"{PACKAGE}.models")
     for name in (
-        "generate_image_for_openai",
+        "generate_image_for_sensenova",
         "generate_image_for_volc",
         "generate_image_for_kege",
         "generate_video_for",

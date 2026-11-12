@@ -151,20 +151,20 @@ async def _resolve_image_srcs(images: list[str]) -> list[str]:
             resolved.append(src)
     return resolved
 
-async def generate_image_for_sensenova(
+async def generate_image_for_openai(
     prompt: str,
     images: list[str] | None = None,
     *,
     model: str | None = None,
 ) -> str:
-    """Generate or edit an image via SenseNova and return its temporary URL."""
-    chain = get_model_config_store().resolve_chain("image_sensenova")
+    """Generate or edit an image, returning an HTTP URL or sandbox file URI."""
+    image_sources = await _resolve_image_srcs(images or [])
+    role = "image_edit" if image_sources else "image_gen"
+    endpoint = "edits" if image_sources else "generations"
+    chain = get_model_config_store().resolve_chain(role)
     if model:
         # An explicit model ID names a model of the primary provider only.
         chain[0]["model"] = model
-
-    image_sources = await _resolve_image_srcs(images or [])
-    endpoint = "edits" if image_sources else "generations"
 
     async def request(settings: dict[str, Any]) -> str:
         payload: dict[str, Any] = {
@@ -172,12 +172,13 @@ async def generate_image_for_sensenova(
             "prompt": prompt,
             "n": 1,
             "size": "auto",
-            "watermark": False,
-            "prompt_extend": True,
-            "response_format": "url",
         }
         if image_sources:
             payload["images"] = [{"image_url": src} for src in image_sources]
+        print(
+            f"🖼️ [image] request role={role} model={settings['model']} "
+            f"references={len(image_sources)} prompt_chars={len(prompt)}"
+        )
         timeout = settings.get("timeout", 300)
         async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.post(
@@ -188,18 +189,53 @@ async def generate_image_for_sensenova(
             response.raise_for_status()
             response_data = response.json()
 
-        image_url = response_data["data"][0]["url"]
+        if not isinstance(response_data, dict):
+            raise ValueError("OpenAI image response missing image data")
+        data = response_data.get("data")
+        if not isinstance(data, list) or not data or not isinstance(data[0], dict):
+            raise ValueError("OpenAI image response missing image data")
+        image = data[0]
+        encoded = image.get("b64_json")
+        if isinstance(encoded, str) and encoded:
+            import tempfile
+
+            from .group_runtime import get_current_group_id
+            from .infra import copy_host_file_to_sandbox
+
+            try:
+                image_bytes = base64.b64decode(encoded, validate=True)
+            except ValueError as exc:
+                raise ValueError("OpenAI image response contains invalid base64") from exc
+            if not image_bytes:
+                raise ValueError("OpenAI image response contains empty image data")
+            destination = f"/tmp/hatsume-generated-{uuid.uuid4().hex}.png"
+            temporary_path: Path | None = None
+            try:
+                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as file:
+                    temporary_path = Path(file.name)
+                    file.write(image_bytes)
+                await copy_host_file_to_sandbox(
+                    temporary_path, destination, timeout=30,
+                    group_id=get_current_group_id(),
+                )
+            finally:
+                if temporary_path is not None:
+                    temporary_path.unlink(missing_ok=True)
+            print(f"🖼️ [image] completed role={role} output=sandbox bytes={len(image_bytes)}")
+            return f"file://{destination}"
+        image_url = image.get("url")
         if not isinstance(image_url, str) or not image_url.startswith(("http://", "https://")):
-            raise ValueError("SenseNova image response missing URL")
+            raise ValueError("OpenAI image response missing URL or base64 image")
+        print(f"🖼️ [image] completed role={role} output=url")
         return image_url
 
-    # The async HTTP client enforces each configured entry timeout directly.
+    # HTTP enforces each entry timeout; failover retains cancellation semantics.
     return await run_with_failover(
         [
             (entry_label(settings), None, lambda settings=settings: request(settings))
             for settings in chain
         ],
-        "image model",
+        f"image model ({role})",
     )
 
 

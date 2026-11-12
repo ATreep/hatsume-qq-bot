@@ -1346,29 +1346,36 @@ async def send_file(file_url: str, file_name: str | None = None) -> str:
 
 @tool
 async def generate_image(prompt: str, image_urls: list[str]) -> str:
-    """
-    AI 图片生成工具。
+    """通过 OpenAI 图片接口生成或编辑图片，返回临时 URL 或沙盒 file:// 路径，不直接发送。
 
-    ## 参数：
-    - prompt: 图片描述，支持中文或英文。描述越详细，生成效果越好。
-    - image_urls: 参考图片的 URL 列表，可以为空列表 []。支持 HTTP URL 和 沙盒文件的绝对路径（file:// 开头）。请将所有相关的参考图片都通过 URL 的形式放到这个列表中，禁止将图片链接放在提示词中。
-    
-    ## 注意：
-    - 如果用户要求将给定图片修改为你自己的形象，除了在 prompts 中描述你自己的特征外，还需要在 image_urls 中添加你自己头像的链接 （使用 get_avatar 工具获取）。
-    - 如果你要向 image_urls 传入多张图片，你需要在 prompts 中用序号标注 图1、图2、... ，并分别描述这些图片的内容。
-    - 在得到生成图片的 URL 或路径后，请迅速通过 send_image 工具发送给用户，或者保存到特定位置。禁止将图片 URL 直接返回给用户。
+    ## 使用场景
+    用户要求画图时必须调用；image_urls 为空使用 image_gen 角色，有参考图使用
+    image_edit 角色。查看或理解图片应使用图片理解工具，不要调用本工具。
+
+    ## 参数
+    - prompt：必填，中英文图片描述或编辑要求。多图时用图1、图2等序号说明对应关系。
+    - image_urls：必填的参考图列表；纯生成传 []。支持 HTTP/HTTPS URL、base64
+      data URI、沙盒绝对路径或 file:// 绝对路径。图片链接放在列表中，不要放入 prompt。
+
+    ## 注意
+    - 修改为初芽形象时，先用 get_avatar 获取头像并加入参考图，同时描述初芽特征。
+    - 按当前群限流，过于频繁或接口失败时返回错误，不代表图片已经发送。
+
+    ## 返回
+    成功时返回生成图片的临时 URL 或沙盒 file:// 路径。用户看不到图片，必须随后
+    调用 send_image(image_url=返回的URL或路径) 发送；不要将图片 URL 直接发给用户。
     """
-    from ..models import generate_image_for_sensenova
+    from ..models import generate_image_for_openai
 
     runtime = get_current_group_runtime()
     if runtime.is_generate_image_rate_limited_callback():
         return f"❌ 图片生成请求过于频繁，请 {GENERATE_IMAGE_RATE_LIMIT_SECONDS // 60} 分钟后再试。"
 
-    print(f"Generate image: {prompt}")
+    print(f"[generate_image] references={len(image_urls)} prompt_chars={len(prompt)}")
     runtime.update_generate_image_time_callback()
     try:
-        url = await generate_image_for_sensenova(prompt, images=image_urls)
-        result_msg = f"图片已成功生成并上传到临时链接：{url}\n"
+        url = await generate_image_for_openai(prompt, images=image_urls)
+        result_msg = f"图片已成功生成，尚未发送。请使用 send_image 发送：{url}\n"
     except Exception as e:
         print(f"❌ generate_image failed: {e}")
         traceback.print_exc()

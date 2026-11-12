@@ -48,3 +48,13 @@ roles:
     api: openai_chat_completions
     model: mimo-v2.5-tts-voicedesign
     options: {}
+  image_gen:
+    provider: magpie
+    api: openai_image_gen
+    model: group/image-gen
+    options: {}
+  image_edit:
+    provider: magpie
+    api: openai_image_edit
+    model: group/image-edit
+    options: {}

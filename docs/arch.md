@@ -50,7 +50,7 @@ flowchart LR
 | 图片查看 | view_image | 使用 ZHTH 的 `GPT_5_6_LUNA` 专用客户端描述 HTTP/HTTPS 或沙盒 file:// 图片 | graph/tools.py、models.py、infra.py |
 | 随机 ACG 图片 | 白名单群戳一戳 | 从 macOS Photos 的 ACG 相册导出并直接发送；非白名单群静默返回 | handlers/tools.py |
 | 图片发送 | send_image | 支持 HTTP、base64 和沙盒 file:// 文件，每轮最多三张 | graph/tools.py |
-| 图片生成 | generate_image | 使用 SenseNova 图像接口，支持参考图和限流 | graph/tools.py、models.py、state.py |
+| 图片生成 | generate_image | 使用 OpenAI 图片生成/编辑接口，支持参考图和限流 | graph/tools.py、models.py、state.py |
 | 语音生成 | generate_tts | 使用 `models.yml` 中独立的 `tts` 角色请求 MiMo TTS，输出可由 `send_voice` 发送的沙盒 MP3 路径 | graph/tools.py、models.py、prompts.py |
 | 视频发送 | send_video | 支持 HTTP URL、沙盒绝对路径和沙盒 file:// 文件，每轮最多一个 | graph/tools.py |
 | 声音发送 | send_voice | 支持 HTTP/HTTPS 和沙盒 file://；网络文件下载到 /tmp，按后缀仅允许 MP3，其他格式保留文件并返回沙盒路径 | graph/tools.py |
@@ -594,7 +594,7 @@ sequenceDiagram
 - `ContainerRuntime` 按群保存启动锁、active、引用计数、前台进程、前台 owner task 和延迟逻辑停用任务。同群状态合并，不同群命令可并行；它不再代表独立 Docker 容器。
 - `run_cmd()` 与后台命令直接以 `/work/hatsume` 为 cwd 启动 Bash，通过每次调用自己的 stdin 传递脚本，不读写共享 `virtual/script.sh`；stdout/stderr 经独立管道或唯一临时日志返回。
 - 所有调用点在进入 infra.py 时传递经过校验的显式 `group_id`；task-local runtime 只保留为 API 边界的兼容解析方式，不用于跨层猜测目标进程所有权。
-- 基础设施前台默认超时为 300 秒；shell_executor 使用调用者显式 timeout，chat_agent 在工具边界限制为 1 至 60 秒，coding_agent 不设上限。主图和后台 Agent 的 LLM 请求统一走异步接口；图片下载、Pexels/DeepSeek/Skill 网络请求和 SenseNova/TTS 请求使用异步 HTTP/SDK，避免同步 I/O 阻塞事件循环。
+- 基础设施前台默认超时为 300 秒；shell_executor 使用调用者显式 timeout，chat_agent 在工具边界限制为 1 至 60 秒，coding_agent 不设上限。主图和后台 Agent 的 LLM 请求统一走异步接口；图片下载、Pexels/DeepSeek/Skill 网络请求和 OpenAI 图片/TTS 请求使用异步 HTTP/SDK，避免同步 I/O 阻塞事件循环。
 - 后台命令的进程、临时日志和 stdin 所有权包含群号；跨群进程 ID 不可读取或终止。
 - 每群独立引用计数。该群最后一个进程释放后等待五分钟再把逻辑 runtime 标记为 inactive；同群新任务只取消该群延迟任务。
 - 前台命令和本地文件复制被取消或超时时都会 kill 并 await 对应子进程后再解除跟踪；reset 先取消并等待目标群 owner task，再移除该群状态，不会留下失联子进程，也不会停止或删除 `hatsume-containerization`。
@@ -609,7 +609,7 @@ sequenceDiagram
 - 当前普通消息图片使用同一份已校验字节同时生成沙盒 Markdown 路径和 `image_url` data URI。初芽优先直接理解当前多模态图片，不无条件重复调用 `view_image`；只有图片未作为多模态内容提供、需要读取历史沙盒图片，或需要专用视觉模型进行 OCR、坐标识别或详细分析时，才使用 `view_image(file://...)`。回复图片优先复用沙盒中的确定性路径，缺失时从 OneBot 临时 URL 恢复；合并转发图片保持临时 URL 且不附加顶层多模态块。
 - search_image 使用固定的 Pexels Search API，通过 PIXELS_API_KEY 鉴权；网络请求在线程中执行，最多返回十条带来源信息的候选结果，再由聊天 Agent 复用 send_image 发送。
 - view_image 返回结果用户不可见，初芽必须通过 `send_xxx` 工具将图片内容传达给用户；工具本身不发送图片。view_image 接受可选 `prompt`，空字符串或纯空白时使用预置图片描述提示词，否则使用自定义提示词。查询截图控件坐标时 chat_agent 应指定目标、原图像素坐标系、中心点和边界框输出格式。HTTP/HTTPS 图片 URL 直接交给轻量模型；沙盒 file:// 绝对路径通过 infra.py 的统一读取边界传入当前 runtime 的显式群号，在当前容器读取 base64 后由 Pillow 校验实际图片格式并生成 data URI。该流程不依赖 `file` 命令或文件扩展名。
-- generate_image 使用 SenseNova 图像接口；有参考图时复用同一个按群读取和字节校验边界，再以 data URI 交给图像接口。
+- generate_image 按参考图是否为空使用 OpenAI image_gen/image_edit 角色；有参考图时复用同一个按群读取和字节校验边界，再以 data URI 交给图像接口。
 - 白名单群戳一戳时通过 AppleScript 将随机 ACG 图片导出到唯一宿主临时目录，发送后清理该目录；导出失败时也会清理并静默返回。
 - 戳一戳路径先检查 `POKE_GROUP_WHITELIST`；集合外群不导出、不绑定 runtime、不发送。集合内调用直接读取该次宿主导出文件并以 base64 图片发送，成功时按返回的 QQ 消息 ID 缓存同一字节，随后清理宿主导出；失败时静默返回。
 
@@ -689,7 +689,7 @@ graph/tools.py、graph/agents.py、graph/nodes.py 与 handlers/dialogue.py 之�
 | hatsume/plugins/hatsume-plugin/config.py | 加载 .env.prod；定义机器人身份、非模型服务凭证，以及队列、限流、图片、记忆、Todo、Timer 与 Skill 常量。模型配置改为读取运行数据 YAML。文档只记录变量名，不记录真实值。 |
 | hatsume/plugins/hatsume-plugin/group_runtime.py | 校验正整数群号；提供稳定 GroupRuntimeRegistry、目标群 Bot 发现/绑定、当前可路由群快照、task-local 绑定、每群图锁和全部群关机清理。 |
 | hatsume/plugins/hatsume-plugin/state.py | 定义带必需 group_id 的 ConversationState；每个 runtime 各自拥有 chat_peers、idle/pending/human 队列、图任务、限流时间、回复回调和记录上下文；并持有 chat_peers 键格式的唯一实现 peer_session_id()。 |
-| hatsume/plugins/hatsume-plugin/models.py | 修补 LangChain OpenAI 消息转换以保留 reasoning_content 与 thought_signature；保留各角色工厂函数入口，按 YAML 配置创建聊天、System One、Embedding 与 SenseNova 图片客户端。 |
+| hatsume/plugins/hatsume-plugin/models.py | 修补 LangChain OpenAI 消息转换以保留 reasoning_content 与 thought_signature；保留各角色工厂函数入口，按 YAML 配置创建聊天、System One、Embedding 与 OpenAI 图片生成/编辑客户端。 |
 | hatsume/plugins/hatsume-plugin/model_config.py | 校验 providers.yml 与 models.yml、读取独立快照、脱敏查询、串行化更新并原子写入 0600 文件；不依赖 NoneBot 或模型 SDK。 |
 | hatsume/plugins/hatsume-plugin/model_factory.py | 明确选择 OpenAI Chat Completions、Responses 或 Google GenAI SDK；按 API 转换选项并创建 Embedding。 |
 | hatsume/plugins/hatsume-plugin/model_commands.py | /model 与 /provider 的解析、持久化配置和聊天 API 检查；聊天命令不接受 Key 参数。 |
