@@ -33,9 +33,12 @@ policy in `hatsume/plugins/hatsume-plugin/graph/context.py`.
 - After the first complete agent invocation within `ai_node`, if the last
   attempted tool is not `send_text` (including no tool calls), append a
   `chat_loop / send_text_completion_check` runtime event and continue once.
-  The reminder asks 初芽 to reconsider whether `send_text` is needed, not to
-  send unconditionally. Synthetic event receivers are ignored. A final failed
-  or invalid-text `send_text` attempt still suppresses this reminder. Tracking is
+  If the last attempted tool name starts with `send_` (for example
+  `send_text`, `send_image`, `send_video`, `send_voice`, or `send_file`), no
+  reminder is appended. Otherwise, the reminder asks 初芽 to reconsider
+  whether `send_text` is needed, not to send unconditionally. Synthetic event
+  receivers are ignored. A final failed or invalid-text `send_text` attempt
+  still suppresses this reminder. Tracking is
   independent of history compaction and excludes prior invocations' tools.
   If MCP tools were requested, the event is included in that same MCP
   continuation rather than creating a separate pass. The existing no-`send_text`

@@ -51,10 +51,10 @@ class SendTextFirstMiddleware(AgentMiddleware):
         self._completion_checked = True
         print(
             f"[初芽] first invocation completed last_tool={self._last_tool_name!r} "
-            f"send_text_check={self._last_tool_name != 'send_text'}",
+            f"send_tool_check={not (self._last_tool_name and self._last_tool_name.startswith('send_'))}",
             flush=True,
         )
-        if self._last_tool_name == "send_text":
+        if self._last_tool_name and self._last_tool_name.startswith("send_"):
             return []
         return event_messages(RuntimeEvent(
             event_type="chat_loop",

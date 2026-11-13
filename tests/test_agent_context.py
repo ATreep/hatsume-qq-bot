@@ -225,16 +225,22 @@ class ContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(gate.send_text_invocations, 1)
         self.assertEqual(gate.completion_reminder(123), [])
 
-    async def test_completion_event_skips_final_send_even_if_failed(self):
-        for asynchronous in (False, True):
-            gate = self.chat_loop.SendTextFirstMiddleware()
-            request = SimpleNamespace(tool_call={"name": "send_text", "id": "failed"})
-            with self.assertRaisesRegex(RuntimeError, "failed"):
+    async def test_completion_event_skips_all_send_tools_even_if_failed(self):
+        for send_name in ("send_text", "send_image", "send_video", "send_voice", "send_file"):
+            for asynchronous in (False, True):
+                gate = self.chat_loop.SendTextFirstMiddleware()
+                first_request = SimpleNamespace(tool_call={"name": "send_text", "id": "first"})
                 if asynchronous:
-                    await gate.awrap_tool_call(request, AsyncMock(side_effect=RuntimeError("failed")))
+                    await gate.awrap_tool_call(first_request, AsyncMock(return_value="sent"))
                 else:
-                    gate.wrap_tool_call(request, Mock(side_effect=RuntimeError("failed")))
-            self.assertEqual(gate.completion_reminder(123), [])
+                    gate.wrap_tool_call(first_request, Mock(return_value="sent"))
+                request = SimpleNamespace(tool_call={"name": send_name, "id": "failed"})
+                with self.assertRaisesRegex(RuntimeError, "failed"):
+                    if asynchronous:
+                        await gate.awrap_tool_call(request, AsyncMock(side_effect=RuntimeError("failed")))
+                    else:
+                        gate.wrap_tool_call(request, Mock(side_effect=RuntimeError("failed")))
+                self.assertEqual(gate.completion_reminder(123), [])
 
     def test_completion_event_without_tools_and_ignores_receiver(self):
         gate = self.chat_loop.SendTextFirstMiddleware()
