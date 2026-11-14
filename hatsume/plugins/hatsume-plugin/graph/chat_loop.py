@@ -60,7 +60,7 @@ class SendTextFirstMiddleware(AgentMiddleware):
             event_type="chat_loop",
             group_id=group_id,
             source="send_text_completion_check",
-            text="初芽，请再次检查是否需要调用 send_text 工具；如果无需发送内容，可以直接结束。",
+            text="初芽，请再次检查是否需要调用 send_text 工具；如果已经发送了所有相关内容，或无需发送内容，可以直接结束。",
             payload={"last_tool_name": self._last_tool_name},
         ))
 
